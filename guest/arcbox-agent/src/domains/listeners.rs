@@ -13,6 +13,16 @@ use std::path::Path;
 /// `st` column value of a listening socket.
 const TCP_LISTEN: &str = "0A";
 
+/// Socket identities detect a replacement listener even when its port is unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Snapshot(BTreeSet<(u16, u64)>);
+
+impl Snapshot {
+    pub(super) fn ports(&self) -> BTreeSet<u16> {
+        self.0.iter().map(|(port, _)| *port).collect()
+    }
+}
+
 /// The ports listened on at an address the container's IPv4 address
 /// reaches, read through its init process `pid`.
 ///
@@ -20,7 +30,7 @@ const TCP_LISTEN: &str = "0A";
 /// `SandboxKey`) both before and after the read: an init process that
 /// switched namespaces, as `nsenter -t 1 -n` does, would otherwise show
 /// another namespace's sockets as the container's.
-pub async fn read(pid: u32, netns: &Path) -> io::Result<BTreeSet<u16>> {
+pub(super) async fn read(pid: u32, netns: &Path) -> io::Result<Snapshot> {
     let proc = format!("/proc/{pid}");
     in_namespace(&proc, netns).await?;
     let tcp = tokio::fs::read_to_string(format!("{proc}/net/tcp")).await?;
@@ -49,23 +59,23 @@ async fn in_namespace(proc: &str, netns: &Path) -> io::Result<()> {
 /// So are IPv6 listeners bound to a specific IPv6 address, which IPv4
 /// traffic never arrives at; `::` counts, since Linux binds it dual-stack
 /// unless the socket opts out.
-fn reachable(tcp: &str, tcp6: &str) -> BTreeSet<u16> {
-    let v4 = listening(tcp).filter_map(|(addr, port)| {
+fn reachable(tcp: &str, tcp6: &str) -> Snapshot {
+    let v4 = listening(tcp).filter_map(|(addr, port, inode)| {
         let ip = parse_v4(addr)?;
-        (!ip.is_loopback()).then_some(port)
+        (!ip.is_loopback()).then_some((port, inode))
     });
-    let v6 = listening(tcp6).filter_map(|(addr, port)| {
+    let v6 = listening(tcp6).filter_map(|(addr, port, inode)| {
         let ip = parse_v6(addr)?;
         let reachable =
             ip.is_unspecified() || ip.to_ipv4_mapped().is_some_and(|v4| !v4.is_loopback());
-        reachable.then_some(port)
+        reachable.then_some((port, inode))
     });
-    v4.chain(v6).collect()
+    Snapshot(v4.chain(v6).collect())
 }
 
-/// `(hex address, port)` of every listening socket in a `/proc/net/tcp*`
+/// `(hex address, port, inode)` of every listening socket in a `/proc/net/tcp*`
 /// table.
-fn listening(table: &str) -> impl Iterator<Item = (&str, u16)> {
+fn listening(table: &str) -> impl Iterator<Item = (&str, u16, u64)> {
     table.lines().skip(1).filter_map(|line| {
         let mut fields = line.split_whitespace();
         let local = fields.nth(1)?;
@@ -74,7 +84,8 @@ fn listening(table: &str) -> impl Iterator<Item = (&str, u16)> {
             return None;
         }
         let (addr, port) = local.split_once(':')?;
-        Some((addr, u16::from_str_radix(port, 16).ok()?))
+        let inode = fields.nth(5)?.parse().ok()?;
+        Some((addr, u16::from_str_radix(port, 16).ok()?, inode))
     })
 }
 
@@ -138,15 +149,25 @@ mod tests {
             ("000080FE000000000000000001000000:2AF8", "0A"), // [fe80::1]:11000
         ]);
         assert_eq!(
-            reachable(&tcp, &tcp6),
+            reachable(&tcp, &tcp6).ports(),
             BTreeSet::from([3000, 4000, 5000, 10000])
         );
     }
 
     #[test]
     fn nothing_listening_and_garbage_yield_nothing() {
-        assert!(reachable(&table(&[]), &table(&[])).is_empty());
+        assert!(reachable(&table(&[]), &table(&[])).ports().is_empty());
         let garbage = format!("{HEADER}\n   0: nonsense\n   1: 00000000:ZZZZ 00000000:0000 0A\n");
-        assert!(reachable(&garbage, &garbage).is_empty());
+        assert!(reachable(&garbage, &garbage).ports().is_empty());
+    }
+
+    #[test]
+    fn rebinding_the_same_port_changes_the_snapshot() {
+        let old = table(&[("00000000:0BB8", "0A")]);
+        let new = old.replace("10000", "20000");
+        let old = reachable(&old, &table(&[]));
+        let new = reachable(&new, &table(&[]));
+        assert_eq!(old.ports(), new.ports());
+        assert_ne!(old, new);
     }
 }

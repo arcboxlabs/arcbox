@@ -104,28 +104,35 @@ The machine root export stores oversized Mac attributes in `.arcbox-xattrs` besi
 
 ## Container Domains
 
-`http://<container>.arcbox.local` (and `<service>.<project>.arcbox.local`)
-resolves to the container's IP, and the agent makes port 80 there reach the
-port the container actually serves (`domains/`). The HTTP port is, in order:
-the `dev.arcbox.http-port` label (a port number, or `off`); 80 when the
-container listens on it; the lowest listening port the container exposes;
-the lowest listening port. 443 never counts. Listeners are read from
-`/proc/<pid>/net/tcp{,6}` of the container's init process, repeatedly for two
-minutes after `start` because servers bind late. The agent then DNATs port 80
-of each of the container's IPv4 addresses to that port in nat PREROUTING,
-tagged `arcbox-domain:<container id>`, removes the rules on `die`/`destroy`,
-and sweeps a previous agent's at startup. A rule matches the destination
-only, so it serves both the Mac (routed in over the bridge NIC) and sibling
-containers (switched on a Docker bridge, which reaches iptables through the
-kernel's built-in `br_netfilter`).
+`http://<container>.arcbox.local` and `<service>.<project>.arcbox.local`
+resolve to a container IPv4 address. The agent discovers HTTP with a bounded
+`HEAD /` request that includes the container domain in `Host`. A valid HTTP
+response is required; listening TCP ports alone do not identify web services.
+The agent tries port 80, then exposed listeners, then other listeners in
+ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
+to a port number to override discovery, or `off` to disable managed HTTP.
 
-`https://` works the same way once the daemon has written its local CA to
-`/arcbox/tls/` (`arcbox-local-ca`): port 443 of each container with an HTTP
-port is REDIRECTed to a proxy on port 61443 of the VM's namespace, unless the
-container listens on 443 itself. The proxy finds the container the client
-dialled through conntrack, presents a certificate minted for the SNI name, and
-relays plain HTTP/1.1 to the container's HTTP port. Port 61443 is therefore
-not available to container publishes.
+Native HTTPS on 443 or 8443 takes precedence over automatic TLS termination.
+Set `dev.arcbox.https-port` to another native TLS port, or `off` to disable
+managed HTTPS. Native HTTPS preserves the application's certificate. Otherwise,
+a selected HTTP service receives HTTPS through the guest proxy on port 61443.
+The proxy obtains a certificate for the client's SNI through the host signing
+channel, then relays HTTP/1.1. The CA private key stays in the macOS Keychain;
+only the public root is shared in `/arcbox/tls/`. Port 61443 is reserved for
+the proxy and cannot be published by a container.
+
+Listeners are read from `/proc/<pid>/net/tcp{,6}` with startup backoff, then
+on a five-second schedule while the container runs. Socket identity changes
+invalidate successful protocol probes, including replacement listeners on
+the same port. Failed discovery probes retry. Failed proxy upstream connects
+also invalidate discovery. Closed listeners lose their managed routes.
+
+The agent installs destination-only rules in nat PREROUTING for every
+container IPv4 address, tagged `arcbox-domain:<container id>`. HTTP and native
+HTTPS use DNAT; automatic TLS termination uses REDIRECT. The agent removes
+rules on `die`/`destroy` and sweeps stale rules at startup. The rules serve
+both routed Mac traffic and switched sibling traffic through the kernel's
+built-in `br_netfilter`.
 
 ## Cross-Compilation
 

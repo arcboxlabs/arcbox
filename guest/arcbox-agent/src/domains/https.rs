@@ -106,10 +106,19 @@ async fn relay(client: TcpStream, certificates: &Certificates, ports: &HttpPorts
     .await
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
-    let mut upstream = tokio::time::timeout(TIMEOUT, TcpStream::connect((container, http_port)))
+    let upstream = tokio::time::timeout(TIMEOUT, TcpStream::connect((container, http_port)))
         .await
-        .context("connecting to the container timed out")?
-        .with_context(|| format!("connecting to {container}:{http_port}"))?;
+        .context("connecting to the container timed out")
+        .and_then(|result| {
+            result.with_context(|| format!("connecting to {container}:{http_port}"))
+        });
+    let mut upstream = match upstream {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            ports.route(&[container], None);
+            return Err(error);
+        }
+    };
     tokio::io::copy_bidirectional(&mut tls, &mut upstream).await?;
     Ok(())
 }

@@ -31,6 +31,8 @@ pub(super) struct Routes {
 struct Tracked {
     facts: ContainerFacts,
     scans: Scans,
+    probes: probe::Cache,
+    selected: SelectedRoutes,
     /// The rules last installed for the container.
     installed: Vec<NatRule>,
 }
@@ -76,7 +78,7 @@ impl Routes {
             }
         };
         loop {
-            let due = self.containers.values().filter_map(|c| c.scans.next).min();
+            let due = self.containers.values().map(|c| c.scans.next).min();
             tokio::select! {
                 () = cancel.cancelled() => break,
                 command = inbox.recv() => match command {
@@ -109,6 +111,8 @@ impl Routes {
         let tracked = Tracked {
             facts,
             scans: Scans::starting(Instant::now()),
+            probes: probe::Cache::default(),
+            selected: SelectedRoutes::default(),
             installed,
         };
         self.containers.insert(tracked.facts.id.clone(), tracked);
@@ -127,12 +131,12 @@ impl Routes {
     async fn scan_due(&mut self) {
         let now = Instant::now();
         for tracked in self.containers.values_mut() {
-            if tracked.scans.next.is_none_or(|due| due > now) {
+            if tracked.scans.next > now {
                 continue;
             }
             tracked.scans.advance(now);
             let id = tracked.facts.id.as_str();
-            let listening = match listeners::read(tracked.facts.pid, &tracked.facts.netns).await {
+            let snapshot = match listeners::read(tracked.facts.pid, &tracked.facts.netns).await {
                 Ok(listening) => listening,
                 Err(e) => {
                     // An exiting container (its die event follows) or an
@@ -141,24 +145,26 @@ impl Routes {
                     continue;
                 }
             };
-            // A server between two binds lists nothing: keep what it served.
-            if listening.is_empty()
-                && tracked.facts.pin.is_none()
-                && tracked.facts.https_pin.is_none()
+            tracked.probes.observe(&snapshot);
+            if let Some(port) = tracked.selected.terminated_port()
+                && tracked
+                    .facts
+                    .ips()
+                    .iter()
+                    .any(|ip| self.ports.get(*ip) != Some(port))
             {
-                continue;
+                // The proxy removes its mapping when the upstream connect fails.
+                tracked.probes.invalidate();
             }
+            let listening = snapshot.ports();
             let mut native = BTreeSet::new();
             if tracked.facts.https_pin.is_none() {
                 for port in [HTTPS_PORT, ALT_HTTPS_PORT] {
                     if listening.contains(&port)
-                        && probe::responds(
-                            tracked.facts.ips()[0],
-                            port,
-                            &tracked.facts.hostname,
-                            true,
-                        )
-                        .await
+                        && tracked
+                            .probes
+                            .responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, true)
+                            .await
                     {
                         native.insert(port);
                     }
@@ -170,7 +176,9 @@ impl Routes {
                     http_port::choose(tracked.facts.pin, &candidates, &tracked.facts.exposed);
                 let Some(port) = choice else { break None };
                 if tracked.facts.pin.is_some()
-                    || probe::responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, false)
+                    || tracked
+                        .probes
+                        .responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, false)
                         .await
                 {
                     break Some(port);
@@ -181,26 +189,27 @@ impl Routes {
             if !self.https && selected.terminated_port().is_some() {
                 selected.https = None;
             }
+            let wanted = tracked.facts.rules(selected);
+            if wanted != tracked.installed {
+                match self.rules.replace(id, wanted.clone()).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            container_id = id,
+                            ?selected,
+                            ?listening,
+                            "container domain rerouted"
+                        );
+                        tracked.installed = wanted;
+                    }
+                    Err(e) => {
+                        tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain");
+                        continue;
+                    }
+                }
+            }
             self.ports
                 .route(tracked.facts.ips(), selected.terminated_port());
-            let wanted = tracked.facts.rules(selected);
-            if wanted == tracked.installed {
-                continue;
-            }
-            match self.rules.replace(id, wanted.clone()).await {
-                Ok(()) => {
-                    tracing::info!(
-                        container_id = id,
-                        ?selected,
-                        ?listening,
-                        "container domain rerouted"
-                    );
-                    tracked.installed = wanted;
-                }
-                Err(e) => {
-                    tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain");
-                }
-            }
+            tracked.selected = selected;
         }
     }
 }

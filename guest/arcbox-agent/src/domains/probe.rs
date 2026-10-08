@@ -1,5 +1,6 @@
 //! Protocol discovery against the container address, outside PREROUTING NAT.
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -16,6 +17,43 @@ use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, rustls};
 
 const TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Cache only successful probes until socket identities or container facts change.
+#[derive(Default)]
+pub(super) struct Cache {
+    listeners: Option<super::listeners::Snapshot>,
+    verified: BTreeSet<(u16, bool)>,
+}
+
+impl Cache {
+    pub(super) fn observe(&mut self, listeners: &super::listeners::Snapshot) {
+        if self.listeners.as_ref() != Some(listeners) {
+            self.invalidate();
+            self.listeners = Some(listeners.clone());
+        }
+    }
+
+    pub(super) fn invalidate(&mut self) {
+        self.verified.clear();
+    }
+
+    pub(super) async fn responds(
+        &mut self,
+        ip: Ipv4Addr,
+        port: u16,
+        name: &str,
+        tls: bool,
+    ) -> bool {
+        if self.verified.contains(&(port, tls)) {
+            return true;
+        }
+        if responds(ip, port, name, tls).await {
+            self.verified.insert((port, tls));
+            return true;
+        }
+        false
+    }
+}
 
 /// A response proves the protocol, including redirects and application errors.
 pub(super) async fn responds(ip: Ipv4Addr, port: u16, name: &str, tls: bool) -> bool {
@@ -180,5 +218,44 @@ mod tests {
         });
         assert!(responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", true).await);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_probes_retry_and_verified_probes_wait_for_invalidation() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for response in [
+                &b"-ERR starting\r\n"[..],
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..],
+            ] {
+                reply(listener.accept().await.unwrap().0, response).await;
+            }
+        });
+        let mut cache = Cache::default();
+        cache.observe(&super::super::listeners::Snapshot::default());
+        assert!(
+            !cache
+                .responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", false)
+                .await
+        );
+        assert!(
+            cache
+                .responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", false)
+                .await
+        );
+        server.await.unwrap();
+        cache.observe(&super::super::listeners::Snapshot::default());
+        assert!(
+            cache
+                .responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", false)
+                .await
+        );
+        cache.invalidate();
+        assert!(
+            !cache
+                .responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", false)
+                .await
+        );
     }
 }

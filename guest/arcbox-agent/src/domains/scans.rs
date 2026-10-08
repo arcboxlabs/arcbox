@@ -3,14 +3,11 @@
 //! Right after `start` a server may not have bound yet, and dev servers
 //! commonly take seconds to, so the listeners are read at the start, then
 //! after [`FIRST_RESCAN`], each delay doubling up to [`MAX_SCAN_INTERVAL`],
-//! until [`SCAN_WINDOW`] has passed.
+//! then continue at that interval until the container stops.
 
 use std::time::Duration;
 
 use tokio::time::Instant;
-
-/// How long after a container starts its listeners are rescanned.
-const SCAN_WINDOW: Duration = Duration::from_secs(120);
 
 /// Delay before the first rescan.
 const FIRST_RESCAN: Duration = Duration::from_millis(250);
@@ -21,9 +18,8 @@ const MAX_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// One container's scan schedule.
 #[derive(Debug)]
 pub(super) struct Scans {
-    window_end: Instant,
-    /// When the next scan is due; `None` once the window has closed.
-    pub(super) next: Option<Instant>,
+    /// When the next scan is due.
+    pub(super) next: Instant,
     interval: Duration,
 }
 
@@ -31,8 +27,7 @@ impl Scans {
     /// A schedule whose first scan is due at `now`.
     pub(super) fn starting(now: Instant) -> Self {
         Self {
-            window_end: now + SCAN_WINDOW,
-            next: Some(now),
+            next: now,
             interval: FIRST_RESCAN,
         }
     }
@@ -41,7 +36,7 @@ impl Scans {
     pub(super) fn advance(&mut self, now: Instant) {
         let next = now + self.interval;
         self.interval = (self.interval * 2).min(MAX_SCAN_INTERVAL);
-        self.next = (next <= self.window_end).then_some(next);
+        self.next = next;
     }
 }
 
@@ -50,11 +45,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scans_slow_down_and_stop_when_the_window_closes() {
+    fn scans_slow_down_and_continue_after_two_minutes() {
         let start = Instant::now();
         let mut scans = Scans::starting(start);
         let mut taken = Vec::new();
-        while let Some(due) = scans.next {
+        for _ in 0..40 {
+            let due = scans.next;
             taken.push(due.duration_since(start));
             scans.advance(due);
         }
@@ -73,6 +69,7 @@ mod tests {
         );
         assert!(taken.windows(2).all(|w| w[0] + MAX_SCAN_INTERVAL >= w[1]));
         let last = *taken.last().unwrap();
-        assert!(last <= SCAN_WINDOW && last + MAX_SCAN_INTERVAL > SCAN_WINDOW);
+        assert!(last > Duration::from_secs(120));
+        assert_eq!(scans.next - start, last + MAX_SCAN_INTERVAL);
     }
 }
