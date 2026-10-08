@@ -1484,7 +1484,8 @@ impl Runtime {
                 return Ok(());
             }
         }
-        self.stop_port_forwarding_by_id(container_id).await;
+        self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+            .await?;
 
         let mut added_count = 0usize;
         let mut bind_errors: Vec<String> = Vec::new();
@@ -1535,7 +1536,8 @@ impl Runtime {
         // "exposed on localhost" while nothing is actually listening. Docker
         // multi-port publish stays best-effort as long as one port binds.
         if added_count == 0 && !bindings.is_empty() {
-            self.stop_port_forwarding_by_id(container_id).await;
+            self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+                .await?;
             return Err(CoreError::Machine(format!(
                 "no requested port could be bound: {}",
                 bind_errors.join("; ")
@@ -1619,21 +1621,9 @@ impl Runtime {
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
         #[cfg(target_os = "macos")]
         {
-            let mut authority = self.inbound_rules.write().await;
-            if let Some((machine_name, rules)) = authority.get(container_id) {
-                let mut guard = self.inbound_listeners.write().await;
-                if let Some(slot) = guard.get_mut(machine_name) {
-                    for (host_ip, host_port, _, proto) in rules.iter().copied() {
-                        slot.current.remove_rule(host_ip, host_port, proto).await;
-                    }
-                }
-                tracing::debug!(
-                    machine = %machine_name,
-                    container_id,
-                    "Stopped port forwarding for container",
-                );
-                authority.remove(container_id);
-            }
+            self.stop_inbound_rules(container_id, None)
+                .await
+                .expect("unconditional cleanup cannot reject an incarnation");
         }
 
         #[cfg(not(target_os = "macos"))]

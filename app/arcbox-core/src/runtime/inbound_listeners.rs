@@ -1,6 +1,6 @@
 //! Owns listener managers across VM replacement and canceled cleanup.
 
-use super::{Result, Runtime};
+use super::{CoreError, Result, Runtime};
 use arcbox_engine::vm::VmIncarnation;
 use arcbox_net::darwin::inbound_relay::InboundListenerManager;
 use std::collections::hash_map::Entry;
@@ -74,6 +74,34 @@ impl Runtime {
                 );
                 slot.finish_retiring().await;
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn stop_inbound_rules(
+        &self,
+        container_id: &str,
+        expected: Option<(&str, &VmIncarnation)>,
+    ) -> Result<()> {
+        let mut rules = self.inbound_rules.write().await;
+        let mut slots = self.inbound_listeners.write().await;
+        if let Some((machine, incarnation)) = expected {
+            if !slots
+                .get(machine)
+                .is_some_and(|slot| slot.incarnation == *incarnation)
+            {
+                return Err(CoreError::Machine(
+                    "inbound listener incarnation changed".into(),
+                ));
+            }
+        }
+        if let Some((machine, installed)) = rules.get(container_id) {
+            if let Some(slot) = slots.get_mut(machine) {
+                for (ip, port, _, protocol) in installed {
+                    slot.current.remove_rule(*ip, *port, *protocol).await;
+                }
+            }
+            rules.remove(container_id);
         }
         Ok(())
     }

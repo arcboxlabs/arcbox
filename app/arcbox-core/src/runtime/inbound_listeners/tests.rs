@@ -201,3 +201,51 @@ async fn canceled_retirement_and_shutdown_keep_cleanup_owners() {
         assert!(stale_rx.is_closed());
     }
 }
+
+#[tokio::test]
+async fn stale_forwarding_cannot_remove_or_bind_through_a_replacement_slot() {
+    let (runtime, _dir) = runtime();
+    let (old_tx, _old_rx) = mpsc::channel(4);
+    runtime
+        .adopt_test_manager("test", InboundListenerManager::new(old_tx))
+        .await;
+    let old = runtime.inbound_listeners.read().await["test"]
+        .incarnation
+        .clone();
+    let (new_tx, mut new_rx) = mpsc::channel(4);
+    let mut fresh = InboundListenerManager::new(new_tx);
+    let port = fresh
+        .add_rule(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    runtime.adopt_test_manager("test", fresh).await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test".into(),
+            vec![(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp)],
+        ),
+    );
+    for bindings in [vec![], vec![("127.0.0.1".into(), 0, 80, "tcp".into())]] {
+        assert!(
+            runtime
+                .start_port_forwarding_inbound("test", "web", &bindings, &old)
+                .await
+                .is_err()
+        );
+        assert!(runtime.inbound_rules.read().await.contains_key("web"));
+    }
+    let _stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), new_rx.recv())
+            .await
+            .unwrap(),
+        Some(InboundCommand::TcpAccepted {
+            container_port: 80,
+            ..
+        })
+    ));
+    runtime.stop_port_forwarding_all().await;
+}
