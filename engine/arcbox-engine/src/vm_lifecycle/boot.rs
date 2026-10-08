@@ -51,9 +51,19 @@ impl LifecycleShared {
             self.spawn_route_reconciler();
             self.wait_for_storage_agent(timeout, &cancelled).await?;
             // The readiness handshake already synchronizes the guest clock through Ping.
-            if let Err(error) = Arc::clone(&self.machine_manager)
-                .record_bridge_address_with_cancel(self.machine_name.clone(), &cancelled)
-                .await
+            if let Err(error) = async {
+                let expected = self
+                    .machine_manager
+                    .network_incarnation(&self.machine_name)?;
+                Arc::clone(&self.machine_manager)
+                    .record_bridge_address_with_cancel(
+                        self.machine_name.clone(),
+                        expected,
+                        &cancelled,
+                    )
+                    .await
+            }
+            .await
             {
                 if cancelled.is_cancelled() {
                     return Err(error);

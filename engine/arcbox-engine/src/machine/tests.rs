@@ -1698,3 +1698,126 @@ fn network_publication_reads_the_guarded_record_and_rejects_replacement() {
             .is_err()
     );
 }
+
+#[test]
+fn bridge_publication_rejects_stopping_and_replaced_runs_in_memory_and_storage() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "bridge");
+    manager
+        .persistence
+        .save(&manager.get("bridge").unwrap())
+        .unwrap();
+    let original = Some("192.168.64.2".to_owned());
+    let changed = Some("192.168.64.3".to_owned());
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    manager
+        .publish_bridge_address("bridge", &expected, original.as_deref(), &cancelled)
+        .unwrap();
+    let addresses = || {
+        (
+            manager.get("bridge").unwrap().bridge_ip_address,
+            manager
+                .persistence
+                .load("bridge")
+                .unwrap()
+                .bridge_ip_address,
+        )
+    };
+    for state in [MachineState::Stopping, MachineState::Stopped] {
+        manager
+            .machines
+            .write()
+            .unwrap()
+            .get_mut("bridge")
+            .unwrap()
+            .state = state;
+        assert!(
+            manager
+                .publish_bridge_address("bridge", &expected, changed.as_deref(), &cancelled)
+                .is_err()
+        );
+        assert_eq!(addresses(), (original.clone(), original.clone()));
+    }
+    let (replacement, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("bridge").unwrap();
+        machine.state = MachineState::Running;
+        machine.vm_id = replacement;
+    }
+    assert!(
+        manager
+            .publish_bridge_address("bridge", &expected, changed.as_deref(), &cancelled)
+            .is_err()
+    );
+    assert_eq!(addresses(), (original.clone(), original));
+    manager
+        .publish_bridge_address("bridge", &current, changed.as_deref(), &cancelled)
+        .unwrap();
+    assert_eq!(addresses(), (changed.clone(), changed.clone()));
+    cancelled.cancel();
+    assert!(
+        manager
+            .publish_bridge_address("bridge", &current, None, &cancelled)
+            .is_err()
+    );
+    assert_eq!(addresses(), (changed.clone(), changed));
+}
+
+#[tokio::test]
+async fn aborted_bridge_query_retains_hold_until_native_connect_drains() {
+    use std::{io::Read as _, os::fd::IntoRawFd as _, os::unix::net::UnixStream};
+
+    let directory = tempdir().unwrap();
+    let manager = Arc::new(test_machine_manager(directory.path()));
+    let expected = model_running_machine(&manager, "bridge");
+    manager
+        .persistence
+        .save(&manager.get("bridge").unwrap())
+        .unwrap();
+    let hold = manager.host_hold_expected("bridge", &expected).unwrap();
+    let (host, mut guest) = UnixStream::pair().unwrap();
+    guest
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let caller = tokio::spawn(async move {
+        query_bridge_info(
+            hold,
+            &tokio_util::sync::CancellationToken::new(),
+            move || {
+                started.send(()).unwrap();
+                finish.recv().unwrap();
+                crate::agent_client::AgentClient::from_fd_blocking(7, host.into_raw_fd())
+            },
+        )
+        .await
+    });
+    ready.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(!manager.host_holds.wait_released("bridge", Duration::ZERO));
+    release.send(()).unwrap();
+    let drained_manager = Arc::clone(&manager);
+    tokio::task::spawn_blocking(move || {
+        assert!(
+            drained_manager
+                .host_holds
+                .wait_released("bridge", Duration::from_secs(2))
+        );
+        assert_eq!(guest.read(&mut [0; 1]).unwrap(), 0);
+    })
+    .await
+    .unwrap();
+    assert!(manager.get("bridge").unwrap().bridge_ip_address.is_none());
+    assert!(
+        manager
+            .persistence
+            .load("bridge")
+            .unwrap()
+            .bridge_ip_address
+            .is_none()
+    );
+}

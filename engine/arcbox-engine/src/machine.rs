@@ -1261,18 +1261,19 @@ impl MachineManager {
     /// Distro machines record it in their own readiness probe; the System
     /// VM's readiness lives in the lifecycle actor, which calls this once
     /// the agent answers so `default.machine.arcbox.local` can be published from
-    /// the same record as every other machine. Same transport dispatch as
-    /// [`Self::ping_agent`].
+    /// the same record as every other machine. The query holds one physical VM run
+    /// through native connection, RPC cancellation, and guarded publication.
     ///
     /// # Errors
-    /// Returns an error if the machine is not running or the agent is
-    /// unreachable.
+    /// Returns an error if the machine stops, is replaced, or its agent is unreachable.
     pub async fn record_bridge_address(
         self: Arc<Self>,
         machine_name: String,
     ) -> Result<Option<String>> {
+        let expected = self.network_incarnation(&machine_name)?;
         self.record_bridge_address_with_cancel(
             machine_name,
+            expected,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -1281,34 +1282,62 @@ impl MachineManager {
     pub(crate) async fn record_bridge_address_with_cancel(
         self: Arc<Self>,
         machine_name: String,
+        expected: VmIncarnation,
         cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>> {
+        let hold = self.host_hold_expected(&machine_name, &expected)?;
         let manager = Arc::clone(&self);
         let name = machine_name.clone();
-        let agent = tokio::task::spawn_blocking(move || manager.connect_agent(&name))
-            .await
-            .map_err(|error| EngineError::Vm(format!("agent connect task panicked: {error}")))??;
-        let info = agent.get_system_info_with_cancel(cancelled).await?;
+        let connecting_run = expected.clone();
+        let (_hold, info) = query_bridge_info(hold, cancelled, move || {
+            manager.connect_agent_expected(&name, &connecting_run)
+        })
+        .await?;
         let bridge_ip = Some(info.bridge_ip_address).filter(|ip| !ip.is_empty());
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-            if let Some(machine) = machines.get_mut(&machine_name) {
-                machine.bridge_ip_address.clone_from(&bridge_ip);
-            }
-        }
-        if let Err(e) = self.persistence.update(&machine_name, |m| {
-            m.bridge_ip_address.clone_from(&bridge_ip);
-        }) {
-            tracing::warn!(
-                "Failed to persist bridge address for machine '{}': {}",
-                machine_name,
-                e
-            );
-        }
+        self.publish_bridge_address(&machine_name, &expected, bridge_ip.as_deref(), cancelled)?;
         Ok(bridge_ip)
+    }
+
+    fn publish_bridge_address(
+        &self,
+        machine_name: &str,
+        expected: &VmIncarnation,
+        bridge_ip: Option<&str>,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get_mut(machine_name)
+            .ok_or_else(|| EngineError::not_found(machine_name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{machine_name}' is not running"
+            )));
+        }
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || {
+                if cancelled.is_cancelled() {
+                    return Err(EngineError::Machine(
+                        "bridge address query cancelled".into(),
+                    ));
+                }
+                machine.bridge_ip_address = bridge_ip.map(str::to_owned);
+                if let Err(error) = self.persistence.update(machine_name, |saved| {
+                    saved
+                        .bridge_ip_address
+                        .clone_from(&machine.bridge_ip_address);
+                }) {
+                    tracing::warn!(
+                        machine = machine_name,
+                        %error,
+                        "failed to persist bridge address"
+                    );
+                }
+                Ok(())
+            })?
     }
 
     /// Asks a running distro machine's agent to serve the machine's root
@@ -1967,6 +1996,30 @@ impl MachineManager {
         tracing::debug!("Registered mock machine '{}' with CID {}", name, cid);
         Ok(())
     }
+}
+
+async fn query_bridge_info(
+    hold: HostHold,
+    cancelled: &tokio_util::sync::CancellationToken,
+    connect: impl FnOnce() -> Result<crate::agent_client::AgentClient> + Send + 'static,
+) -> Result<(HostHold, arcbox_connect::v1::SystemInfo)> {
+    if cancelled.is_cancelled() {
+        return Err(EngineError::Machine(
+            "bridge address query cancelled".into(),
+        ));
+    }
+    let cancelled = cancelled.child_token();
+    let _cancel_on_drop = cancelled.clone().drop_guard();
+    // Boot can abort the caller; this task retains the hold until native workers finish.
+    tokio::spawn(async move {
+        let agent = tokio::task::spawn_blocking(connect)
+            .await
+            .map_err(|error| EngineError::Vm(format!("agent connect task panicked: {error}")))??;
+        let info = agent.get_system_info_with_cancel(&cancelled).await?;
+        Ok((hold, info))
+    })
+    .await
+    .map_err(|error| EngineError::Vm(format!("bridge address task panicked: {error}")))?
 }
 
 /// The addresses a ready machine reported.

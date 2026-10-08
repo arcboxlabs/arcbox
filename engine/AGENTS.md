@@ -101,6 +101,7 @@ The restructure plan and its locked decisions live in
 
 ## Machine settings
 
+- Pin bridge-address queries to one physical VM run. Retain the expected host hold through native connection and RPC cleanup. Reject stopped or replaced runs before updating memory or persistence.
 - Keep machine web backend selection in `machine::MachineWebPorts`. Preserve omitted updates and inherited clone/archive settings. Persist updates before changing the canonical record. Saved policy does not imply installed routes.
 
 ## Durable writes
