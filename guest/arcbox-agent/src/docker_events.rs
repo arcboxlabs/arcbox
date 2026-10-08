@@ -20,10 +20,30 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::GuestDnsServer;
 use crate::domains::{ContainerFacts, DomainRoutes};
-use crate::publish_mirror::{PublishMirror, pinned_publishes};
+use crate::publish_mirror::{PinnedPublish, PublishMirror, pinned_publishes};
 
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct InspectedContainer {
+    metadata: ContainerMetadata,
+    facts: Option<ContainerFacts>,
+    publishes: Vec<PinnedPublish>,
+}
+
+impl InspectedContainer {
+    async fn load(socket: &Path, id: &str, domain: &Domain) -> anyhow::Result<Self> {
+        let info = docker_get_at(socket, &format!("/containers/{id}/json")).await?;
+        let metadata = ContainerMetadata::from_inspect(&info)
+            .with_context(|| format!("Docker inspect for {id} omitted container identity"))?;
+        anyhow::ensure!(metadata.id == id, "Docker inspect ID does not match {id}");
+        Ok(Self {
+            metadata,
+            facts: ContainerFacts::from_inspect(&info, domain),
+            publishes: pinned_publishes(&info),
+        })
+    }
+}
 
 /// What the watcher keeps in sync for each container.
 pub struct ContainerSync<'a> {
@@ -152,8 +172,17 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
         .collect::<anyhow::Result<_>>()?;
     let mut snapshot = Vec::with_capacity(ids.len());
     for id in &ids {
-        snapshot.push(inspect_container(socket, id).await?);
+        snapshot.push(InspectedContainer::load(socket, id, sync.dns.domain()).await?);
     }
+    let mut facts = Vec::new();
+    let mut untracked = Vec::new();
+    for container in &mut snapshot {
+        match container.facts.take() {
+            Some(fact) => facts.push(fact),
+            None => untracked.push(container.metadata.id.clone()),
+        }
+    }
+    sync.domains.reconcile(facts).await?;
 
     let registry = sync.dns.containers();
     let absent = {
@@ -163,8 +192,8 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
             .filter(|owner| !ids.contains(owner))
             .map(str::to_owned)
             .collect();
-        for (_, metadata) in &snapshot {
-            sync_dns(&mut registry, sync.dns.domain(), metadata)?;
+        for container in &snapshot {
+            sync_dns(&mut registry, sync.dns.domain(), &container.metadata)?;
         }
         // Disable every absent owner before a failed external cleanup can interrupt reconciliation.
         for id in &absent {
@@ -175,8 +204,13 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
     for id in absent {
         forget_container(sync, &id).await?;
     }
-    for (info, metadata) in snapshot {
-        apply_container_routes(sync, &info, &metadata.id).await?;
+    for id in untracked {
+        sync.domains.forget(&id).await?;
+    }
+    for container in snapshot {
+        sync.mirror
+            .apply(&container.metadata.id, &container.publishes)
+            .await?;
     }
 
     tracing::info!(count = ids.len(), "reconciled existing containers");
@@ -188,7 +222,7 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
     let event: serde_json::Value = serde_json::from_str(json_str)?;
 
     if let Some(id) = network_container_id(&event)? {
-        return register_container_by_id(sync, id).await;
+        return register_container_by_id(sync, Path::new(DOCKER_SOCK), id).await;
     }
     if event["Type"].as_str() != Some("container") {
         return Ok(());
@@ -200,7 +234,7 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
     match action {
         "start" | "rename" => {
             anyhow::ensure!(!id_full.is_empty(), "container {action} event omitted ID");
-            register_container_by_id(sync, id_full).await?;
+            register_container_by_id(sync, Path::new(DOCKER_SOCK), id_full).await?;
         }
         "die" | "destroy" => {
             anyhow::ensure!(!id_full.is_empty(), "container {action} event omitted ID");
@@ -242,37 +276,23 @@ async fn forget_container(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Res
 /// Inspects a container and registers its name + IP in the DNS server,
 /// mirrors its host-address-pinned publishes for the inbound relay, and
 /// hands it to the domain routes.
-async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
-    let (info, metadata) = inspect_container(Path::new(DOCKER_SOCK), id).await?;
+async fn register_container_by_id(
+    sync: &mut ContainerSync<'_>,
+    socket: &Path,
+    id: &str,
+) -> anyhow::Result<()> {
+    let container = InspectedContainer::load(socket, id, sync.dns.domain()).await?;
+    let tracked = container.facts.is_some();
+    sync.domains.update(id, container.facts).await?;
     sync_dns(
         &mut *sync.dns.containers().write().await,
         sync.dns.domain(),
-        &metadata,
+        &container.metadata,
     )?;
-    apply_container_routes(sync, &info, &metadata.id).await
-}
-
-async fn inspect_container(
-    socket: &Path,
-    id: &str,
-) -> anyhow::Result<(serde_json::Value, ContainerMetadata)> {
-    let info = docker_get_at(socket, &format!("/containers/{id}/json")).await?;
-    let metadata = ContainerMetadata::from_inspect(&info)
-        .with_context(|| format!("Docker inspect for {id} omitted container identity"))?;
-    anyhow::ensure!(metadata.id == id, "Docker inspect ID does not match {id}");
-    Ok((info, metadata))
-}
-
-async fn apply_container_routes(
-    sync: &mut ContainerSync<'_>,
-    info: &serde_json::Value,
-    id: &str,
-) -> anyhow::Result<()> {
-    match ContainerFacts::from_inspect(info, sync.dns.domain()) {
-        Some(facts) => sync.domains.track(facts)?,
-        None => sync.domains.forget(id).await?,
+    if !tracked {
+        sync.domains.forget(id).await?;
     }
-    sync.mirror.apply(id, &pinned_publishes(info)).await
+    sync.mirror.apply(id, &container.publishes).await
 }
 
 fn sync_dns(

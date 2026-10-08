@@ -64,7 +64,8 @@ pub struct DomainRoutes {
 
 /// Commands processed by the container domain rules task.
 pub enum Command {
-    Track(ContainerFacts),
+    Update(String, Option<ContainerFacts>, oneshot::Sender<()>),
+    Reconcile(Vec<ContainerFacts>, oneshot::Sender<()>),
     Forget(String, oneshot::Sender<anyhow::Result<()>>),
 }
 
@@ -89,12 +90,26 @@ impl DomainRoutes {
         self.services.clone()
     }
 
-    /// Starts following a running container, or invalidates its discovered protocols.
-    pub fn track(&self, facts: ContainerFacts) -> anyhow::Result<()> {
-        self.services.remove(&facts.id);
+    /// Acknowledges replacement of one container's tracking after any active scan finishes.
+    pub async fn update(&self, id: &str, facts: Option<ContainerFacts>) -> anyhow::Result<()> {
+        let (reply, response) = oneshot::channel();
         self.commands
-            .send(Command::Track(facts))
-            .map_err(|_| anyhow::anyhow!("container domain rules task stopped"))
+            .send(Command::Update(id.to_owned(), facts, reply))
+            .map_err(|_| anyhow::anyhow!("container domain rules task stopped"))?;
+        response
+            .await
+            .context("container domain update response was dropped")
+    }
+
+    /// Acknowledges replacement of the complete tracked set after any active scan finishes.
+    pub async fn reconcile(&self, facts: Vec<ContainerFacts>) -> anyhow::Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::Reconcile(facts, reply))
+            .map_err(|_| anyhow::anyhow!("container domain rules task stopped"))?;
+        response
+            .await
+            .context("container domain snapshot response was dropped")
     }
 
     /// Stops following a container and acknowledges removal of every held rule.

@@ -227,6 +227,7 @@ non-obvious invariants and failure signatures.
   last addressed network removes that container's DNS ownership and routes.
   Confirm the Docker event subscription before listing running containers so snapshot-time changes remain buffered.
   A failed listing or rejected subscription must enter the existing reconnect path.
+  Validate every inspect response before applying a reconnect snapshot. Await route-task acknowledgement before publishing snapshot or event DNS changes; an active scan may finish before consuming the update. Retain unavailable owners until rule and mirror cleanup succeeds.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The

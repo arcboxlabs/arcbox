@@ -124,7 +124,7 @@ async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership(
         dns.domain(),
     )
     .unwrap();
-    assert!(domains.track(facts).is_err());
+    assert!(domains.update("owner", Some(facts)).await.is_err());
     let mut sync = ContainerSync {
         dns: &dns,
         mirror: PublishMirror::new("eth0".into()),
@@ -459,6 +459,7 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
             .unwrap();
     }
     let registry = dns.containers();
+    let epoch = registry.read().await.epoch();
     let web = inspect(WEB_ID, "/new-web", "172.17.0.4");
     let (domains, mut commands) = DomainRoutes::test_channel();
     let mut sync = ContainerSync {
@@ -485,6 +486,16 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
             );
             reply(&mut stream, 200, &info.to_string()).await;
         }
+        let crate::domains::Command::Reconcile(facts, reply) = commands.recv().await.unwrap()
+        else {
+            panic!("snapshot must replace actor tracking before publication");
+        };
+        assert_eq!(
+            facts,
+            [ContainerFacts::from_inspect(&web, dns.domain()).unwrap()]
+        );
+        assert_eq!(registry.read().await.epoch(), epoch);
+        reply.send(()).unwrap();
         let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
             panic!("absent owner must be cleaned up");
         };
@@ -503,13 +514,6 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
         ));
         drop(entries);
         reply.send(Ok(())).unwrap();
-        let crate::domains::Command::Track(facts) = commands.recv().await.unwrap() else {
-            panic!("known owner must refresh discovery");
-        };
-        assert_eq!(
-            facts,
-            ContainerFacts::from_inspect(&web, dns.domain()).unwrap()
-        );
         let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
             panic!("unaddressed owner must remove routes");
         };
@@ -549,6 +553,12 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
             let (mut stream, path) = request(&listener).await;
             assert_eq!(path, "GET /containers/json HTTP/1.0\r\n");
             reply(&mut stream, 200, "[]").await;
+            let crate::domains::Command::Reconcile(facts, reply) = commands.recv().await.unwrap()
+            else {
+                panic!("empty snapshot must stop actor tracking before cleanup");
+            };
+            assert_eq!(facts, []);
+            reply.send(()).unwrap();
             let mut cleaned = BTreeSet::new();
             for _ in 0..if fail { 1 } else { 2 } {
                 let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap()
@@ -597,5 +607,67 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
             result.unwrap();
             assert_eq!(registry.read().await.owners().count(), 0);
         }
+    }
+}
+
+#[tokio::test]
+async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_owners_on_cleanup_error()
+ {
+    for ip in ["172.17.0.4", ""] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let socket = tmp.path().join("docker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+        sync_dns(&dns, &inspect(WEB_ID, "/old-web", "172.17.0.2"))
+            .await
+            .unwrap();
+        let registry = dns.containers();
+        let epoch = registry.read().await.epoch();
+        let info = inspect(WEB_ID, "/new-web", ip);
+        let (domains, mut commands) = DomainRoutes::test_channel();
+        let mut sync = ContainerSync {
+            dns: &dns,
+            mirror: PublishMirror::new("eth0".into()),
+            domains,
+        };
+        let server = async {
+            let (mut stream, path) = request(&listener).await;
+            assert_eq!(path, format!("GET /containers/{WEB_ID}/json HTTP/1.0\r\n"));
+            reply(&mut stream, 200, &info.to_string()).await;
+            let crate::domains::Command::Update(id, facts, reply) = commands.recv().await.unwrap()
+            else {
+                panic!("inspect event must await actor replacement");
+            };
+            assert_eq!(id, WEB_ID);
+            assert_eq!(facts, ContainerFacts::from_inspect(&info, dns.domain()));
+            assert_eq!(registry.read().await.epoch(), epoch);
+            reply.send(()).unwrap();
+            if ip.is_empty() {
+                let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap()
+                else {
+                    panic!("unaddressed container must remove rules");
+                };
+                assert_eq!(id, WEB_ID);
+                assert_eq!(registry.read().await.get(WEB_ID).unwrap().address, None);
+                reply.send(Err(anyhow::anyhow!("cleanup failed"))).unwrap();
+            }
+        };
+        let (result, ()) = timeout(Duration::from_secs(2), async {
+            tokio::join!(register_container_by_id(&mut sync, &socket, WEB_ID), server)
+        })
+        .await
+        .unwrap();
+        if ip.is_empty() {
+            assert!(result.unwrap_err().to_string().contains("cleanup failed"));
+        } else {
+            result.unwrap();
+        }
+        let entries = registry.read().await;
+        let expected = ip.parse::<std::net::IpAddr>().ok();
+        assert_eq!(entries.get(WEB_ID).unwrap().address, expected);
+        assert!(matches!(
+            entries.resolve(&"old-web.arcbox.local".parse().unwrap()),
+            Lookup::Unmatched
+        ));
     }
 }

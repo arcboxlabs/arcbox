@@ -82,11 +82,7 @@ impl Routes {
             tokio::select! {
                 () = cancel.cancelled() => break,
                 command = inbox.recv() => match command {
-                    Some(Command::Track(facts)) => self.track(facts),
-                    Some(Command::Forget(id, reply)) => {
-                        // Shutdown can drop the caller while rule cleanup finishes.
-                        let _ = reply.send(self.forget(&id).await);
-                    }
+                    Some(command) => self.handle_command(command).await,
                     None => break,
                 },
                 () = sleep_until(due) => self.scan_due().await,
@@ -94,6 +90,33 @@ impl Routes {
         }
         if let Some(proxy) = proxy {
             let _ = proxy.await;
+        }
+    }
+
+    async fn handle_command(&mut self, command: Command) {
+        // Shutdown can drop the caller while the actor completes a queued command.
+        match command {
+            Command::Update(id, facts, reply) => {
+                match facts {
+                    Some(facts) => self.track(facts),
+                    None => self.untrack(&id),
+                }
+                let _ = reply.send(());
+            }
+            Command::Reconcile(facts, reply) => {
+                let present: BTreeSet<_> = facts.iter().map(|facts| facts.id.clone()).collect();
+                self.containers.retain(|id, _| {
+                    self.services.remove(id);
+                    present.contains(id)
+                });
+                for facts in facts {
+                    self.track(facts);
+                }
+                let _ = reply.send(());
+            }
+            Command::Forget(id, reply) => {
+                let _ = reply.send(self.forget(&id).await);
+            }
         }
     }
 
@@ -114,9 +137,13 @@ impl Routes {
         self.containers.insert(tracked.facts.id.clone(), tracked);
     }
 
-    async fn forget(&mut self, container_id: &str) -> anyhow::Result<()> {
+    fn untrack(&mut self, container_id: &str) {
         self.containers.remove(container_id);
         self.services.remove(container_id);
+    }
+
+    async fn forget(&mut self, container_id: &str) -> anyhow::Result<()> {
+        self.untrack(container_id);
         self.rules.remove(container_id).await
     }
 
@@ -245,6 +272,84 @@ mod tests {
     use super::super::HttpsBackend;
     use super::super::http_port::Pin;
     use super::*;
+
+    #[tokio::test]
+    async fn acknowledged_updates_discard_late_scan_publications_and_refresh_tracking() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for operation in ["reconcile", "update", "remove"] {
+            let (domains, mut commands) = super::super::DomainRoutes::test_channel();
+            let services = domains.services();
+            let mut routes = Routes::new(services.clone());
+            let old: Vec<_> = ["live", "absent", "nofacts"]
+                .map(|id| {
+                    ContainerFacts::from_inspect(
+                        &serde_json::json!({
+                            "Id": id, "Name": format!("/{id}"), "State": { "Pid": 1 },
+                            "NetworkSettings": {
+                                "SandboxKey": "/var/run/docker/netns/old",
+                                "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+                            }
+                        }),
+                        &services.domain,
+                    )
+                    .unwrap()
+                })
+                .into();
+            let selected = SelectedRoutes::choose(Some(3000), None, &BTreeSet::new());
+            for facts in &old {
+                routes.track(facts.clone());
+            }
+            let installed = old[0].rules(selected);
+            routes.containers.get_mut("live").unwrap().installed = installed.clone();
+            routes.containers.get_mut("live").unwrap().selected = selected;
+            let mut changed = old[0].clone();
+            changed.pid = 2;
+            changed.netns = "/var/run/docker/netns/new".into();
+            let request = async {
+                match operation {
+                    "reconcile" => domains.reconcile(vec![changed.clone()]).await,
+                    "update" => domains.update("live", Some(changed.clone())).await,
+                    "remove" => domains.update("live", None).await,
+                    _ => unreachable!(),
+                }
+            };
+            tokio::pin!(request);
+            let command = tokio::select! {
+                biased;
+                result = &mut request => panic!("request completed before the actor: {result:?}"),
+                command = commands.recv() => command.unwrap(),
+            };
+            // A scan already running can publish after the caller queues its update.
+            for facts in &old {
+                services.publish(facts, selected);
+                assert!(services.contains(&facts.id));
+            }
+            poll_fn(|context| {
+                assert!(request.as_mut().poll(context).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            routes.handle_command(command).await;
+            request.await.unwrap();
+
+            assert!(!services.contains("live"), "{operation}");
+            if operation == "remove" {
+                assert!(!routes.containers.contains_key("live"));
+            } else {
+                let current = &routes.containers["live"];
+                assert_eq!(current.facts, changed, "{operation}");
+                assert_eq!(current.selected, SelectedRoutes::default(), "{operation}");
+                assert_eq!(current.installed, installed, "{operation}");
+            }
+            for id in ["absent", "nofacts"] {
+                let retained = operation != "reconcile";
+                assert_eq!(routes.containers.contains_key(id), retained, "{operation}");
+                assert_eq!(services.contains(id), retained, "{operation}");
+            }
+        }
+    }
 
     #[test]
     fn foreign_domains_keep_http_and_native_tls_without_managed_routes() {
