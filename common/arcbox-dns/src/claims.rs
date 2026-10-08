@@ -1,5 +1,7 @@
 //! Pure ownership selection from a consistent set of current resource claims.
+//!
 //! Callers resolve the selected owner to an address and revision in the same snapshot.
+//! Reservations remain present when routes disappear; delegated trees belong to another instance.
 
 use std::cmp::Reverse;
 
@@ -69,22 +71,122 @@ impl Claim {
     }
 }
 
-/// A conflict terminates lookup; callers must not retry a broader wildcard.
+/// A namespace boundary supplied by the authoritative resource or instance registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Boundary {
+    /// Reserves one name without reserving descendants, such as an index apex.
+    ReservedName {
+        /// The complete reserved name.
+        name: Domain,
+        /// The trusted namespace identity permitted to publish this name.
+        authority: String,
+    },
+    /// Reserves the root and every descendant for one local authority.
+    ReservedTree {
+        /// The inclusive root of the reserved namespace.
+        root: Domain,
+        /// The trusted namespace identity permitted to publish within the tree.
+        authority: String,
+    },
+    /// Excludes the root and every descendant from local ownership matching.
+    DelegatedTree {
+        /// The inclusive root of the external namespace.
+        root: Domain,
+        /// The external instance that owns the namespace.
+        instance: String,
+    },
+}
+
+impl Boundary {
+    fn rank(&self, query: &Domain) -> Option<(usize, bool)> {
+        let (root, exact) = match self {
+            Self::ReservedName { name, .. } => (name, true),
+            Self::ReservedTree { root, .. } | Self::DelegatedTree { root, .. } => (root, false),
+        };
+        let descendant = !exact
+            && query
+                .as_str()
+                .strip_suffix(root.as_str())
+                .is_some_and(|prefix| prefix.ends_with('.'));
+        (query == root || descendant).then(|| (root.as_str().split('.').count(), exact))
+    }
+
+    fn delegated(&self) -> bool {
+        matches!(self, Self::DelegatedTree { .. })
+    }
+
+    fn permits(&self, claim: &Claim) -> bool {
+        let base = match &claim.pattern {
+            NamePattern::Exact(base) | NamePattern::Descendants(base) => base,
+        };
+        match self {
+            Self::ReservedName { name, authority } => {
+                authority == &claim.authority
+                    && name == base
+                    && matches!(&claim.pattern, NamePattern::Exact(_))
+            }
+            Self::ReservedTree { authority, .. } => {
+                authority == &claim.authority && self.rank(base).is_some()
+            }
+            Self::DelegatedTree { .. } => false,
+        }
+    }
+
+    fn nearest<'a>(
+        name: &Domain,
+        boundaries: &'a [Self],
+        delegated: bool,
+    ) -> Result<Option<&'a Self>, ()> {
+        let mut ranked = boundaries
+            .iter()
+            .filter(|boundary| boundary.delegated() == delegated)
+            .filter_map(|boundary| boundary.rank(name).map(|rank| (rank, boundary)));
+        let Some((rank, nearest)) = ranked.clone().max_by_key(|(rank, _)| *rank) else {
+            return Ok(None);
+        };
+        if ranked.any(|(other_rank, other)| other_rank == rank && other != nearest) {
+            return Err(());
+        }
+        Ok(Some(nearest))
+    }
+}
+
+/// Every result except `Unmatched` terminates lookup; callers must not retry a broader wildcard.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Resolution<'a> {
     /// One selected resource owns the most specific matching claim.
     Matched(&'a Claim),
-    /// Equally specific claims have incompatible owners or authorities.
+    /// Equally specific claims or boundaries have incompatible identities.
     Conflict,
-    /// No claim matches the query name.
+    /// A local authority reserves the name but has no matching claim.
+    Reserved(&'a Boundary),
+    /// Another instance owns the name, regardless of local claims.
+    Delegated(&'a Boundary),
+    /// No claim or boundary matches the query name.
     Unmatched,
 }
 
 /// Resolves exact names before wildcards, independently of registration order.
+///
 /// Shared Compose service claims select the smallest complete container ID.
-pub fn resolve<'a>(name: &Domain, claims: &'a [Claim]) -> Resolution<'a> {
+/// Delegations block all local claims; the closest reservation restricts authority and pattern scope.
+pub fn resolve<'a>(
+    name: &Domain,
+    claims: &'a [Claim],
+    boundaries: &'a [Boundary],
+) -> Resolution<'a> {
+    let Ok(delegated) = Boundary::nearest(name, boundaries, true) else {
+        return Resolution::Conflict;
+    };
+    if let Some(boundary) = delegated {
+        return Resolution::Delegated(boundary);
+    }
+    let Ok(reserved) = Boundary::nearest(name, boundaries, false) else {
+        return Resolution::Conflict;
+    };
     let ranked = claims
         .iter()
+        .filter(|claim| reserved.is_none_or(|boundary| boundary.permits(claim)))
         .filter_map(|claim| claim.pattern.rank(name).map(|rank| (rank, claim)));
     let Some((rank, winner)) = ranked.clone().max_by_key(|(rank, claim)| {
         (
@@ -92,7 +194,7 @@ pub fn resolve<'a>(name: &Domain, claims: &'a [Claim]) -> Resolution<'a> {
             Reverse((&claim.owner, &claim.authority, &claim.compose_service)),
         )
     }) else {
-        return Resolution::Unmatched;
+        return reserved.map_or(Resolution::Unmatched, Resolution::Reserved);
     };
     let mut candidates = ranked
         .filter(|(candidate_rank, _)| *candidate_rank == rank)

@@ -142,6 +142,9 @@ distribution".
   Conflicting owners must not fall back to a broader wildcard.
   Only generated Compose service claims may share a name; custom claims remain exclusive.
   Resolve the selected owner's address and revision from the same snapshot.
+  Trusted reservations restrict both authority and pattern scope, even without a live route.
+  Delegated trees block every local claim, including more specific exact names.
+  Keep machine-wide lease acquisition outside this pure matcher.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.

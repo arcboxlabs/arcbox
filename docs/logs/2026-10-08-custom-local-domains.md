@@ -35,3 +35,9 @@ The DNS crate passed 24 tests, including seven ownership regressions. Strict all
 The shared host query previously converted malformed JSON into an empty container set. The networking reconciler could then remove every live container's DNS and port state. Listing parsing now rejects malformed JSON, non-array responses, and missing, non-string, or empty IDs. A mixed valid/invalid list also fails instead of publishing a partial snapshot. Only a valid empty array means no running containers.
 
 All 131 Docker library tests and seven handler mock tests passed. The mock suite includes an HTTP 200 response with malformed JSON through the actual pooled guest client. Existing lifecycle fixtures now provide the full inspect fields required by CA injection and canonical-ID requests; response and network-state assertions remain intact. Strict all-target Clippy passed for the Docker crate. This repair does not yet refresh known IDs or add revision-conditional removal.
+
+## Namespace reservations and delegation
+
+The matcher now accepts trusted boundaries alongside claims. An exact reservation protects only its name; a tree reservation includes its root and descendants. A claim must use the reservation's authority and stay within that reservation's pattern scope. A missing resource route remains reserved instead of falling back to an ancestor wildcard, including one from the same authority. Delegated subtrees always exclude local claims. Equally specific incompatible boundaries produce a conflict.
+
+Nine boundary regressions passed, including order independence, duplicate boundaries, nested delegation, and same-authority wildcard exclusion. Strict all-target Clippy passed on the host and Linux musl target. These pure boundaries do not acquire macOS resolver leases or authorize a resource to publish them; runtime and helper integration remain unfinished.

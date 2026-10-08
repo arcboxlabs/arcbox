@@ -15,7 +15,7 @@ fn claim(pattern: &str, owner: &str) -> Claim {
 }
 
 fn lookup<'a>(name: &str, claims: &'a [Claim]) -> Resolution<'a> {
-    resolve(&domain(name), claims)
+    resolve(&domain(name), claims, &[])
 }
 
 fn owner(result: Resolution<'_>) -> &str {
