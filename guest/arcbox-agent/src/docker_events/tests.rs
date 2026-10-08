@@ -4,6 +4,30 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 
+async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
+    let metadata =
+        ContainerMetadata::from_inspect(info).context("test inspect omitted identity")?;
+    super::sync_dns(
+        &mut *dns.containers().write().await,
+        dns.domain(),
+        &metadata,
+    )
+}
+
+const OLD_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const WEB_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const OFFLINE_ID: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+fn inspect(id: &str, name: &str, ip: &str) -> serde_json::Value {
+    serde_json::json!({
+        "Id": id, "Name": name, "State": { "Pid": 1 },
+        "NetworkSettings": {
+            "SandboxKey": "/var/run/docker/netns/test",
+            "Networks": { "bridge": { "IPAddress": ip } }
+        }
+    })
+}
+
 #[test]
 fn network_changes_reinspect_the_container_instead_of_the_network() {
     for action in ["connect", "disconnect"] {
@@ -339,4 +363,239 @@ async fn rejected_subscription_does_not_start_reconciliation() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners() {
+    let listing = serde_json::json!([{ "Id": WEB_ID }, { "Id": OFFLINE_ID }]).to_string();
+    let first = inspect(WEB_ID, "/new-web", "172.17.0.4").to_string();
+    let mut cases = vec![
+        (500, "[]".into(), vec![]),
+        (200, "not json".into(), vec![]),
+        (200, "{}".into(), vec![]),
+        (200, r#"[{"Id":""}]"#.into(), vec![]),
+        (
+            200,
+            serde_json::json!([{ "Id": WEB_ID }, {}]).to_string(),
+            vec![],
+        ),
+    ];
+    for (status, body) in [
+        (500, "{}".into()),
+        (200, "not json".into()),
+        (200, serde_json::json!({ "Id": OFFLINE_ID }).to_string()),
+        (200, inspect(OFFLINE_ID, "", "172.17.0.5").to_string()),
+        (
+            200,
+            inspect(WEB_ID, "/wrong-owner", "172.17.0.5").to_string(),
+        ),
+        (
+            200,
+            serde_json::json!({ "Name": "/missing-id" }).to_string(),
+        ),
+    ] {
+        cases.push((
+            200,
+            listing.clone(),
+            vec![(200, first.clone()), (status, body)],
+        ));
+    }
+    for (status, listing, inspections) in cases {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let socket = tmp.path().join("docker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+        for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
+            sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
+                .await
+                .unwrap();
+        }
+        let registry = dns.containers();
+        let epoch = registry.read().await.epoch();
+        let (domains, mut commands) = DomainRoutes::test_channel();
+        let mut sync = ContainerSync {
+            dns: &dns,
+            mirror: PublishMirror::new("eth0".into()),
+            domains,
+        };
+        let server = async {
+            let (mut stream, path) = request(&listener).await;
+            assert_eq!(path, "GET /containers/json HTTP/1.0\r\n");
+            reply(&mut stream, status, &listing).await;
+            for (id, (status, body)) in [WEB_ID, OFFLINE_ID].into_iter().zip(inspections) {
+                let (mut stream, path) = request(&listener).await;
+                assert_eq!(path, format!("GET /containers/{id}/json HTTP/1.0\r\n"));
+                assert_eq!(registry.read().await.epoch(), epoch);
+                assert!(matches!(
+                    commands.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+                reply(&mut stream, status, &body).await;
+            }
+        };
+        let (result, ()) = timeout(Duration::from_secs(2), async {
+            tokio::join!(reconcile_existing(&mut sync, &socket), server)
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        assert_eq!(registry.read().await.epoch(), epoch);
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let socket = tmp.path().join("docker.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
+        sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
+            .await
+            .unwrap();
+    }
+    let registry = dns.containers();
+    let web = inspect(WEB_ID, "/new-web", "172.17.0.4");
+    let (domains, mut commands) = DomainRoutes::test_channel();
+    let mut sync = ContainerSync {
+        dns: &dns,
+        mirror: PublishMirror::new("eth0".into()),
+        domains,
+    };
+    let server = async {
+        let (mut stream, _) = request(&listener).await;
+        reply(
+            &mut stream,
+            200,
+            &serde_json::json!([{ "Id": WEB_ID }, { "Id": OFFLINE_ID }]).to_string(),
+        )
+        .await;
+        for info in [&web, &inspect(OFFLINE_ID, "/offline", "")] {
+            let (mut stream, path) = request(&listener).await;
+            assert_eq!(
+                path,
+                format!(
+                    "GET /containers/{}/json HTTP/1.0\r\n",
+                    info["Id"].as_str().unwrap()
+                )
+            );
+            reply(&mut stream, 200, &info.to_string()).await;
+        }
+        let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
+            panic!("absent owner must be cleaned up");
+        };
+        assert_eq!(id, OLD_ID);
+        let entries = registry.read().await;
+        assert_eq!(entries.get(OLD_ID).unwrap().address, None);
+        assert_eq!(entries.get(OFFLINE_ID).unwrap().address, None);
+        assert_ne!(entries.get(OFFLINE_ID).unwrap().claims, []);
+        assert!(
+            matches!(entries.resolve(&"new-web.arcbox.local".parse().unwrap()), Lookup::Matched { claim, address, .. }
+            if claim.owner() == WEB_ID && address == "172.17.0.4".parse::<std::net::IpAddr>().unwrap())
+        );
+        assert!(matches!(
+            entries.resolve(&"old-web.arcbox.local".parse().unwrap()),
+            Lookup::Unmatched
+        ));
+        drop(entries);
+        reply.send(Ok(())).unwrap();
+        let crate::domains::Command::Track(facts) = commands.recv().await.unwrap() else {
+            panic!("known owner must refresh discovery");
+        };
+        assert_eq!(
+            facts,
+            ContainerFacts::from_inspect(&web, dns.domain()).unwrap()
+        );
+        let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
+            panic!("unaddressed owner must remove routes");
+        };
+        assert_eq!(id, OFFLINE_ID);
+        reply.send(Ok(())).unwrap();
+    };
+    let (result, ()) = timeout(Duration::from_secs(2), async {
+        tokio::join!(reconcile_existing(&mut sync, &socket), server)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    assert!(registry.read().await.get(OLD_ID).is_none());
+    assert!(registry.read().await.get(OFFLINE_ID).is_some());
+}
+
+#[tokio::test]
+async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let socket = tmp.path().join("docker.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/web")] {
+        sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
+            .await
+            .unwrap();
+    }
+    let registry = dns.containers();
+    let (domains, mut commands) = DomainRoutes::test_channel();
+    let mut sync = ContainerSync {
+        dns: &dns,
+        mirror: PublishMirror::new("eth0".into()),
+        domains,
+    };
+    for fail in [true, false] {
+        let server = async {
+            let (mut stream, path) = request(&listener).await;
+            assert_eq!(path, "GET /containers/json HTTP/1.0\r\n");
+            reply(&mut stream, 200, "[]").await;
+            let mut cleaned = BTreeSet::new();
+            for _ in 0..if fail { 1 } else { 2 } {
+                let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap()
+                else {
+                    panic!("empty snapshot must remove routes");
+                };
+                assert!([OLD_ID, WEB_ID].contains(&id.as_str()));
+                cleaned.insert(id);
+                let entries = registry.read().await;
+                for owner in entries.owners() {
+                    let entry = entries.get(owner).unwrap();
+                    assert_eq!(entry.address, None);
+                    assert_eq!(entry.claims, []);
+                }
+                for name in ["absent.arcbox.local", "web.arcbox.local"] {
+                    assert!(matches!(
+                        entries.resolve(&name.parse().unwrap()),
+                        Lookup::Unmatched
+                    ));
+                }
+                drop(entries);
+                reply
+                    .send(if fail {
+                        Err(anyhow::anyhow!("cleanup failed"))
+                    } else {
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            if !fail {
+                assert_eq!(
+                    cleaned,
+                    BTreeSet::from([OLD_ID.to_owned(), WEB_ID.to_owned()])
+                );
+            }
+        };
+        let (result, ()) = timeout(Duration::from_secs(2), async {
+            tokio::join!(reconcile_existing(&mut sync, &socket), server)
+        })
+        .await
+        .unwrap();
+        if fail {
+            assert!(result.unwrap_err().to_string().contains("cleanup failed"));
+            assert_eq!(registry.read().await.owners().count(), 2);
+        } else {
+            result.unwrap();
+            assert_eq!(registry.read().await.owners().count(), 0);
+        }
+    }
 }

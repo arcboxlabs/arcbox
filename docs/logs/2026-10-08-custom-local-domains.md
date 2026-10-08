@@ -117,3 +117,7 @@ Service regressions passed on the host for authorization waits, ownership change
 ## Exercise the asynchronous TLS relay
 
 A real TCP/TLS regression pauses certificate configuration, the TLS handshake, and the upstream connection. Ownership replacement at the same address stops forwarding at every stage. Reinstalling the same owner at the same address and port also stops forwarding without changing its DNS revision. The valid control forwards HTTP and verifies the response and forwarded scheme. All five relay scenarios, five service tests, and strict Linux musl all-target Clippy passed. These socket tests do not validate the guest NAT path, browser trust, or macOS authorization.
+
+## Validate complete guest reconnect snapshots
+
+The event task validates the entire running-container list and every full-ID inspect before changing ownership. Reconciliation refreshes known IDs, retains unaddressed identities, and disables every absent owner before attempting external cleanup. Empty snapshots remove all absent owners; failed cleanup keeps unavailable identities for retry. All 11 Docker event tests passed, including real Unix-socket cases for incomplete snapshots, identity mismatch, known-owner refresh, empty lists, and cleanup retry. Strict Linux musl all-target Clippy and formatting passed. Acknowledged batch synchronization with the route actor remains the next required boundary; VM recovery is unverified.

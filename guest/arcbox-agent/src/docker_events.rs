@@ -7,11 +7,13 @@
 //! (`publish_mirror`), and serve each container's domain over HTTP and
 //! HTTPS without a port (`domains`).
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 
 use anyhow::Context;
-use arcbox_dns::container::ContainerMetadata;
+use arcbox_constants::dns::Domain;
+use arcbox_dns::{container::ContainerMetadata, registry::Registry};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
@@ -59,8 +61,9 @@ pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: Cancellati
 
 /// Subscribes before reconciliation so changes during the listing stay buffered.
 async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
+    let socket = Path::new(DOCKER_SOCK);
     let Some(mut lines) =
-        subscribe_and_reconcile(Path::new(DOCKER_SOCK), cancel, reconcile_existing(sync)).await?
+        subscribe_and_reconcile(socket, cancel, reconcile_existing(sync, socket)).await?
     else {
         return Ok(());
     };
@@ -132,24 +135,51 @@ async fn read_line_or_cancel(
     }
 }
 
-/// Lists running containers and registers them in the DNS server.
-async fn reconcile_existing(sync: &mut ContainerSync<'_>) -> anyhow::Result<()> {
-    let containers = docker_get("/containers/json").await?;
+/// Validates a complete snapshot before replacing DNS identities and reconciling routes.
+async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyhow::Result<()> {
+    let containers = docker_get_at(socket, "/containers/json").await?;
     let arr = containers
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("expected array"))?;
-
-    for c in arr {
-        let Some(id) = c["Id"].as_str() else {
-            continue;
-        };
-        let short_id = &id[..12.min(id.len())];
-        if let Err(e) = register_container_by_id(sync, short_id).await {
-            tracing::debug!(id = short_id, error = %e, "failed to register container");
-        }
+        .context("Docker container list must be an array")?;
+    let ids: BTreeSet<_> = arr
+        .iter()
+        .map(|entry| {
+            entry["Id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .context("Docker container list omitted ID")
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let mut snapshot = Vec::with_capacity(ids.len());
+    for id in &ids {
+        snapshot.push(inspect_container(socket, id).await?);
     }
 
-    tracing::info!(count = arr.len(), "reconciled existing containers");
+    let registry = sync.dns.containers();
+    let absent = {
+        let mut registry = registry.write().await;
+        let absent: Vec<_> = registry
+            .owners()
+            .filter(|owner| !ids.contains(owner))
+            .map(str::to_owned)
+            .collect();
+        for (_, metadata) in &snapshot {
+            sync_dns(&mut registry, sync.dns.domain(), metadata)?;
+        }
+        // Disable every absent owner before a failed external cleanup can interrupt reconciliation.
+        for id in &absent {
+            registry.replace(id.clone(), Vec::new(), None)?;
+        }
+        absent
+    };
+    for id in absent {
+        forget_container(sync, &id).await?;
+    }
+    for (info, metadata) in snapshot {
+        apply_container_routes(sync, &info, &metadata.id).await?;
+    }
+
+    tracing::info!(count = ids.len(), "reconciled existing containers");
     Ok(())
 }
 
@@ -213,33 +243,49 @@ async fn forget_container(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Res
 /// mirrors its host-address-pinned publishes for the inbound relay, and
 /// hands it to the domain routes.
 async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
-    let info = docker_get(&format!("/containers/{id}/json")).await?;
-    sync_dns(sync.dns, &info).await?;
-
-    // Keyed by the full ID: the die/destroy events carry that, not the name.
-    if let Some(full_id) = info["Id"].as_str() {
-        match ContainerFacts::from_inspect(&info, sync.dns.domain()) {
-            Some(facts) => sync.domains.track(facts)?,
-            None => sync.domains.forget(full_id).await?,
-        }
-        sync.mirror.apply(full_id, &pinned_publishes(&info)).await?;
-    }
-
-    Ok(())
+    let (info, metadata) = inspect_container(Path::new(DOCKER_SOCK), id).await?;
+    sync_dns(
+        &mut *sync.dns.containers().write().await,
+        sync.dns.domain(),
+        &metadata,
+    )?;
+    apply_container_routes(sync, &info, &metadata.id).await
 }
 
-async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
-    let metadata = ContainerMetadata::from_inspect(info)
-        .context("Docker inspect omitted container identity")?;
-    let claims = metadata.claims(dns.domain(), "container");
+async fn inspect_container(
+    socket: &Path,
+    id: &str,
+) -> anyhow::Result<(serde_json::Value, ContainerMetadata)> {
+    let info = docker_get_at(socket, &format!("/containers/{id}/json")).await?;
+    let metadata = ContainerMetadata::from_inspect(&info)
+        .with_context(|| format!("Docker inspect for {id} omitted container identity"))?;
+    anyhow::ensure!(metadata.id == id, "Docker inspect ID does not match {id}");
+    Ok((info, metadata))
+}
+
+async fn apply_container_routes(
+    sync: &mut ContainerSync<'_>,
+    info: &serde_json::Value,
+    id: &str,
+) -> anyhow::Result<()> {
+    match ContainerFacts::from_inspect(info, sync.dns.domain()) {
+        Some(facts) => sync.domains.track(facts)?,
+        None => sync.domains.forget(id).await?,
+    }
+    sync.mirror.apply(id, &pinned_publishes(info)).await
+}
+
+fn sync_dns(
+    registry: &mut Registry,
+    domain: &Domain,
+    metadata: &ContainerMetadata,
+) -> anyhow::Result<()> {
+    let claims = metadata.claims(domain, "container");
     for warning in claims.warnings {
         tracing::warn!(container_id = %metadata.id, %warning, "rejected container DNS name");
     }
     let address = metadata.primary_ipv4().map(std::net::IpAddr::V4);
-    dns.containers()
-        .write()
-        .await
-        .replace(metadata.id, claims.claims, address)?;
+    registry.replace(metadata.id.clone(), claims.claims, address)?;
     Ok(())
 }
 
