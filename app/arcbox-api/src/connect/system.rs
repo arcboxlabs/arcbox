@@ -3,8 +3,8 @@
 //! Provides setup status queries so the desktop app (or any client) can
 //! observe daemon readiness without managing its lifecycle.
 //!
-//! `GetVirtioDebug` is deliberately served from `early_runtime` rather than
-//! the ready handle: a boot that never reaches READY is its main use case.
+//! Diagnostics and web-route snapshots use `early_runtime`. Core checks each
+//! guest's readiness, so machine discovery does not wait for System VM startup.
 
 use std::sync::Arc;
 
@@ -164,9 +164,8 @@ impl Default for SetupState {
 pub struct SystemServiceImpl {
     setup_state: Arc<SetupState>,
     runtime: SharedRuntime,
-    /// Diagnostics handle, filled as soon as the runtime is constructed
-    /// (before the VM boots) so `GetVirtioDebug` can observe a stuck
-    /// boot while `runtime` is still empty.
+    /// Constructed Runtime for diagnostics and web discovery before System VM startup.
+    /// Core checks the captured guest's readiness for each web snapshot.
     early_runtime: SharedRuntime,
 }
 
@@ -458,7 +457,7 @@ impl pb::SystemService for SystemServiceImpl {
             Some(hostname.parse().map_err(ConnectError::invalid_argument)?)
         };
         let services = self
-            .runtime
+            .early_runtime
             .ready()?
             .list_web_services(hostname)
             .await
@@ -474,7 +473,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::Empty>,
     ) -> ServiceResult<ServiceStream<pb::ListWebServicesResponse>> {
-        let runtime = Arc::clone(self.runtime.ready()?);
+        let runtime = Arc::clone(self.early_runtime.ready()?);
         Response::ok(super::web_services::watch(move || {
             let runtime = Arc::clone(&runtime);
             async move {
@@ -632,6 +631,68 @@ impl pb::SystemService for SystemServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_snapshots_use_the_early_handle_without_opening_other_runtime_rpcs() {
+        use arcbox_connect::v1::SystemService as _;
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+        use tokio_stream::StreamExt as _;
+
+        let (directory, early) = crate::connect::tests::storage_runtime();
+        let shared: SharedRuntime = Arc::default();
+        for (early_runtime, available) in [(Arc::default(), false), (early, true)] {
+            let service =
+                SystemServiceImpl::new(Arc::new(SetupState::new()), shared.clone(), early_runtime);
+            let bytes = bytes::Bytes::from(pb::ListWebServicesRequest::default().encode_to_vec());
+            let view = pb::ListWebServicesRequest::decode_view(&bytes).unwrap();
+            let listed = service
+                .list_web_services(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await;
+            let bytes = bytes::Bytes::from(pb::Empty::default().encode_to_vec());
+            let view = pb::Empty::decode_view(&bytes).unwrap();
+            let watching = service
+                .watch_web_services(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await;
+            if available {
+                assert_eq!(listed.unwrap().body.services, Vec::<pb::WebService>::new());
+                let mut stream = watching.unwrap().body;
+                let snapshot =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(snapshot.services, Vec::<pb::WebService>::new());
+            } else {
+                assert_eq!(
+                    listed.err().unwrap().code,
+                    connectrpc::ErrorCode::Unavailable
+                );
+                assert_eq!(
+                    watching.err().unwrap().code,
+                    connectrpc::ErrorCode::Unavailable
+                );
+            }
+            let error = service
+                .get_system_vm_backend(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+            assert!(shared.get().is_none());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     /// Every update currently buffered for `updates`, as phases.
     fn drain(updates: &mut broadcast::Receiver<SetupStatus>) -> Vec<setup_status::Phase> {

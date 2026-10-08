@@ -80,3 +80,88 @@ async fn caller_abort_and_deadline_cancel_rpc_before_owned_cleanup_releases_hold
         }
     }
 }
+
+#[tokio::test]
+async fn aggregate_failure_or_caller_abort_cancels_and_drains_every_sibling() {
+    for abort in [false, true] {
+        let (ready, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let (observed, mut cancellations) = tokio::sync::mpsc::unbounded_channel();
+        let (fail, failure) = tokio::sync::oneshot::channel();
+        let (completed, mut completion) = tokio::sync::oneshot::channel();
+        let mut finishes = Vec::new();
+        let mut releases = Vec::new();
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let (finish, cleanup) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            finishes.push(finish);
+            releases.push(released);
+            workers.push((cleanup, release));
+        }
+        let caller = tokio::spawn(owned_query(move |cancelled| async move {
+            let mut queries = tokio::task::JoinSet::new();
+            for (cleanup, released) in workers {
+                let cancelled = cancelled.clone();
+                let ready = ready.clone();
+                let observed = observed.clone();
+                queries.spawn(async move {
+                    let _hold = ReleaseOnDrop(Some(released));
+                    ready.send(()).unwrap();
+                    cancelled.cancelled().await;
+                    observed.send(()).unwrap();
+                    cleanup.await.unwrap();
+                    Err::<(), _>(CoreError::invalid_state("sibling cancelled"))
+                });
+            }
+            queries.spawn(async move {
+                failure.await.unwrap();
+                Err(CoreError::invalid_state("original query failure"))
+            });
+            let result = drain_queries(queries, &cancelled).await;
+            completed.send(()).unwrap();
+            result
+        }));
+        for _ in 0..2 {
+            started.recv().await.unwrap();
+        }
+        if abort {
+            caller.abort();
+        }
+        fail.send(()).unwrap();
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(2), cancellations.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(matches!(
+            completion.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        for released in &mut releases {
+            assert!(matches!(
+                released.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        for finish in finishes {
+            finish.send(()).unwrap();
+        }
+        completion.await.unwrap();
+        for released in releases {
+            released.await.unwrap();
+        }
+        if abort {
+            assert!(caller.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(
+                caller
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("original query failure")
+            );
+        }
+    }
+}

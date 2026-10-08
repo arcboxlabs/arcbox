@@ -167,3 +167,62 @@ async fn independent_machine_selection_requires_no_system_vm_and_keeps_raw_names
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn machine_projection_applies_shared_local_ca_scope_to_foreign_suffixes() {
+    let mut machine = captured();
+    machine.open.hostname = "first-vm.machine.example.test".into();
+    let mut managed = route(&machine, Some(HttpsBackend::TerminatedHttpPort(8080)));
+    let services = machine_services(vec![managed.clone()], &machine).unwrap();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].http_url, "http://first-vm.machine.example.test");
+    assert_eq!(services[0].https_url, "");
+    assert_eq!(services[0].https_port, 0);
+    let Some(Route::Machine(value)) = &mut managed.route else {
+        unreachable!()
+    };
+    value.http_port = 0;
+    assert_eq!(
+        machine_services(vec![managed], &machine).unwrap(),
+        Vec::<WebService>::new()
+    );
+    let native = machine_services(
+        vec![route(&machine, Some(HttpsBackend::NativeHttpsPort(443)))],
+        &machine,
+    )
+    .unwrap();
+    assert_eq!(native[0].https_url, "https://first-vm.machine.example.test");
+    assert_eq!(native[0].https_port, 443);
+}
+
+#[tokio::test]
+async fn system_fixture_and_registered_claim_cannot_publish_a_machine_without_its_physical_vm() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = Runtime::new(crate::Config {
+        data_dir: directory.path().into(),
+        ..Default::default()
+    })
+    .unwrap()
+    .with_network_fixture(crate::runtime::NetworkFixture::default());
+    runtime
+        .machine_manager
+        .register_mock_machine("first_vm", 7)
+        .unwrap();
+    runtime
+        .register_machine_dns("first_vm", "192.168.64.8".parse().unwrap())
+        .await
+        .unwrap();
+    let machine = captured();
+    let response = ListGuestWebServicesResponse {
+        services: vec![route(
+            &machine,
+            Some(HttpsBackend::TerminatedHttpPort(8080)),
+        )],
+        ..Default::default()
+    };
+    assert!(
+        WebGuest::Machine(Box::new(machine))
+            .project(&runtime, response, None)
+            .is_err()
+    );
+}

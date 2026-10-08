@@ -44,12 +44,13 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - Two runtime handles, do not conflate them (`context.rs`): `shared_runtime`
   is filled only after full init and gates normal RPCs with `UNAVAILABLE`
   via `runtime.ready()`; `early_runtime` is filled the moment `Runtime` is
-  constructed, before the VM boots, and is diagnostics-only. WHY: a stuck
-  boot never fills `shared_runtime`, so any RPC needed to debug it must read
-  `early_runtime`. `GetVirtioDebug` is the one such RPC
-  (`arcbox-api/src/system.rs`, `self.early_runtime.ready()`). Never gate a
+  constructed, before the VM boots. Only diagnostics and the read-only
+  `ListWebServices` / `WatchWebServices` use `early_runtime`. Core checks each
+  web guest's readiness; machine discovery must not wait for System VM startup.
+  A stuck boot never fills `shared_runtime`, so `GetVirtioDebug` also reads
+  `early_runtime`. Keep normal RPCs on `shared_runtime`. Never gate a
   diagnostic on `shared_runtime`; gate on `early_runtime.ready()` instead —
-  `ready()` is the `SharedRuntimeExt` method (`grpc/mod.rs`) that returns
+  `ready()` is the `ConnectRuntimeExt` method (`connect/mod.rs`) that returns
   `UNAVAILABLE` only while the handle's `OnceLock` is empty, and
   `early_runtime` fills the moment `Runtime` is constructed.
 - `WatchSetupStatus` is the sole readiness/failure signal clients (desktop,
