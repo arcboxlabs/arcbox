@@ -55,3 +55,32 @@ The first pair assumes the tested unpatched 2.35 runtime. The second pair assume
 GCC 12.2.0 passed strict warnings and static analysis. Clang-format, workspace formatting, and the existing `arcbox-hv` CPU accounting example's Clippy check passed. All four runtime assertions passed. The task-owned containers were removed. Raw results, runtime identities, exact source, and validation records are archived with a verified SHA256 manifest under `condvar-latency-2026-10-08`; the final source is named `cond_signal_public.c` in that archive. No production runtime was changed.
 
 After collection, the task daemon exited with status zero, its VZ helper exited, and the builder returned to its stopped state. The three existing user VM helpers remained running. The original ClickHouse, Keeper, and Postgres containers reported healthy; ClickHouse answered `SELECT 1`. This health check does not validate end-to-end ingestion.
+
+## Follow-up: scheduler exclusion propagates into notification latency
+
+The two mechanisms now reproduce in one process. [cond_scheduler_latency.c](../../tests/bench/signoz/cond_scheduler_latency.c) creates eight candidate waiters, each with an independent condition variable and mutex. Each waiter enters its condition-variable futex before SIGUSR1 diverts the waiter into a busy handler. All eight handlers remain runnable on guest CPU 1 with unchanged scheduler policy and affinity. The controller runs on CPU 2.
+
+After passive baseline snapshots, the controller emits a ready record and waits for host input. The host suspends the explicitly identified disposable VZ helper for ten seconds, with the existing detached resume watchdog. After resume, the controller selects the unique candidate whose scheduler-runtime increment exceeds its raw PROF increment by at least eight seconds. Selection changes no scheduling property. Zero or multiple qualifying candidates invalidate the case.
+
+The controller then performs the first notification on the selected candidate's condition variable, adds waiter B on CPU 2, and starts the second notifier on CPU 2. That notifier holds the application mutex while calling `pthread_cond_signal`. After the notifier begins, the controller releases the selected handler's gate. The other seven candidates remain busy until the selected waiter completes its condition wait and the notifier returns. Thus the modern runtime cannot shorten the target's scheduling delay by removing its competitors early.
+
+The same binary, kernel, container, and two previously identified runtimes produced these results:
+
+| Runtime | VM suspension | Gate release to handler exit marker | Second notification elapsed | Notifier thread CPU |
+|---|---|---:|---:|---:|
+| glibc 2.35 | None | 17.026 ms | 18.365 ms | 13.166 µs |
+| glibc 2.41 | None | 0.334 µs | 4.542 µs | 3.042 µs |
+| glibc 2.35 | Ten seconds | **70.027811 s** | **70.029045 s** | 14.416 µs |
+| glibc 2.41 | Ten seconds | **70.158072 s** | **2.000 µs** | 3.500 µs |
+
+The old-runtime pause case selects candidate 6, TID 71, with 10.015850 seconds of excess scheduler runtime. Seventy snapshots spanning about 69.050 seconds show state `R`, runtime fixed at 10.023743838 seconds, and dispatch count fixed at 5. Peer snapshots strictly inside that observation window show a competing thread on CPU 1 advancing by 9.719518 scheduler seconds and 9.667 raw PROF seconds. The notifier remains pending throughout, then returns 33.084 microseconds after the selected handler's exit marker. The handler records that marker immediately before returning; the recorded time is not an exact kernel signal-return boundary.
+
+The modern-runtime pause case selects candidate 2, TID 83, with 10.023498 seconds of excess scheduler runtime. Seventy-one snapshots spanning about 70.044 seconds show state `R`, runtime fixed at 10.042051919 seconds, and dispatch count fixed at 8. Interior peer snapshots show its competing thread advancing by 9.862452 scheduler seconds and 9.859 raw PROF seconds. The notifier returns before the controller releases the gate, while the selected handler remains active. The scheduling defect therefore persists even though the notification no longer waits for the affected thread.
+
+Snapshots bracket `/proc/self/task/TID/status`, `schedstat`, raw PROF, and the synchronization flags with monotonic timestamps. The probe deliberately avoids `/proc/TID/stat` and remote SCHED-clock reads because those paths can update scheduler accounting. The raw per-thread PROF clock uses `(~(unsigned)tid << 3) | 4U`; all threads belong to the same process. Maximum snapshot spans are 140.458 microseconds in the old pause case and 140.833 microseconds in the modern pause case. No read spans the host suspension. The container has unlimited CPU quota, and throttling counters remain zero.
+
+This controlled experiment connects incorrect guest runtime charging, prolonged scheduling exclusion, and old-glibc notification blocking. The runtime containing upstream commit `1db84775` breaks the final dependency while leaving the accounting defect visible. The microsecond timings are completion-order evidence, not a general libc performance benchmark.
+
+The experiment does **not** identify the original ClickHouse trigger. The original capture lacks a matching blocked notifier futex, the associated delayed waiter, and its scheduling history. The synthetic SIGUSR1 busy handler and controlled whole-VM suspension establish a possible causal chain; they do not establish that those conditions occurred in the original incident.
+
+The probe requires the baseline tick-accounting kernel, at least three guest CPUs, and assertions enabled. Compile with the same strict GCC flags as the earlier probe. Invoke `control fast`, `pause wait` for the tested old runtime, or `pause fast` for the tested modern runtime. Supply `go` on stdin after the ready event and, for pause cases, after the verified helper resumes. A 150-second alarm bounds the process. GCC warnings and static analysis, clang-format, workspace formatting, and the existing HV example's Clippy check pass. All four runtime assertions pass. Source, binary, identities, snapshots, and analysis are preserved under `cond-scheduler-2026-10-08` with a SHA256 manifest.
