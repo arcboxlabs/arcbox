@@ -205,6 +205,58 @@ fn response(body: Body) -> Response<Body> {
 const MESSAGE: &[u8] = b"\0\0\0\0\x05hello";
 
 #[tokio::test]
+async fn cancelling_an_upload_blocked_by_flow_control_releases_its_stream_slot() {
+    for after_headers in [false, true] {
+        let mut fixture = Fixture::with_window(Some(0)).await;
+        let ready = fixture.send("Ready", empty());
+        let (_request, reply) = fixture.call().await;
+        reply.send(response(empty())).unwrap();
+        within(ready)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_body()
+            .collect()
+            .await
+            .unwrap();
+
+        let body = http_body_util::Full::new(Bytes::from_static(&[b'x'; 50])).boxed_unsync();
+        let blocked = fixture.send("Blocked", body);
+        let (request, reply) = fixture.call().await;
+        let mut body = request.into_body();
+        let cancelled_reply = if after_headers {
+            let (download, body) = channel();
+            reply.send(response(body)).unwrap();
+            let mut response = within(blocked).await.unwrap().unwrap().into_body();
+            frame(&download, Frame::data(Bytes::from_static(MESSAGE))).await;
+            message(&mut response, MESSAGE).await;
+            drop(response);
+            within(download.closed()).await;
+            None
+        } else {
+            blocked.abort();
+            assert!(within(blocked).await.unwrap_err().is_cancelled());
+            Some(reply)
+        };
+        assert!(
+            within(body.frame())
+                .await
+                .is_none_or(|frame| frame.is_err())
+        );
+        drop(cancelled_reply);
+
+        let sibling = fixture.send("Sibling", empty());
+        let (request, reply) = fixture.call().await;
+        assert_eq!(request.uri().path(), "/demo.Echo/Sibling");
+        reply.send(response(empty())).unwrap();
+        let response = within(sibling).await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(within(response.into_body().frame()).await.is_none());
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn unary_preserves_compressed_messages_binary_metadata_and_trailers() {
     use std::io::Write;
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -325,4 +377,55 @@ async fn trailers_only_errors_keep_grpc_status_and_message() {
     assert!(within(response.body_mut().frame()).await.is_none());
     within(upload.closed()).await;
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn one_open_or_cancelled_stream_does_not_block_or_close_its_siblings() {
+    let mut fixture = Fixture::new().await;
+    let pending = fixture.send("Held", empty());
+    let (_request, reply) = fixture.call().await;
+    let (download, body) = channel();
+    reply.send(response(body)).unwrap();
+    let mut held = within(pending).await.unwrap().unwrap().into_body();
+    frame(&download, Frame::data(Bytes::from_static(MESSAGE))).await;
+    message(&mut held, MESSAGE).await;
+    let mut held = Some(held);
+    for method in ["DuringHeld", "AfterCancellation"] {
+        let pending = fixture.send(method, empty());
+        let (_request, reply) = fixture.call().await;
+        let mut completed = response(empty());
+        completed
+            .headers_mut()
+            .insert("grpc-status", HeaderValue::from_static("0"));
+        reply.send(completed).unwrap();
+        let response = within(pending).await.unwrap().unwrap();
+        assert_eq!(response.headers()["grpc-status"], "0");
+        assert!(within(response.into_body().frame()).await.is_none());
+        if method == "DuringHeld" {
+            drop(held.take());
+            within(download.closed()).await;
+        }
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn listener_cancellation_closes_both_active_stream_directions() {
+    let mut fixture = Fixture::new().await;
+    let (upload, body) = channel();
+    let pending = fixture.send("Cancelled", body);
+    let (request, reply) = fixture.call().await;
+    let mut request = request.into_body();
+    frame(&upload, Frame::data(Bytes::from_static(MESSAGE))).await;
+    message(&mut request, MESSAGE).await;
+    let (download, body) = channel();
+    reply.send(response(body)).unwrap();
+    let mut response = within(pending).await.unwrap().unwrap().into_body();
+    frame(&download, Frame::data(Bytes::from_static(MESSAGE))).await;
+    message(&mut response, MESSAGE).await;
+    fixture.shutdown().await;
+    within(upload.closed()).await;
+    within(download.closed()).await;
+    assert!(within(request.frame()).await.unwrap().is_err());
+    assert!(within(response.frame()).await.unwrap().is_err());
 }

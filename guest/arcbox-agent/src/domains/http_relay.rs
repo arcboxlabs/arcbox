@@ -180,3 +180,6 @@ mod translation_tests;
 
 #[cfg(test)]
 mod grpc_tests;
+
+#[cfg(test)]
+mod h2_lifecycle_tests;
