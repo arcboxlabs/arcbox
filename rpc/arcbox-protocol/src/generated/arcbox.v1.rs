@@ -1663,6 +1663,9 @@ pub struct LocalHttpsStatus {
     pub certificate_not_after_unix_seconds: i64,
     #[prost(bool, tag = "6")]
     pub legacy_user_trust: bool,
+    /// Certificate lifetime is independent of native trust and publication.
+    #[prost(enumeration = "local_https_status::CertificateState", tag = "7")]
+    pub certificate_state: i32,
 }
 /// Nested message and enum types in `LocalHttpsStatus`.
 pub mod local_https_status {
@@ -1701,6 +1704,47 @@ pub mod local_https_status {
                 "TRUSTED" => Some(Self::Trusted),
                 "ERROR" => Some(Self::Error),
                 "UNAVAILABLE" => Some(Self::Unavailable),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum CertificateState {
+        /// Certificate inspection has not completed or failed.
+        Unknown = 0,
+        Missing = 1,
+        Valid = 2,
+        /// The certificate is valid and expires within 30 days.
+        RenewalDue = 3,
+        Expired = 4,
+        /// Check the host clock before replacing the certificate.
+        NotYetValid = 5,
+    }
+    impl CertificateState {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "UNKNOWN",
+                Self::Missing => "MISSING",
+                Self::Valid => "VALID",
+                Self::RenewalDue => "RENEWAL_DUE",
+                Self::Expired => "EXPIRED",
+                Self::NotYetValid => "NOT_YET_VALID",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN" => Some(Self::Unknown),
+                "MISSING" => Some(Self::Missing),
+                "VALID" => Some(Self::Valid),
+                "RENEWAL_DUE" => Some(Self::RenewalDue),
+                "EXPIRED" => Some(Self::Expired),
+                "NOT_YET_VALID" => Some(Self::NotYetValid),
                 _ => None,
             }
         }

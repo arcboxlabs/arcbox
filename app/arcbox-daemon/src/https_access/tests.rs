@@ -2,7 +2,8 @@ use std::sync::Mutex;
 
 use arcbox_api::{SetupState, SystemServiceImpl};
 use arcbox_connect::v1::{
-    Empty, LocalHttpsAccess, LocalHttpsStatus, SystemService, local_https_status::TrustState,
+    Empty, LocalHttpsAccess, LocalHttpsStatus, SystemService,
+    local_https_status::{CertificateState, TrustState},
 };
 use connectrpc::{HasMessageView, RequestContext, ServiceRequest, ServiceStream};
 use tokio_stream::StreamExt;
@@ -53,6 +54,7 @@ impl AccessSource for Recording {
 fn status(setup: &SetupState, state: TrustState) {
     setup.set_local_https(LocalHttpsStatus {
         trust_state: state.into(),
+        certificate_state: CertificateState::Valid.into(),
         certificate_sha256: "root".into(),
         ..Default::default()
     });

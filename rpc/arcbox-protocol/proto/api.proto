@@ -1229,6 +1229,17 @@ message LocalHttpsStatus {
         // This daemon does not provide automatic HTTPS.
         UNAVAILABLE = 4;
     }
+    enum CertificateState {
+        // Certificate inspection has not completed or failed.
+        UNKNOWN = 0;
+        MISSING = 1;
+        VALID = 2;
+        // The certificate is valid and expires within 30 days.
+        RENEWAL_DUE = 3;
+        EXPIRED = 4;
+        // Check the host clock before replacing the certificate.
+        NOT_YET_VALID = 5;
+    }
     TrustState trust_state = 1;
     string message = 2;
     // Uppercase colon-separated SHA-256 fingerprint of the public root.
@@ -1237,6 +1248,8 @@ message LocalHttpsStatus {
     int64 certificate_not_before_unix_seconds = 4;
     int64 certificate_not_after_unix_seconds = 5;
     bool legacy_user_trust = 6;
+    // Certificate lifetime is independent of native trust and publication.
+    CertificateState certificate_state = 7;
 }
 
 message LocalHttpsAccess {

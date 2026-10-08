@@ -305,7 +305,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   the host signs guest-generated certificate requests. Helper installation
   and certificate trust require separate administrator authorization.
   The host verifies container DNS ownership before and after each signature.
-  Run `abctl tls status --json` to inspect trust, certificate validity, and the public CA fingerprint without changing trust.
+  Run `abctl tls status --json` to inspect trust, certificate lifetime, and the public CA fingerprint without changing trust. The certificate state distinguishes expiry, renewal within 30 days, and a Mac clock before the certificate's validity period.
   Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
   Run `abctl tls repair` to restore a missing or damaged public CA file from the current Keychain identity without changing trust. Repair preserves different certificates and rejects ambiguous identities.
   Guest DNS follows the Mac's resolvers as

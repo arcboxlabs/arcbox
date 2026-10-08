@@ -246,7 +246,7 @@ impl pb::MachineService for MachineServiceImpl {
         Response::ok(transfer::export(runtime, req.id, req.path).await?)
     }
 
-    async fn import(
+    async fn import_machine(
         &self,
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ImportMachineRequest>,

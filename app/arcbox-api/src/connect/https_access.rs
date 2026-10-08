@@ -2,7 +2,8 @@
 
 use arcbox_connect::v1::{
     AcknowledgeHttpsAccessRequest, LocalHttpsAccess, LocalHttpsStatus,
-    acknowledge_https_access_request::Outcome, local_https_status::TrustState,
+    acknowledge_https_access_request::Outcome,
+    local_https_status::{CertificateState, TrustState},
 };
 use connectrpc::{ConnectError, ServiceStream};
 use tokio::sync::watch;
@@ -31,18 +32,20 @@ impl Default for HttpsAccess {
 }
 
 impl HttpsAccess {
-    /// Returns the current trust cycle, or `None` when no GUI can authorize it.
+    /// Returns the current trust cycle while a GUI can authorize a valid certificate.
     pub fn observing_cycle(&self) -> Option<String> {
         let state = self.state.borrow();
         (self.state.receiver_count() > 0 && state.untrusted && !state.suppressed)
             .then(|| state.observation_id.clone())
     }
 
-    /// Reconciles actual trust. Only native inspection can end the untrusted state.
+    /// Reconciles certificate readiness. Acknowledgement never grants native trust.
     pub(super) fn update_status(&self, status: &LocalHttpsStatus) {
         self.state.send_if_modified(|state| {
             let untrusted = status.trust_state == TrustState::Untrusted
-                && !status.certificate_sha256.is_empty();
+                && !status.certificate_sha256.is_empty()
+                && (status.certificate_state == CertificateState::Valid
+                    || status.certificate_state == CertificateState::RenewalDue);
             if state.fingerprint == status.certificate_sha256
                 && state.untrusted == untrusted
                 && !(status.trust_state == TrustState::Trusted && state.suppressed)
@@ -157,8 +160,51 @@ mod tests {
     fn untrusted(fingerprint: &str) -> LocalHttpsStatus {
         LocalHttpsStatus {
             trust_state: TrustState::Untrusted.into(),
+            certificate_state: CertificateState::Valid.into(),
             certificate_sha256: fingerprint.into(),
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn certificate_validity_starts_and_cancels_observation_for_the_same_root() {
+        for valid in [CertificateState::Valid, CertificateState::RenewalDue] {
+            for inactive in [
+                CertificateState::Unknown,
+                CertificateState::Missing,
+                CertificateState::Expired,
+                CertificateState::NotYetValid,
+            ] {
+                let access = HttpsAccess::default();
+                let mut stream = access.watch();
+                let mut status = untrusted("root");
+                status.certificate_state = inactive.into();
+                access.update_status(&status);
+                assert!(access.observing_cycle().is_none());
+
+                status.certificate_state = valid.into();
+                access.update_status(&status);
+                let previous = access.observing_cycle().unwrap();
+                access.record("web.arcbox.local", &previous);
+                assert_ne!(stream.next().await.unwrap().unwrap().request_id, "");
+
+                status.certificate_state = inactive.into();
+                access.update_status(&status);
+                assert!(access.observing_cycle().is_none());
+                assert_eq!(stream.next().await.unwrap().unwrap().request_id, "");
+
+                status.certificate_state = valid.into();
+                access.update_status(&status);
+                let current = access.observing_cycle().unwrap();
+                assert_ne!(previous, current);
+                access.record("stale.arcbox.local", &previous);
+                assert!(access.state.borrow().pending.is_none());
+                access.record("web.arcbox.local", &current);
+                assert_eq!(
+                    stream.next().await.unwrap().unwrap().hostname,
+                    "web.arcbox.local"
+                );
+            }
         }
     }
 
@@ -223,6 +269,7 @@ mod tests {
         assert!(access.state.borrow().pending.is_some());
         access.update_status(&LocalHttpsStatus {
             trust_state: TrustState::Trusted.into(),
+            certificate_state: CertificateState::Valid.into(),
             certificate_sha256: "root".into(),
             ..Default::default()
         });
@@ -267,6 +314,7 @@ mod tests {
         assert_eq!(access.state.receiver_count(), 1);
         setup.set_local_https(LocalHttpsStatus {
             trust_state: TrustState::Trusted.into(),
+            certificate_state: CertificateState::Valid.into(),
             certificate_sha256: "root".into(),
             ..Default::default()
         });

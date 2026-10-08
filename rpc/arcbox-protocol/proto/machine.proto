@@ -71,7 +71,8 @@ service MachineService {
     // Creates a machine from an archive Export wrote. The image the
     // manifest names must be in the local image registry at the same
     // version; otherwise the error says which image is missing.
-    rpc Import(ImportMachineRequest) returns (ImportMachineResponse);
+    // ImportMachine avoids the Swift import keyword in generated clients.
+    rpc ImportMachine(ImportMachineRequest) returns (ImportMachineResponse);
 
     // Changes a machine's CPU and memory limits, checked against the host.
     // The new size is recorded at once and applies at the machine's next

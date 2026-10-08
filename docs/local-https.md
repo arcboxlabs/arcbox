@@ -8,6 +8,8 @@ Containers and HTTP services can run without local CA trust. Enable local HTTPS 
 
 Run `abctl tls status --json` to inspect the current root's fingerprint, validity, publication, and trust. Run `abctl tls untrust` to remove system trust without stopping containers. Trust status does not prove that DNS, a route, or an upstream service works.
 
+The `certificate_state` field distinguishes `missing`, `valid`, `renewal_due`, `expired`, and `not_yet_valid` independently of trust. Renewal is due when a valid root expires within 30 days. A root in that renewal window can remain trusted. Check the Mac's date and time when a certificate is not yet valid. Desktop does not request trust authorization for a missing or inactive certificate. Browser observation also requires a valid certificate; restoring validity starts a new observation cycle for the same root.
+
 Run `abctl tls repair` to restore a missing or damaged `tls/ca.pem` from the profile's existing Keychain CA. Repair does not create a key or change trust. The optional `--expected-fingerprint` pins the current root. Repair rejects an inactive root, multiple matching Keychain items, and a publication containing a recoverable different certificate or multiple PEM objects. A repaired file does not establish that trust in an unknown previous root was removed.
 
 The [authorization decision](adr/0007-local-https-independent-of-startup.md) separates HTTPS from Docker readiness. The [installed validation log](logs/2026-10-08-helper-ca-trust.md#installed-desktop-authorization-and-restart) covers the earlier startup-authorization flow. That evidence does not validate the new on-demand flow.
