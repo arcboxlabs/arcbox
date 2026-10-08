@@ -103,3 +103,7 @@ Docker library tests passed 127 cases, mock API tests passed eight, and daemon r
 Container removal first makes its complete-ID registration unavailable. The Docker event task removes that owner only after domain-rule cleanup and published-port cleanup succeed. A failed rule deletion or closed domain task propagates an error and preserves the owner for retry.
 
 All eight Docker event tests passed, including failed cleanup acknowledgment and closed-task regressions. Strict Linux musl all-target Clippy, formatting, and diff checks passed. Native iptables deletion and reconnect snapshot retry remain unverified.
+
+## Project exact host records from the registry
+
+NetworkManager now provides a Registry projection that preserves canonical exact names, omits wildcards and conflicts, and withdraws unavailable owners. Three focused projection tests, strict all-target Clippy, and formatting passed. Runtime does not call this API yet; the host ownership migration remains incomplete. mDNS announcements still cover only the configured suffix.

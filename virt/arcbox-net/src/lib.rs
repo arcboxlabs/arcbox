@@ -36,6 +36,7 @@ pub mod dhcp;
 // unchanged for the VMM layer and the inject crate.
 pub use splicetcp::direct_rx;
 pub mod dns;
+mod dns_projection;
 pub mod error;
 // `ethernet` is extracted to `arcbox-packet`; re-exported here so the
 // `arcbox_net::ethernet` path is unchanged for callers.

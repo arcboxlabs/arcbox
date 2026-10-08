@@ -98,6 +98,7 @@ files above.
   near-`u64::MAX` inputs.
 - DNS uses the shared `arcbox_dns::DnsRecordType`, including unknown wire values.
   Local name checks must run for every query type before forwarding or cache lookup.
+- `NetworkManager::replace_dns_projection` derives concrete Exact records from the Registry. Hold the Registry mutation lock through projection publication. Wildcards remain in the Registry.
 
 ## vmnet relay (bridge NIC, `arcbox-vmnet`)
 
