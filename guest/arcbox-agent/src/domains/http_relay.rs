@@ -2,6 +2,7 @@
 
 mod exchange;
 mod h1_body;
+mod h2_transport;
 mod multiplex;
 
 pub(super) use multiplex::{Session, serve as serve_managed};
