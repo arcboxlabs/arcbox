@@ -13,6 +13,7 @@ use hyper::{Request, body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use percent_encoding::percent_decode_str;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
 
 use super::*;
 use crate::proxy::{
@@ -25,6 +26,10 @@ pub(super) struct Data {
     pub symlink: Option<String>,
     pub reject_write: bool,
     pub operations: Vec<String>,
+    pub requests: Vec<String>,
+    pub changed: Arc<Notify>,
+    pub block_operation: Option<Arc<Notify>>,
+    pub oversized_inspect: bool,
     pub metadata: serde_json::Value,
 }
 
@@ -52,6 +57,10 @@ impl Guest {
             symlink: None,
             reject_write: false,
             operations: Vec::new(),
+            requests: Vec::new(),
+            changed: Arc::new(Notify::new()),
+            block_operation: None,
+            oversized_inspect: false,
             metadata,
         }));
         let shared = Arc::clone(&data);
@@ -106,20 +115,38 @@ async fn handle(
     request: Request<Incoming>,
     data: Arc<Mutex<Data>>,
 ) -> std::result::Result<Response, hyper::Error> {
+    let (parts, body) = request.into_parts();
+    let body = body.collect().await?.to_bytes();
+    let (response, gate) = respond(Request::from_parts(parts, body), &data);
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
+    Ok(response)
+}
+
+fn respond(request: Request<bytes::Bytes>, data: &Mutex<Data>) -> (Response, Option<Arc<Notify>>) {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or_default().to_string();
-    let body = request.into_body().collect().await?.to_bytes();
+    let body = request.into_body();
     let mut data = data.lock().unwrap();
+    data.requests.push(path.clone());
+    data.changed.notify_one();
+    let mut gate = None;
     let mut response = Response::builder().status(200);
     let body = if path == "/_ping" {
         Body::from("OK")
     } else if path == "/containers/test/json" || path == "/containers/canonical-test/json" {
-        Body::from(data.metadata.to_string())
+        if data.oversized_inspect {
+            Body::from(vec![b' '; 4 * 1024 * 1024 + 1])
+        } else {
+            Body::from(data.metadata.to_string())
+        }
     } else if path.ends_with("/start") || path.ends_with("/restart") {
         assert_eq!(method, Method::POST);
         assert!(path.starts_with("/containers/canonical-test/"));
         data.operations.push(path);
+        gate = data.block_operation.take();
         data.metadata["State"]["Running"] = json!(true);
         response = response.status(204);
         Body::empty()
@@ -168,5 +195,5 @@ async fn handle(
             Body::empty()
         }
     };
-    Ok(response.body(body).unwrap())
+    (response.body(body).unwrap(), gate)
 }

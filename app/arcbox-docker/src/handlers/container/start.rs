@@ -24,7 +24,10 @@ impl Start {
             #[serde(rename = "Id")]
             id: String,
         }
-        let body = super::guest::Container { state, id }.inspect().await?;
+        let body = crate::proxy::invalidate_on_guest_error(
+            state,
+            super::guest::Container { state, id }.inspect().await,
+        )?;
         let Identity { id } = serde_json::from_slice(&body)
             .map_err(|e| DockerError::Server(format!("invalid container identity: {e}")))?;
         let guard = state.proxy.lock_container_start(&id).await;

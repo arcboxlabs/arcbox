@@ -1,5 +1,6 @@
 //! Isolated guest protocol checks; no host trust changes.
 
+mod concurrency;
 mod guest;
 
 use axum::http::Method;
