@@ -24,7 +24,7 @@ arcbox-helper 1.2.0
 
 Desktop and daemon parse that line with
 `arcbox_constants::helper::parse_helper_version` and compare by semver triple
-**within the same major** (a higher major is a wire break, not “newer is fine”).
+**within the same major**. A different major may change required helper behavior.
 
 ### When to bump
 
@@ -116,14 +116,14 @@ layout-only check replaced and deleted its links (#715).
 
 Every mutation-capable `Client::connect` / `Client::connect_to` call checks the
 helper's `version` RPC before returning a client. If the helper is unreachable,
-unparseable, outside the supported wire major, or older than
+unparseable, outside the supported package major, or older than
 `MIN_HELPER_VERSION`, no mutation client is returned. This protects every
 consumer—including daemon `self_setup`, route reconciliation, and CLI helper
-operations—from driving new tarpc ordinals into a legacy binary.
+operations—from using unsupported helper behavior.
 
-Diagnostics use the non-mutating `Client::probe_version` path so `abctl doctor`
-can still report the version of an incompatible helper without exposing a
-client capable of sending privileged mutations.
+The Unix transport uses length-delimited JSON frames. RPC methods and error variants use names, so deleting a method cannot redirect another request by enum index. Invalid JSON, unknown methods, and old Bincode frames close the connection before dispatch. There is no alternate decoder. Deploy the helper, daemon, and CLI together; the helper package version remains independent of the guest protocol.
+
+Diagnostics use the non-mutating `Client::probe_version` path so `abctl doctor` can report an incompatible JSON helper's version without exposing a mutation client. A Bincode helper reports a connection or decoding failure instead.
 
 ## Local E2E (no root)
 
@@ -144,8 +144,8 @@ integration tests (`--tests` excluding `e2e_fs_test`).
 ## Wire errors
 
 RPC failures use structured [`HelperError`](../app/arcbox-helper/src/error.rs)
-(`Result<(), HelperError>` over bincode). Variants are **append-only** (index
-encoded). Clients match on `HelperError::code()` / enum arms; `Display` remains
+(`Result<(), HelperError>` over JSON). Variants use names on the wire.
+Clients match on `HelperError::code()` / enum arms; `Display` remains
 human-readable for logs.
 
 ## Peer auth implementation

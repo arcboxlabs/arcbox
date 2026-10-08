@@ -269,3 +269,7 @@ The expanded guest dispatcher matrix passed 12 tests in a networkless Linux cont
 ## Split the blocking transport without an idle deadline
 
 The blocking transport now provides independent typed sender and receiver halves. The receiver keeps listening while the writer is idle; the existing shutdown handle interrupts both workers. All 29 transport tests passed, including real socket coverage for idle EOF, a saturated writer, shutdown, oversized frames, and truncated frames. Strict all-target transport Clippy, scoped formatting, and diff checks passed. A workspace formatting check identified a separate pending Engine test edit; that edit is outside this transport slice. The host authority adapter and installed HV behavior remain unverified.
+
+## Name helper methods on the wire
+
+The helper and its clients now use length-delimited JSON with named RPC and error variants. The Bincode dependency and decoder are removed; the helper package remains 1.2.0. A real framed socket test rejects a recorded Bincode mutation and malformed JSON before dispatch, with no resolver file created. The helper passed 73 tests with one native Keychain test ignored, and the daemon passed nine resolver-service tests. Strict debug all-target and release-binary helper Clippy, scoped formatting, and diff checks passed. The installed helper remains unchanged; the paired installer cutover is not yet connected.

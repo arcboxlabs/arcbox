@@ -64,13 +64,9 @@ pub fn hosts_alias_installed(hosts_content: &str) -> bool {
 /// The tarpc service definition for privileged host mutations.
 ///
 /// All methods perform input validation server-side before executing
-/// any privileged operation. Failures use structured [`HelperError`]
-/// (bincode-stable; append variants only).
-///
-/// **Method order is append-only**: the bincode transport encodes the
-/// request enum's variant index, so inserting a method above shifts every
-/// later ordinal and an upgrade-window daemon talking to the previous
-/// helper misdecodes calls silently.
+/// any privileged operation. JSON identifies methods and structured
+/// [`HelperError`] variants by name. Invalid frames and unknown methods
+/// close the connection before dispatch.
 #[tarpc::service]
 pub trait HelperService {
     /// Adds a host route for `subnet` via `iface`.
@@ -148,7 +144,7 @@ pub trait HelperService {
 pub(crate) async fn connect() -> Result<HelperServiceClient, std::io::Error> {
     let path = socket_path();
     let transport =
-        tarpc::serde_transport::unix::connect(&path, tarpc::tokio_serde::formats::Bincode::default)
+        tarpc::serde_transport::unix::connect(&path, tarpc::tokio_serde::formats::Json::default)
             .await?;
     Ok(HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn())
 }

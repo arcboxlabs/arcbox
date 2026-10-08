@@ -276,7 +276,7 @@ async fn socket_eof_cancels_an_unchanged_watch_before_releasing_resolvers() {
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
     let transport = tarpc::serde_transport::new(
         codec.new_framed(client_stream),
-        tarpc::tokio_serde::formats::Bincode::default(),
+        tarpc::tokio_serde::formats::Json::default(),
     );
     let tarpc::client::NewClient { client, dispatch } =
         HelperServiceClient::new(tarpc::client::Config::default(), transport);

@@ -163,7 +163,7 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = { version = "1", features = ["full"] }
 
 # RPC (privileged helper)
-tarpc = { version = "0.37", features = ["serde-transport", "unix", "serde-transport-bincode"] }
+tarpc = { version = "0.37", features = ["serde-transport", "unix", "serde-transport-json"] }
 
 # Async utilities
 futures = "0.3"

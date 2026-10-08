@@ -5,6 +5,7 @@ use arcbox_helper::{
     HelperService, ResolverAuthorityRoot, ResolverAuthorityState, ResolverLease, ResolverOwner,
     client::Client,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
@@ -20,6 +21,41 @@ fn request(revision: u64, root: &str) -> ResolverLease {
         revision,
         port: 5553,
         roots: vec![root.into()],
+    }
+}
+
+#[tokio::test]
+async fn binary_and_malformed_frames_close_before_rpc_dispatch() {
+    // Recorded before JSON replaced the Bincode DnsInstall request encoding.
+    let binary =
+        b"\0\t\xfc\x95c\x98;\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01\x01\x02\nwire.local\xfb\xb1\x15";
+    for frame in [binary.as_slice(), b"{invalid JSON}"] {
+        let directory = tempfile::tempdir().unwrap();
+        let resolvers = directory.path().join("resolvers");
+        let store = Arc::new(ResolverStore::new(resolvers.clone()));
+        let server = HelperServer::new(VerifiedPeer::test_daemon(501, true), store);
+        let (mut client, conn) = tokio::net::UnixStream::pair().unwrap();
+        let serving = tokio::spawn(serve_connection(conn, server));
+        client
+            .write_u32(frame.len().try_into().unwrap())
+            .await
+            .unwrap();
+        client.write_all(frame).await.unwrap();
+        let mut response = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+                .await
+                .unwrap()
+                .unwrap(),
+            0,
+            "a rejected frame must close without an RPC response"
+        );
+        tokio::time::timeout(Duration::from_secs(2), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!resolvers.exists());
     }
 }
 

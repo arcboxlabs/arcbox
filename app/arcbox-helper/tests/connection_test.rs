@@ -97,7 +97,7 @@ type VersionTransport = tarpc::serde_transport::Transport<
     tokio::net::UnixStream,
     tarpc::ClientMessage<HelperServiceRequest>,
     tarpc::Response<HelperServiceResponse>,
-    tarpc::tokio_serde::formats::Bincode<
+    tarpc::tokio_serde::formats::Json<
         tarpc::ClientMessage<HelperServiceRequest>,
         tarpc::Response<HelperServiceResponse>,
     >,
@@ -108,7 +108,7 @@ async fn version_request(listener: tokio::net::UnixListener) -> (VersionTranspor
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
     let mut transport = tarpc::serde_transport::new(
         codec.new_framed(stream),
-        tarpc::tokio_serde::formats::Bincode::default(),
+        tarpc::tokio_serde::formats::Json::default(),
     );
     let tarpc::ClientMessage::Request(request) = transport.next().await.unwrap().unwrap() else {
         panic!("expected version request");

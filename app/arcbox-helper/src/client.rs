@@ -20,7 +20,7 @@ pub enum ClientError {
     /// The helper returned a version string that cannot be interpreted safely.
     #[error("unrecognized helper version {0:?}")]
     UnrecognizedVersion(String),
-    /// The helper's RPC wire major or minimum version is incompatible.
+    /// The helper's package major or minimum version is incompatible.
     #[error("helper {installed} is incompatible; required {required}")]
     IncompatibleVersion {
         /// Version line returned by the helper.
@@ -43,7 +43,7 @@ impl Client {
     ///
     /// Uses launchd-managed socket by default (`/var/run/arcbox-helper.sock`),
     /// overridable via `ARCBOX_HELPER_SOCKET` env var. The connection is
-    /// rejected before any mutation when the helper wire version is
+    /// rejected before any mutation when the helper package version is
     /// incompatible with this client.
     pub async fn connect() -> Result<Self, ClientError> {
         Self::connect_to(&crate::socket_path()).await
@@ -53,7 +53,7 @@ impl Client {
     ///
     /// Unlike [`connect()`](Self::connect), this does not read the
     /// `ARCBOX_HELPER_SOCKET` env var, making it safe for parallel tests. It
-    /// enforces the same wire-version check as [`connect()`](Self::connect).
+    /// enforces the same package-version check as [`connect()`](Self::connect).
     pub async fn connect_to(path: &str) -> Result<Self, ClientError> {
         let (client, dispatch) = Self::connect_owned_to(path).await?;
         drop(dispatch.detach());
@@ -71,11 +71,9 @@ impl Client {
         ),
         ClientError,
     > {
-        let transport = tarpc::serde_transport::unix::connect(
-            path,
-            tarpc::tokio_serde::formats::Bincode::default,
-        )
-        .await?;
+        let transport =
+            tarpc::serde_transport::unix::connect(path, tarpc::tokio_serde::formats::Json::default)
+                .await?;
         let tarpc::client::NewClient { client, dispatch } =
             crate::HelperServiceClient::new(tarpc::client::Config::default(), transport);
         let dispatch = AbortOnDropHandle::new(tokio::spawn(dispatch));
@@ -86,9 +84,8 @@ impl Client {
 
     /// Connects only long enough to report the installed helper version.
     ///
-    /// This intentionally skips compatibility enforcement so diagnostics can
-    /// explain why an old helper must be replaced. It never exposes a client
-    /// capable of sending mutation RPCs.
+    /// This skips package-version enforcement for JSON-speaking helpers.
+    /// It never exposes a client capable of sending mutation RPCs.
     pub async fn probe_version() -> Result<String, ClientError> {
         let inner = crate::connect().await?;
         Self { inner }.version().await

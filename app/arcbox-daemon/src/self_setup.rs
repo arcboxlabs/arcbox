@@ -38,10 +38,9 @@ pub trait SetupTask: Send + Sync {
 /// Connects once and runs tasks sequentially — this keeps the helper alive
 /// for the duration (launchd socket activation starts it on first connect).
 /// If the helper is unreachable **or older than
-/// [`arcbox_constants::helper::MIN_HELPER_VERSION`]**, all tasks are skipped so
-/// we never drive new RPCs (e.g. `hosts_alias_*`) into a legacy binary that
-/// misdecodes tarpc ordinals. [`Client::connect`] enforces that invariant for
-/// every helper consumer, including route reconciliation.
+/// [`arcbox_constants::helper::MIN_HELPER_VERSION`]**, all tasks are skipped.
+/// [`Client::connect`] checks the JSON transport and helper version for every
+/// helper consumer, including route reconciliation.
 pub async fn run(tasks: &[&dyn SetupTask]) {
     let client = match Client::connect().await {
         Ok(c) => c,

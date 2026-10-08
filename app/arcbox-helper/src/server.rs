@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
-use tarpc::tokio_serde::formats::Bincode;
+use tarpc::tokio_serde::formats::Json;
 use tokio::task::JoinSet;
 
 use arcbox_helper::HelperService as _;
@@ -126,7 +126,7 @@ async fn serve_connection(
     server: HelperServer,
 ) -> Result<(), arcbox_helper::HelperError> {
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
-    let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
+    let transport = tarpc::serde_transport::new(codec.new_framed(conn), Json::default());
     let mut in_flight = JoinSet::new();
     {
         let mut requests = Box::pin(BaseChannel::with_defaults(transport.fuse()).requests());

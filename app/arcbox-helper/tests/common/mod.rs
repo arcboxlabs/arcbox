@@ -10,7 +10,7 @@ use arcbox_helper::client::Client;
 use arcbox_helper::validate;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
-use tarpc::tokio_serde::formats::Bincode;
+use tarpc::tokio_serde::formats::Json;
 
 #[derive(Clone)]
 pub struct MockHelperServer {
@@ -195,7 +195,7 @@ pub async fn setup_with_version(
             let Ok((conn, _)) = listener.accept().await else {
                 break;
             };
-            let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
+            let transport = tarpc::serde_transport::new(codec.new_framed(conn), Json::default());
             tokio::spawn(
                 BaseChannel::with_defaults(transport)
                     .execute(server.clone().serve())

@@ -1630,15 +1630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6690,13 +6681,13 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf600e7036b17782571dd44fa0a5cea3c82f60db5137f774a325a76a0d6852b"
 dependencies = [
- "bincode",
  "bytes",
  "educe",
  "futures-core",
  "futures-sink",
  "pin-project",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

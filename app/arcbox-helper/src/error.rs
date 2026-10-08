@@ -1,8 +1,6 @@
 //! Structured helper errors on the tarpc wire.
 //!
-//! **Wire stability**: bincode encodes enum variants by index. Append new
-//! variants only at the end. Renaming fields is fine with serde rename; do
-//! not reorder or insert variants in the middle of a released helper major.
+//! JSON encodes variants by name. Unknown variants fail deserialization.
 
 use std::path::Path;
 
