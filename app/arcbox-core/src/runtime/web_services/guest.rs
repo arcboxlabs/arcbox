@@ -41,6 +41,19 @@ impl Runtime {
         })
     }
 
+    /// Holds the captured machine until host connection and signing work finish.
+    ///
+    /// # Errors
+    /// Returns an error if the captured machine is stopping, unavailable, or replaced.
+    pub fn hold_web_guest(
+        &self,
+        guest: &CapturedWebGuest,
+    ) -> Result<arcbox_engine::machine::HostHold> {
+        Ok(self
+            .machine_manager
+            .host_hold_expected(&guest.machine, &guest.incarnation)?)
+    }
+
     /// Opens the captured guest's signing connection without recapturing by name.
     /// Machine callers must retain a host hold until connection and signing work finish.
     ///

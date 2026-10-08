@@ -1,4 +1,7 @@
-//! One parked host connection signs one verified, host-owned CSR with the current published root.
+//! Retained guest workers sign verified, host-owned CSRs with the current published root.
+
+mod lifecycle;
+mod machines;
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
@@ -12,10 +15,16 @@ use futures::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::watch,
+    task::JoinSet,
 };
 use tokio_util::{codec::LengthDelimitedCodec, sync::CancellationToken};
 
-use crate::context::DaemonContext;
+use crate::{context::DaemonContext, guest_workers::join_services};
+
+use lifecycle::{drain_on_change, guest_changed};
+
+const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const IDENTITY_INTERVAL: Duration = Duration::from_secs(30);
 
 pub async fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let authority = ctx.local_ca.subscribe();
@@ -31,6 +40,22 @@ async fn run(
     authority: watch::Receiver<Option<Arc<KeychainAuthority>>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    let shutdown = shutdown.child_token();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(run_system(
+        Arc::clone(&runtime),
+        authority.clone(),
+        shutdown.clone(),
+    ));
+    tasks.spawn(machines::run(runtime, authority, shutdown.clone()));
+    join_services(tasks, shutdown).await
+}
+
+async fn run_system(
+    runtime: Arc<Runtime>,
+    authority: watch::Receiver<Option<Arc<KeychainAuthority>>>,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let mut state = runtime.subscribe_system_vm_state();
     loop {
         let ready = state.wait_for(|state| state.is_ready());
@@ -38,7 +63,14 @@ async fn run(
             () = shutdown.cancelled() => return Ok(()),
             ready = ready => if ready.is_err() { return Ok(()); },
         }
-        let result = serve_once(&runtime, &authority, &shutdown).await;
+        let result = serve_once(
+            &runtime,
+            &authority,
+            DEFAULT_MACHINE_NAME,
+            state.clone(),
+            &shutdown,
+        )
+        .await;
         if shutdown.is_cancelled() {
             return Ok(());
         }
@@ -46,18 +78,40 @@ async fn run(
             tracing::warn!(%error, "local CA signing connection failed");
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(()),
-                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                () = tokio::time::sleep(RETRY_INTERVAL) => {}
             }
         }
     }
 }
 
-async fn serve_once(
+async fn serve_once<T: Send + Sync>(
     runtime: &Arc<Runtime>,
     authority: &watch::Receiver<Option<Arc<KeychainAuthority>>>,
+    name: &str,
+    changed: watch::Receiver<T>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
-    let guest = runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?;
+    let guest = runtime.capture_web_guest(name)?;
+    let _hold = if name == runtime.default_machine_name() {
+        None
+    } else {
+        Some(runtime.hold_web_guest(&guest)?)
+    };
+    let session = shutdown.child_token();
+    drain_on_change(
+        sign_once(runtime, authority, &guest, &session),
+        guest_changed(changed, || Ok(runtime.capture_web_guest(name)? == guest)),
+        &session,
+    )
+    .await
+}
+
+async fn sign_once(
+    runtime: &Arc<Runtime>,
+    authority: &watch::Receiver<Option<Arc<KeychainAuthority>>>,
+    guest: &CapturedWebGuest,
+    shutdown: &CancellationToken,
+) -> Result<()> {
     let connecting_guest = guest.clone();
     let connecting_runtime = Arc::clone(runtime);
     let stream = connect_native(shutdown, move || {
@@ -69,7 +123,7 @@ async fn serve_once(
     SigningSession {
         current: authority,
         shutdown,
-        authorize: authorization(Arc::clone(runtime), guest),
+        authorize: authorization(Arc::clone(runtime), guest.clone()),
     }
     .serve(stream, |authority, request| Ok(authority.sign(request)?))
     .await
@@ -201,6 +255,12 @@ mod tests {
     }
 
     async fn runtime() -> (Arc<Runtime>, tempfile::TempDir) {
+        runtime_with_fixture(arcbox_core::runtime::NetworkFixture::default()).await
+    }
+
+    async fn runtime_with_fixture(
+        fixture: arcbox_core::runtime::NetworkFixture,
+    ) -> (Arc<Runtime>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Arc::new(
             Runtime::new(arcbox_core::Config {
@@ -208,7 +268,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap()
-            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
+            .with_network_fixture(fixture),
         );
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
@@ -361,11 +421,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_waits_for_native_connect_and_closes_its_socket() {
+    async fn identity_source_failure_waits_for_native_connect_and_closes_its_socket() {
         use std::{io::Read, os::unix::net::UnixStream, pin::pin, task::Poll};
 
         let shutdown = CancellationToken::new();
         let cancelled = shutdown.clone();
+        let (invalidated, invalidation) = tokio::sync::oneshot::channel();
         let task = crate::background_task::BackgroundTask::default();
         let (host, mut guest) = UnixStream::pair().unwrap();
         guest
@@ -374,23 +435,34 @@ mod tests {
         let (started, connecting) = tokio::sync::oneshot::channel();
         let (finish, finished) = std::sync::mpsc::channel();
         task.start(async move {
-            connect_native(&cancelled, move || {
-                started.send(()).unwrap();
-                finished.recv().unwrap();
-                Ok(host.into())
-            })
-            .await?;
-            Ok(())
+            drain_on_change(
+                async {
+                    connect_native(&cancelled, move || {
+                        started.send(()).unwrap();
+                        finished.recv().unwrap();
+                        Ok(host.into())
+                    })
+                    .await?;
+                    Ok(())
+                },
+                async {
+                    invalidation.await?;
+                    anyhow::bail!("VM identity source failed")
+                },
+                &cancelled,
+            )
+            .await
         })
         .await;
         connecting.await.unwrap();
-        shutdown.cancel();
+        invalidated.send(()).unwrap();
+        shutdown.cancelled().await;
         let mut joining = pin!(task.join());
         assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
         finish.send(()).unwrap();
         assert_eq!(
             joining.await.unwrap_err().to_string(),
-            "TLS signer cancelled"
+            "VM identity source failed"
         );
         assert_eq!(guest.read(&mut [0]).unwrap(), 0);
     }
@@ -441,28 +513,22 @@ mod tests {
 
     #[tokio::test]
     async fn vm_replacement_fences_signing_and_delivery() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         for replaced_before_request in [true, false] {
-            let (runtime, _directory) = runtime().await;
+            let fixture = arcbox_core::runtime::NetworkFixture::default();
+            let (runtime, _directory) = runtime_with_fixture(fixture.clone()).await;
+            let target = runtime.capture_web_guest(DEFAULT_MACHINE_NAME).unwrap();
             let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
-            let same_vm = Arc::new(AtomicBool::new(!replaced_before_request));
-            let expected = Arc::clone(&same_vm);
             let (host, guest) = tokio::io::duplex(1024);
             let (started, signing) = tokio::sync::oneshot::channel();
             let (finish, finished) = std::sync::mpsc::channel();
+            if replaced_before_request {
+                fixture.restart();
+            }
             let task = tokio::spawn(async move {
-                let authorize = authorization(
-                    Arc::clone(&runtime),
-                    runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?,
-                );
                 SigningSession {
                     current: &current,
                     shutdown: &CancellationToken::new(),
-                    authorize: move |name: &str| {
-                        ensure!(expected.load(Ordering::SeqCst), "VM changed during signing");
-                        authorize(name)
-                    },
+                    authorize: authorization(runtime, target),
                 }
                 .serve(host, move |_, _| {
                     started.send(()).unwrap();
@@ -478,14 +544,62 @@ mod tests {
                 assert!(signing.await.is_err());
             } else {
                 signing.await.unwrap();
-                same_vm.store(false, Ordering::SeqCst);
+                fixture.restart();
                 finish.send(()).unwrap();
             }
-            assert_eq!(
-                task.await.unwrap().unwrap_err().to_string(),
-                "VM changed during signing"
+            assert!(
+                task.await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("VM incarnation changed")
             );
             assert!(guest.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_changes_close_parked_sessions_from_events_or_rescan() {
+        use std::{pin::pin, task::Poll};
+
+        for notify in [true, false] {
+            let fixture = arcbox_core::runtime::NetworkFixture::default();
+            let (runtime, _directory) = runtime_with_fixture(fixture.clone()).await;
+            let target = runtime.capture_web_guest(DEFAULT_MACHINE_NAME).unwrap();
+            let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
+            let (changed, changes) = watch::channel(());
+            let shutdown = CancellationToken::new();
+            let (host, mut guest) = tokio::io::duplex(1024);
+            let work = SigningSession {
+                current: &current,
+                shutdown: &shutdown,
+                authorize: authorization(Arc::clone(&runtime), target.clone()),
+            }
+            .serve(host, |_, _| panic!("parked sessions must not sign"));
+            let mut session = pin!(drain_on_change(
+                work,
+                guest_changed(changes, || {
+                    Ok(runtime.capture_web_guest(DEFAULT_MACHINE_NAME)? == target)
+                }),
+                &shutdown,
+            ));
+            assert!(matches!(futures::poll!(&mut session), Poll::Pending));
+            fixture.restart();
+            if notify {
+                changed.send_replace(());
+            } else {
+                tokio::time::advance(IDENTITY_INTERVAL).await;
+            }
+            assert_eq!(
+                session.await.unwrap_err().to_string(),
+                "TLS signer cancelled"
+            );
+            assert_eq!(
+                tokio::io::AsyncReadExt::read(&mut guest, &mut [0])
+                    .await
+                    .unwrap(),
+                0
+            );
         }
     }
 
