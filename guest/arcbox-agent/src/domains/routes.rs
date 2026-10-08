@@ -3,6 +3,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
+use anyhow::Context;
+
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -36,10 +38,7 @@ pub(super) struct Routes {
 
 impl Drop for Routes {
     fn drop(&mut self) {
-        if let Some(index) = &self.index {
-            index.withdraw();
-        }
-        self.frontend_cancel.cancel();
+        self.begin_shutdown();
     }
 }
 
@@ -71,9 +70,11 @@ impl Routes {
         inbox: mpsc::UnboundedReceiver<Command>,
         index: Publisher,
         cancel: CancellationToken,
-    ) {
+    ) -> anyhow::Result<()> {
         self.index = Some(index);
-        self.cleanup_index().await;
+        if let Err(error) = Self::cleanup_index(self.index.as_ref()).await {
+            tracing::warn!(%error, "index redirect cleanup failed");
+        }
         match iptables::sweep(RULE_OWNER).await {
             Ok(0) => {}
             Ok(removed) => {
@@ -98,31 +99,34 @@ impl Routes {
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
             }
         }
-        self.follow(inbox, cancel).await;
-        self.stop_frontend().await;
-        self.cleanup_index().await;
+        let result = self.follow(inbox, cancel).await;
+        let cleanup = self.shutdown().await;
+        match (result, cleanup) {
+            (Ok(()), cleanup) => cleanup,
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("{cleanup:#}"))),
+        }
     }
 
-    async fn cleanup_index(&self) {
-        if let Some(index) = &self.index
-            && let Err(error) = index.cleanup().await
-        {
-            tracing::warn!(%error, "index redirect cleanup failed");
+    async fn cleanup_index(index: Option<&Publisher>) -> anyhow::Result<()> {
+        if let Some(index) = index {
+            index.cleanup().await?;
         }
+        Ok(())
     }
 
     async fn follow(
         &mut self,
         mut inbox: mpsc::UnboundedReceiver<Command>,
         cancel: CancellationToken,
-    ) {
+    ) -> anyhow::Result<()> {
         loop {
             let due = self.next_scan();
             tokio::select! {
                 () = cancel.cancelled() => break,
                 Some(result) = self.frontend.join_next() => {
-                    if let Err(error) = result { tracing::warn!(%error, "domain frontend exited"); }
-                    break;
+                    result.context("domain frontend task failed")?;
+                    anyhow::bail!("domain frontend stopped before shutdown");
                 },
                 command = inbox.recv() => match command {
                     Some(command) => self.handle_command(command).await,
@@ -131,18 +135,25 @@ impl Routes {
                 () = sleep_until(due) => self.scan_due().await,
             }
         }
+        Ok(())
     }
 
-    async fn stop_frontend(&mut self) {
+    fn begin_shutdown(&self) {
+        self.services.clear();
         if let Some(index) = &self.index {
             index.withdraw();
         }
         self.frontend_cancel.cancel();
-        while let Some(result) = self.frontend.join_next().await {
-            if let Err(error) = result {
-                tracing::warn!(%error, "domain frontend join failed");
-            }
-        }
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.begin_shutdown();
+        finish_shutdown(
+            &mut self.frontend,
+            iptables::sweep(RULE_OWNER),
+            Self::cleanup_index(self.index.as_ref()),
+        )
+        .await
     }
 
     fn next_scan(&self) -> Option<Instant> {
@@ -294,6 +305,35 @@ impl Routes {
     }
 }
 
+async fn finish_shutdown(
+    frontend: &mut tokio::task::JoinSet<()>,
+    domain_cleanup: impl Future<Output = anyhow::Result<usize>>,
+    index_cleanup: impl Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
+    while let Some(result) = frontend.join_next().await {
+        if let Err(error) = result {
+            failures.push(format!("frontend join: {error}"));
+        }
+    }
+    // Keep redirects until the frontend releases every connection and its listener.
+    let (domains, index) = tokio::join!(domain_cleanup, index_cleanup);
+    for (owner, result) in [
+        ("domain redirects", domains.map(|_| ())),
+        ("index redirects", index),
+    ] {
+        if let Err(error) = result {
+            failures.push(format!("{owner}: {error:#}"));
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "domain shutdown failed: {}",
+        failures.join("; ")
+    );
+    Ok(())
+}
+
 impl Tracked {
     async fn http_backend(&mut self, mut candidates: BTreeSet<u16>) -> Option<HttpBackend> {
         loop {
@@ -415,13 +455,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_exit_withdraws_index_before_cancelling_and_joining_frontend() {
-        use arcbox_dns::{NamePattern, claims::Claim};
-        for stop in ["inbox", "cancel"] {
+    async fn actor_exit_withdraws_all_publication_before_frontend_teardown() {
+        use arcbox_dns::{
+            NamePattern,
+            claims::Claim,
+            registry::{InstanceAuthority, InstanceTarget},
+        };
+        for stop in ["inbox", "cancel", "drop"] {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 let dns = crate::dns_server::DnsRegistry::default();
                 let apex: arcbox_constants::dns::Domain = "arcbox.local".parse().unwrap();
                 let gateway = "172.17.0.1".parse().unwrap();
+                dns.write()
+                    .unwrap()
+                    .replace_instance_authorities(vec![InstanceAuthority {
+                        root: apex.clone(),
+                        target: InstanceTarget::Current,
+                    }]);
                 dns.write()
                     .unwrap()
                     .replace(
@@ -434,14 +484,74 @@ mod tests {
                         Some(std::net::IpAddr::V4(gateway)),
                     )
                     .unwrap();
-                let mut routes = Routes::new(WebServices::new(dns.clone()));
+                let services = WebServices::new(dns.clone());
+                let source = services.directory_source();
+                source.ready();
+                let name = "web.arcbox.local";
+                let ip = "172.17.0.2".parse().unwrap();
+                dns.write()
+                    .unwrap()
+                    .replace(
+                        "web".into(),
+                        vec![Claim::exclusive(
+                            NamePattern::Exact(name.parse().unwrap()),
+                            "web".into(),
+                            "container".into(),
+                        )],
+                        Some(std::net::IpAddr::V4(ip)),
+                    )
+                    .unwrap();
+                let facts = EndpointFacts::from_inspect(
+                    &serde_json::json!({
+                        "Id": "web", "Name": "/web", "State": { "Pid": 1 },
+                        "NetworkSettings": {
+                            "SandboxKey": "/var/run/docker/netns/web",
+                            "Networks": { "bridge": { "IPAddress": ip.to_string() } }
+                        }
+                    }),
+                    &apex,
+                )
+                .unwrap();
+                services.publish(
+                    &facts,
+                    SelectedRoutes::choose(
+                        Some(HttpBackend {
+                            port: 3000,
+                            protocol: Some(HttpProtocol::Http1),
+                        }),
+                        None,
+                        &BTreeSet::new(),
+                    ),
+                );
+                let pinned = services
+                    .observe_managed_tls(name, ip, ip.into())
+                    .await
+                    .unwrap();
+                assert_eq!(services.snapshot(None).len(), 2);
+                let mut routes = Routes::new(services.clone());
                 routes.index = Some(Publisher::new(dns.clone(), apex, gateway));
                 let child = routes.frontend_cancel.clone();
+                if stop == "drop" {
+                    drop(routes);
+                    assert!(child.is_cancelled());
+                    let snapshot = services.snapshot(None);
+                    assert!(snapshot.is_empty(), "{snapshot:?}");
+                    assert!(services.verify_tls_route(name, ip, &pinned).is_err());
+                    assert!(dns.read().unwrap().get("web").is_some());
+                    return;
+                }
                 let (observed, observation) = tokio::sync::oneshot::channel();
+                let frontend_services = services.clone();
                 routes.frontend.spawn(async move {
                     child.cancelled().await;
                     observed
-                        .send(dns.read().unwrap().get("system:index").is_none())
+                        .send(
+                            dns.read().unwrap().get("system:index").is_none()
+                                && dns.read().unwrap().get("web").is_some()
+                                && frontend_services
+                                    .verify_tls_route(name, ip, &pinned)
+                                    .is_err(),
+                        )
                         .unwrap();
                 });
                 let (sender, inbox) = mpsc::unbounded_channel();
@@ -452,14 +562,77 @@ mod tests {
                 } else {
                     cancel.cancel();
                 }
-                routes.follow(inbox, cancel).await;
-                routes.stop_frontend().await;
+                routes.follow(inbox, cancel).await.unwrap();
+                routes.begin_shutdown();
+                let snapshot = services.snapshot(None);
+                assert!(snapshot.is_empty(), "{snapshot:?}");
+                finish_shutdown(&mut routes.frontend, async { Ok(0) }, async { Ok(()) })
+                    .await
+                    .unwrap();
                 assert!(observation.await.unwrap(), "{stop}");
                 assert!(routes.frontend.is_empty());
             })
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_frontend_then_awaits_all_cleanup_and_reports_every_failure() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            use std::{cell::Cell, pin::pin};
+            use tokio::sync::oneshot;
+
+            let mut routes = Routes::new(WebServices::default());
+            routes.frontend.spawn(async { panic!("frontend panic") });
+            let (release_frontend, frontend_gate) = oneshot::channel();
+            let (frontend_done, joined) = oneshot::channel();
+            let child = routes.frontend_cancel.clone();
+            routes.frontend.spawn(async move {
+                child.cancelled().await;
+                frontend_gate.await.unwrap();
+                frontend_done.send(()).unwrap();
+            });
+            let (release_domains, domains_gate) = oneshot::channel::<anyhow::Result<usize>>();
+            let (release_index, index_gate) = oneshot::channel::<anyhow::Result<()>>();
+            let domains_started = Cell::new(false);
+            let index_started = Cell::new(false);
+            routes.begin_shutdown();
+            let error = {
+                let mut shutdown = pin!(finish_shutdown(
+                    &mut routes.frontend,
+                    async {
+                        domains_started.set(true);
+                        domains_gate.await.unwrap()
+                    },
+                    async {
+                        index_started.set(true);
+                        index_gate.await.unwrap()
+                    },
+                ));
+                assert!(futures::poll!(&mut shutdown).is_pending());
+                assert!(!domains_started.get() && !index_started.get());
+                release_frontend.send(()).unwrap();
+                joined.await.unwrap();
+                assert!(futures::poll!(&mut shutdown).is_pending());
+                assert!(domains_started.get() && index_started.get());
+                release_domains
+                    .send(Err(anyhow::anyhow!("domain rule busy")))
+                    .unwrap();
+                assert!(futures::poll!(&mut shutdown).is_pending());
+                release_index
+                    .send(Err(anyhow::anyhow!("index rule busy")))
+                    .unwrap();
+                shutdown.await.unwrap_err()
+            };
+            assert!(routes.frontend.is_empty());
+            let message = format!("{error:#}");
+            for failure in ["frontend panic", "domain rule busy", "index rule busy"] {
+                assert!(message.contains(failure), "{message}");
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -78,10 +78,9 @@ non-obvious invariants and failure signatures.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
   guest's `/arcbox/bin/arcbox-agent` (the agent is NOT baked into the EROFS rootfs — the
-  rootfs only wires that path into inittab). Pairing a new daemon with a stale
-  agent trips the handshake above: boot fails with the intentional, actionable
-  "staged agent binary is stale" error (`check_agent_protocol`, `agent_client.rs`)
-  rather than a silent misdecode — do not treat it as a regression. The
+  rootfs only wires that path into inittab). Stage paired daemon and agent builds
+  together. `check_agent_protocol` rejects agents below the minimum protocol
+  version; the handshake does not detect different builds at protocol 7. The
   rootfs/kernel/FEX half is a SEPARATE, tag-driven release from the sibling repo
   `../boot-assets`: pushing a `vX.Y.Z` tag there builds the EROFS rootfs for both
   arches and publishes a merged `manifest.json` to `boot.arcboxcdn.com`
@@ -240,6 +239,7 @@ non-obvious invariants and failure signatures.
   Serve the browser index from `domains/index/` only for the current exact `system:index` registration and original gateway destination. Require one matching HTTP Host. Select directory URLs under the same Registry read lock. Keep endpoint readiness independent from Docker directory availability.
   Serve managed TLS for the same exact index registration without an upstream. Pin its revision across host authorization, certificate configuration, and handshake. Report the typed index route even when the Docker directory is unavailable.
   Publish `system:index` only after the shared frontend binds and both gateway redirects precede Docker's PREROUTING jump. `domains/index/publisher.rs` owns only `arcbox-index:` rules. Withdraw the registration before repair or frontend shutdown. Join the frontend before sweeping redirects. Retry failed publication without requiring a container.
+  Domain actor shutdown must withdraw installed routes and index ownership before cancellation. Join the frontend before sweeping domain and index redirects, attempt both cleanups, and propagate every failure. Drop must also invalidate installed routes. Preserve Docker-owned DNS registrations.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a
@@ -275,8 +275,9 @@ non-obvious invariants and failure signatures.
   then `file <newest>`. `stage_dev_boot_assets` (`tests/e2e/src/boot_assets.rs`)
   copies the **newest-mtime** agent across those three locations, so a fresh
   build that wasn't re-staged loses to an old binary from another tree (ABX-385
-  field-skew class). Wrong-version agents now surface as the handshake rejection
-  (`engine/arcbox-engine/src/agent_client.rs`).
+  field-skew class). The handshake rejects protocols below its minimum
+  (`engine/arcbox-engine/src/agent_client.rs`). Stage paired daemon and agent
+  builds together; the handshake does not detect different builds at protocol 7.
 - **"engine ready" then intermittent 500/EOF on first API calls** →
   read `~/.arcbox/log/agent.log`, grep for `DockerProbe` / `/_ping`. Cause:
   readiness gated on socket rather than the `/_ping` probe (ABX-408 regression).

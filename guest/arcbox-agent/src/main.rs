@@ -369,13 +369,22 @@ async fn main() -> Result<()> {
 
     // Shut down background tasks.
     cancel.cancel();
-    let _ = tokio::join!(dns_handle, docker_handle, domains_handle);
+    let (_, _, domains_result) = tokio::join!(dns_handle, docker_handle, domains_handle);
     #[cfg(target_os = "linux")]
     let _ = nfs_handle.await;
     #[cfg(target_os = "linux")]
     let _ = ssh_auth_handle.await;
 
-    result
+    let domains_result = domains_result
+        .context("joining container domain task")
+        .and_then(std::convert::identity);
+    match (result, domains_result) {
+        (Ok(()), domains_result) => domains_result,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("container domain task: {cleanup:#}")))
+        }
+    }
 }
 
 /// The NIC the host relay's traffic reaches the guest on; `eth0` when the

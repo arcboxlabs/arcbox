@@ -201,6 +201,13 @@ impl WebServices {
             .remove(id);
     }
 
+    pub(super) fn clear(&self) {
+        self.installed
+            .write()
+            .expect("web services lock poisoned")
+            .clear();
+    }
+
     pub(super) fn contains(&self, id: &str) -> bool {
         self.installed
             .read()

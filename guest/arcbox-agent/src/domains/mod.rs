@@ -74,13 +74,14 @@ pub enum Command {
 impl DomainRoutes {
     /// Starts the task. It sweeps a previous agent's rules, starts the HTTPS
     /// proxy with the host signing channel, then follows the containers
-    /// it is told about until `cancel`.
+    /// it is told about until `cancel`. The task joins its frontend and removes
+    /// its redirects before returning; cleanup failures propagate to the caller.
     #[must_use]
     pub fn spawn(
         dns: &crate::dns_server::GuestDnsServer,
         network: arcbox_constants::container_network::ContainerNetwork,
         cancel: CancellationToken,
-    ) -> (Self, JoinHandle<()>) {
+    ) -> (Self, JoinHandle<anyhow::Result<()>>) {
         let (commands, inbox) = mpsc::unbounded_channel();
         let services = WebServices::new(dns.registry());
         let index = index::Publisher::new(
@@ -88,7 +89,14 @@ impl DomainRoutes {
             dns.domain().clone(),
             network.docker_bridge_gateway(),
         );
-        let task = tokio::spawn(Routes::new(services.clone()).run(inbox, index, cancel));
+        let routes = Routes::new(services.clone());
+        let task = tokio::spawn(async move {
+            let result = routes.run(inbox, index, cancel).await;
+            if let Err(error) = &result {
+                tracing::error!(error = %format!("{error:#}"), "container domain task failed");
+            }
+            result
+        });
         (Self { commands, services }, task)
     }
 
