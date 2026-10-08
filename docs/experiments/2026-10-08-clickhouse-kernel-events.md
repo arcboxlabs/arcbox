@@ -116,3 +116,44 @@ Linux `cpu.stat` flushes per-CPU rstat state while holding its base lock with in
 `startup-events-on-03` completes all 60 queries, with a median host command time of 54.529 ms and a maximum of 83.218 ms. The full validator passes. All 6,641,887 retained events have zero loss or consumption, and both snapshots contain 717 threads. `ch-started.json` identifies guest PID 25223; both snapshots match that PID, NSpid 1, and the same container cgroup. The 36 workers all terminate with SIGTERM, and all three containers stop after trace export. No warning or error appears in the saved ClickHouse log.
 
 This repetition exercises early PID capture and normal frozen identity collection. It does not exercise identity collection after a readiness failure, and query success alone does not establish short scheduling waits. The startup failure remains intermittent; no production repair follows from this repetition.
+
+## Queue pressure and delay in otherwise successful queries
+
+Independent lifecycle analysis of the partial `startup-events-on-02` trace establishes a peak of 644 simultaneously runnable, off-CPU descendants: 594 from observed sleep/wakeup transitions and 50 from runnable switch-outs. Another 13 descendants are guest-current at that point. At least 400 tasks remain queued for a cumulative 29.483906 seconds. At END, 639 are queued, including 412 with waits of at least ten seconds. There are no state anomalies. Recent comm names identify 507 queued Common/BgSchPool tasks at their peak. The earlier exploratory count of 514 used any previously observed name and is superseded. Fork lineage still does not replace the missing container identities.
+
+The completed `startup-events-on-03` capture also contains substantial delays despite successful SQL probes. BgSchPool 25346 waits 4.474759 seconds after a runnable switch-out, BgSchPool 25803 waits 4.438620 seconds after wakeup, and Common 25939 waits 4.063912 seconds after wakeup. For 25346, the signal-delivery-to-return candidate spans 4.545021 seconds; only nine microseconds separate its final switch-in from `rt_sigreturn`. The Common delays precede dispatch rather than appearing as long delivery-to-return candidates. Both identity snapshots retain matching start ticks and NSpid for all 717 threads.
+
+## Lock contention and scheduler runtime in a completed failure
+
+The next helper adds `sched/sched_stat_runtime`, `lock/contention_begin`, and `lock/contention_end` to the same recording method. Its SHA256 is `8b882a42d29639b5a52271c92860b15f2085f3c39aa367965b99c2651f39025d`. The kernel image and configuration are unchanged. The current validator requires all 18 event enables; validate earlier 15-event captures with their retained validator and helper snapshots. Each new case preserves its driver sources.
+
+`startup-locks-on-01`, prefix `stall-warm-startup-contention-fe335e9a`, completes the 300-second observation with 55 successful queries and one timeout. Query 6 takes 4.004790 seconds before the host timeout. Its freeze request takes 20.717278 seconds to return. The recorded analysis window spans guest mono 5221.485726–5273.398767. All loss and consumption counters are zero, and full validation passes. Both identity snapshots contain 706 threads with matching start ticks and NSpid, including 512 BgSchPool and eight Common threads. All 36 workers terminate with SIGTERM; all containers stop after export. Keeper session expiry occurs before cleanup.
+
+The trace retains 170,876 scheduler-runtime events, 7,424 contention-begin events, and 7,409 contention-end events. The longest completed target wakeup-to-dispatch wait is 25.337311 seconds. Two identity-verified chains connect long SPIN contention and scheduler runtime charges to subsequent runnable waits:
+
+| Thread | SPIN interval | Following runtime charge | Runnable wait | Final switch-in → sigreturn |
+|---|---:|---:|---:|---:|
+| Common 3195 | 349.098 ms | 349.125082 ms | 15.412658 s | 12 µs |
+| BgSchPool 2641 | 490.098 ms | 490.121915 ms | 19.683360 s | 228 µs |
+
+For Common 3195, `cpu6.trace:63868–63870` records SPIN begin at 5257.628095, acquisition at 5257.977193, and the runtime charge. The task leaves with state R+ at 5257.977267 (`cpu6.trace:63876`), returns at 5273.389925 (`cpu11.trace:59546`), and reaches `rt_sigreturn` at 5273.389937. Its delivery-to-return interval is 15.761910 seconds. Two earlier acquisitions precede signal delivery and are not part of that interval.
+
+For BgSchPool 2641, `cpu14.trace:67135–67138` contains the SPIN/runtime sample. The task leaves with state R+ at 5253.707533 (`cpu14.trace:67180`), returns at 5273.390893 (`cpu17.trace:65541`), and reaches `rt_sigreturn` at 5273.391121 (`cpu17.trace:65561`). Its delivery-to-return interval is 25.380164 seconds, including repeated kernel activity before the long runnable wait.
+
+Both samples use printed lock hash `0000000048a27d59`. The exact-SPIN analyzer pairs all 4,434 recorded waits for that hash. Their maximum is 504.577 ms, their concurrent recorded waiter peak is 18, and their elapsed-time sum is 443.844729 seconds. That sum overlaps across tasks and is neither wall time nor physical CPU time. Across 64 hashes, all 5,590 exact-SPIN begins pair without duplicates or open records.
+
+```sh
+python3 tests/bench/signoz/validate_clickhouse_trace.py /absolute/startup-locks-on-01 on 8b882a42d29639b5a52271c92860b15f2085f3c39aa367965b99c2651f39025d
+python3 tests/bench/signoz/analyze_clickhouse_spin.py --self-test
+python3 tests/bench/signoz/analyze_clickhouse_spin.py /absolute/startup-locks-on-01
+```
+
+The first exploratory lock parser conflated per-CPU PID 0 identities and treated mutex optimistic-spin/sleep events as simple pairs. Its duplicate/unmatched records and reported mutex maximum are not validated evidence. The retained v2 analysis and repository analyzer separate idle tasks by CPU and pair only exact SPIN events. Their results match. Self-checks cover idle keys, cross-thread pairing, negative intervals, and runtime parsing.
+
+Linux 6.18.38 `queued_spin_lock_slowpath` emits these events around the MCS queue path. The pending-bit optimistic path bypasses them. A contention-end event means acquisition, not release; the printed `%p` value is a hash, not a resolved lock identity. `get_signal` emits `signal_deliver` while holding `sighand->siglock`, before entering the user handler. Delivery-to-return therefore bounds a candidate signal path, not continuous user-handler execution. Scheduler runtime charges and guest mono spans can include host vCPU descheduling. These chains do not alone prove EEVDF debt, identify the lock, or establish the original glibc notifier dependency.
+
+The median observed signal-10 generation interval is 1.410079 seconds. This agrees with the previously documented old ClickHouse profiler-period truncation: the configured 10000000000 ns becomes 1410065408 ns. The fixture still contains that known defect; the event count is not evidence for a new ten-second timer mechanism.
+
+## Host scheduling preflight
+
+A ten-second macOS System Trace attached to the owned VZ helper succeeds and exposes named threads `com.apple.virtualization.thread.cpu-0` through `cpu-17`. Context-switch records contain host thread IDs, physical cores, states, and nanosecond timestamps. This provides an independent route to measure host execution. The initial template reports a five-second window, but the actual context-switch coverage is only about 334.6 ms at the recording tail. Long inferred initial thread-state intervals contain sentinel core and CPU-time fields and cannot establish earlier on-core execution. Validate retained coverage and clock alignment before using a host trace to interpret a guest stall.

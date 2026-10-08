@@ -14,7 +14,8 @@ trace=/trace/instances/$instance
 events=(sched/sched_switch sched/sched_waking sched/sched_wakeup sched/sched_wakeup_new
     sched/sched_migrate_task sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
     signal/signal_generate signal/signal_deliver syscalls/sys_enter_futex syscalls/sys_exit_futex
-    syscalls/sys_enter_rt_sigreturn syscalls/sys_enter_restart_syscall syscalls/sys_exit_restart_syscall)
+    syscalls/sys_enter_rt_sigreturn syscalls/sys_enter_restart_syscall syscalls/sys_exit_restart_syscall
+    sched/sched_stat_runtime lock/contention_begin lock/contention_end)
 
 mark() {
     local now state

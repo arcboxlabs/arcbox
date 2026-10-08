@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 EVENTS = "sched/sched_switch sched/sched_waking sched/sched_wakeup sched/sched_wakeup_new sched/sched_migrate_task sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit signal/signal_generate signal/signal_deliver syscalls/sys_enter_futex syscalls/sys_exit_futex syscalls/sys_enter_rt_sigreturn syscalls/sys_enter_restart_syscall syscalls/sys_exit_restart_syscall".split()
+EVENTS += ["sched/sched_stat_runtime", "lock/contention_begin", "lock/contention_end"]
 EVENT_NAMES = {event.split("/")[1] for event in EVENTS} | {"tracing_mark_write"}
 SETTINGS = {"global_profiler_real_time_period_ns": 10000000000, "global_profiler_cpu_time_period_ns": 10000000000, "background_schedule_pool_size": 512}
 CONFIG_SHA = "38112631033bd2037a1c8c6207e8b8f0a018d814074e57a621c98cf023dee10d"
