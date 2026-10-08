@@ -131,6 +131,25 @@ message ReconcileHttpsAccessResponse {
     uint64 sequence = 3;
 }
 
+// Host-only replacement of this guest's ArcBox client trust anchor.
+// The host sends the active Keychain certificate. CA unavailability sends no request.
+message ReconcileGuestTrustRequest {
+    // An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    oneof desired {
+        bytes certificate_pem = 1;
+        Empty remove = 2;
+    }
+}
+
+// Acknowledges completed installation or removal, never a queued operation.
+message ReconcileGuestTrustResponse {
+    oneof applied {
+        // SHA-256 of installed DER, in uppercase colon-separated hex.
+        string installed_sha256 = 1;
+        Empty removed = 2;
+    }
+}
+
 // Owns this connection until EOF; only the host may open one on the System VM.
 message OpenInstanceAuthorityRequest {}
 message OpenInstanceAuthorityResponse {}

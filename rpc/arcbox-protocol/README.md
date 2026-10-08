@@ -32,9 +32,7 @@ files in the same change. A new `.proto` file must be registered in both
 
 ## Protocol evolution
 
-The daemon and the in-VM `arcbox-agent` are distributed separately, so a
-running guest may speak an older schema than the host. Two mechanisms keep
-skew safe:
+The daemon and the in-VM `arcbox-agent` ship together. Update paired callers and decoders in the same source change. Current feature work keeps both protocol versions at 7 and adds no compatibility branches.
 
 - **Additive-only schemas.** CI runs `buf breaking` against `master`
   (`.github/workflows/ci.yml`): never remove or renumber fields; use
@@ -42,8 +40,7 @@ skew safe:
 - **Connection handshake.** The agent reports
   `AgentPingResponse.protocol_version`
   (`arcbox_constants::wire::AGENT_PROTOCOL_VERSION`). Before sending any business request, the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`. Unary RPCs, observation watches, sandbox streams, and machine exec/debug/TCP sessions share this admission rule. A compatible Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available for protocol negotiation and reports incompatible versions to boot probes.
-  Bump the protocol version when a change alters the *meaning* of
-  existing messages; purely additive, ignorable fields don't need one.
+  Message changes do not automatically require a protocol version bump. Rebuild and stage the paired binaries together.
 
 ## Usage
 

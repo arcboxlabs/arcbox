@@ -9,6 +9,7 @@
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
 mod cancellation;
+mod guest_trust;
 mod instance_authority;
 mod machine_exec;
 mod sandbox_stream;

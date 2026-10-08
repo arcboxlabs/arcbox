@@ -3656,6 +3656,42 @@ pub struct ReconcileHttpsAccessResponse {
     #[prost(uint64, tag = "3")]
     pub sequence: u64,
 }
+/// Host-only replacement of this guest's ArcBox client trust anchor.
+/// The host sends the active Keychain certificate. CA unavailability sends no request.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileGuestTrustRequest {
+    /// An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    #[prost(oneof = "reconcile_guest_trust_request::Desired", tags = "1, 2")]
+    pub desired: ::core::option::Option<reconcile_guest_trust_request::Desired>,
+}
+/// Nested message and enum types in `ReconcileGuestTrustRequest`.
+pub mod reconcile_guest_trust_request {
+    /// An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Desired {
+        #[prost(bytes, tag = "1")]
+        CertificatePem(::prost::alloc::vec::Vec<u8>),
+        #[prost(message, tag = "2")]
+        Remove(super::Empty),
+    }
+}
+/// Acknowledges completed installation or removal, never a queued operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileGuestTrustResponse {
+    #[prost(oneof = "reconcile_guest_trust_response::Applied", tags = "1, 2")]
+    pub applied: ::core::option::Option<reconcile_guest_trust_response::Applied>,
+}
+/// Nested message and enum types in `ReconcileGuestTrustResponse`.
+pub mod reconcile_guest_trust_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Applied {
+        /// SHA-256 of installed DER, in uppercase colon-separated hex.
+        #[prost(string, tag = "1")]
+        InstalledSha256(::prost::alloc::string::String),
+        #[prost(message, tag = "2")]
+        Removed(super::Empty),
+    }
+}
 /// Owns this connection until EOF; only the host may open one on the System VM.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OpenInstanceAuthorityRequest {}

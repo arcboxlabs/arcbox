@@ -74,13 +74,7 @@ non-obvious invariants and failure signatures.
 
 ## Invariants (each with WHY)
 
-- **Protocol is additive-only.** Never remove/renumber proto fields; proto3
-  field skew is silent (an old agent decodes new fields as defaults and
-  misbehaves with zero diagnostics). Bump `AGENT_PROTOCOL_VERSION`
-  (`common/arcbox-constants/src/wire.rs`) only when the *meaning* of an existing
-  message changes; the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`
-  (currently 7 for all business APIs, including observation). `Ping` is the one
-  message every agent generation understands and carries `protocol_version`.
+- **Update the host and agent together.** Change paired callers and decoders in the same source change. Keep `AGENT_PROTOCOL_VERSION` and `MIN_AGENT_PROTOCOL_VERSION` at 7 for current feature work. Do not add compatibility branches or bump versions for each message change. Preserve existing field numbers. The connection handshake still rejects agents below the minimum version.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
   guest's `/arcbox/bin/arcbox-agent` (the agent is NOT baked into the EROFS rootfs — the
@@ -336,9 +330,7 @@ alone does not waive step 3 — `WatchReadiness`/`WatchStats`/
 `WatchMemoryPressure` stream too and keep their codec arms (step 4's
 `handle_watch_readiness` pattern).
 
-Then run the `buf` breaking check, decide whether the change alters existing
-message *meaning* (if so, bump `AGENT_PROTOCOL_VERSION`), and add a test on the
-real request path — not just a leaf helper.
+Then run the `buf` breaking check. Update both message producers and consumers directly, and add a test on the real request path. Keep the protocol versions unchanged for current feature work.
 
 ## Guest-controlled input hygiene
 

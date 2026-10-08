@@ -85,6 +85,10 @@ The restructure plan and its locked decisions live in
     in one. `arcbox-computer-runtime` turns the feature on in its
     dev-dependencies.
 
+## Guest trust
+
+- `agent_client/guest_trust.rs` sends an explicit current public certificate or removal over a dedicated cancellable connection. Await cancellation before retiring the VM. Match the acknowledged fingerprint and expected VM incarnation before reporting client trust as ready.
+
 ## Durable writes
 
 - Instance authority sessions consume one connected agent client. Retain their coordinator, observe idle failure, then drop the session and join before reconnecting. The coordinator owns admission, sequential acknowledgements, continuous reads, and shutdown of both transport workers.

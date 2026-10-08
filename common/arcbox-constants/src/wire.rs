@@ -1,54 +1,11 @@
-/// Host↔agent RPC protocol version this build speaks.
+/// Host↔agent protocol used by the paired daemon and agent binaries.
 ///
-/// Carried in `AgentPingResponse.protocol_version` and checked by the
-/// host during the boot handshake. Bump when a change alters the
-/// *meaning* of existing messages (new required semantics, repurposed
-/// fields, behavioral contracts) — purely additive, ignorable changes
-/// don't need a bump. Unknown `MessageType`s already fail cleanly; this
-/// version catches the silent proto3 field-skew class instead.
-///
-/// "Existing" means *released*: the sandbox execution redesign
-/// (CORE-55/56) re-typed payloads that no release had ever shipped, so it
-/// did not warrant a bump. 0.6.0 briefly shipped `2`/`2` for it before
-/// this was rolled back — **`2` is burned**: 0.6.0 daemons in the wild
-/// read it as "speaks the redesigned sandbox payloads", so the next real
-/// bump must go to `3`, never reuse `2` for a different meaning.
-///
-/// v3: runtime startup requires the host-provided
-/// `arcbox.runtime_generation` kernel parameter and materializes runtime
-/// assets onto the guest Btrfs data disk before execution. Sandbox
-/// Stop/Remove responses also carry a durable cleanup generation, completed
-/// through Prepare/Finalize after host listeners are gone.
-///
-/// v4: the Docker API vsock channel (`ports::DOCKER_API_VSOCK_PORT`) carries
-/// length-prefixed frames with a zero-length frame as the in-band half-close
-/// marker (`arcbox_transport::vsock::HalfCloseStream`) instead of raw bytes.
-/// A v3 agent would feed the frame headers to dockerd as HTTP, so the two
-/// sides must agree.
-///
-/// v5: the same channel is flow-controlled. Each side sends payload only
-/// within a window the other has granted (`HalfCloseStream::WINDOW`) and
-/// returns window with frames whose header has the top bit set, so neither
-/// side ever leaves the vsock unread: on Virtualization.framework an unread
-/// guest→host stream stalls every new connection to the VM. Sandbox
-/// streaming RPCs (`SandboxStreamWindow`) gained the same window. A v4 agent
-/// reads a grant header as an oversized frame, so the two sides must agree.
-///
-/// v6: the Kubernetes API (`ports::KUBERNETES_API_VSOCK_PORT`) and NFS
-/// (`ports::NFS_NFSD_RELAY_PORT`) relays carry the same `HalfCloseStream`
-/// frames instead of raw bytes, for the same reason. A v5 agent would feed
-/// the frame headers to k3s and nfsd.
-///
-/// v7: adds persistent storage observations and controlled storage checks.
-/// All VM sessions require v7. Recovery boots require the dedicated recovery
-/// init entry and read-only disk attachments.
+/// Update message producers and consumers together. Current feature work keeps
+/// this version unchanged and adds no compatibility branches.
+/// `AgentPingResponse.protocol_version` admits each connection before business RPCs.
 pub const AGENT_PROTOCOL_VERSION: u32 = 7;
 
-/// Oldest agent protocol version this host still accepts.
-///
-/// Agents reporting less (including `0` — agents that predate the
-/// handshake field) are rejected at boot with an actionable error
-/// instead of silently misbehaving under field skew.
+/// Minimum agent protocol admitted by the host connection handshake.
 pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Window each sandbox streaming RPC opens with.
@@ -128,6 +85,8 @@ pub enum MessageType {
     OpenInstanceAuthorityRequest = 0x0018,
     /// Replaces the complete instance authority snapshot on its owning connection.
     ReplaceInstanceAuthorityRequest = 0x0019,
+    /// Replaces or removes the guest client trust anchor from a host certificate.
+    ReconcileGuestTrustRequest = 0x001A,
     /// Ask a distro machine's agent to serve the machine's root over NFSv3
     /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
     /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
@@ -378,6 +337,8 @@ pub enum MessageType {
     OpenInstanceAuthorityResponse = 0x1018,
     /// Confirms the source authority revision installed by the guest.
     InstanceAuthorityAck = 0x1019,
+    /// Confirms the completed guest client trust update.
+    ReconcileGuestTrustResponse = 0x101A,
     /// Answers [`Self::EnsureMachineExportRequest`] (payload:
     /// `arcbox.v1.EnsureMachineExportResponse`).
     EnsureMachineExportResponse = 0x10A8,
@@ -543,6 +504,7 @@ impl MessageType {
             0x0017 => Some(Self::ReconcileHttpsAccessRequest),
             0x0018 => Some(Self::OpenInstanceAuthorityRequest),
             0x0019 => Some(Self::ReplaceInstanceAuthorityRequest),
+            0x001A => Some(Self::ReconcileGuestTrustRequest),
             0x00A8 => Some(Self::EnsureMachineExportRequest),
             0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
@@ -625,6 +587,7 @@ impl MessageType {
             0x1017 => Some(Self::ReconcileHttpsAccessResponse),
             0x1018 => Some(Self::OpenInstanceAuthorityResponse),
             0x1019 => Some(Self::InstanceAuthorityAck),
+            0x101A => Some(Self::ReconcileGuestTrustResponse),
             0x10A8 => Some(Self::EnsureMachineExportResponse),
             0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
@@ -809,6 +772,7 @@ mod tests {
             (0x0017, MessageType::ReconcileHttpsAccessRequest),
             (0x0018, MessageType::OpenInstanceAuthorityRequest),
             (0x0019, MessageType::ReplaceInstanceAuthorityRequest),
+            (0x001A, MessageType::ReconcileGuestTrustRequest),
             (0x00A8, MessageType::EnsureMachineExportRequest),
             (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
@@ -820,6 +784,7 @@ mod tests {
             (0x1017, MessageType::ReconcileHttpsAccessResponse),
             (0x1018, MessageType::OpenInstanceAuthorityResponse),
             (0x1019, MessageType::InstanceAuthorityAck),
+            (0x101A, MessageType::ReconcileGuestTrustResponse),
             (0x10A8, MessageType::EnsureMachineExportResponse),
             (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),
