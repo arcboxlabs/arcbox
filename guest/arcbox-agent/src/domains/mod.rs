@@ -35,6 +35,7 @@ mod facts;
 mod http_port;
 mod https;
 mod listeners;
+mod probe;
 mod routes;
 mod scans;
 

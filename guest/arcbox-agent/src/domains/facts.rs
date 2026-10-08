@@ -13,6 +13,7 @@ use crate::iptables::NatRule;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerFacts {
     pub(super) id: String,
+    pub(super) hostname: String,
     /// Its init process, whose `/proc` entry shows the container's sockets.
     pub(super) pid: u32,
     /// Its network namespace (`SandboxKey`).
@@ -28,6 +29,11 @@ impl ContainerFacts {
     #[must_use]
     pub fn from_inspect(inspect: &serde_json::Value) -> Option<Self> {
         let id = inspect.get("Id")?.as_str()?.to_owned();
+        let hostname = format!(
+            "{}.{}",
+            inspect.get("Name")?.as_str()?.trim_start_matches('/'),
+            arcbox_constants::dns::LOCAL_DOMAIN
+        );
         let pid = inspect
             .pointer("/State/Pid")?
             .as_u64()
@@ -71,6 +77,7 @@ impl ContainerFacts {
             .unwrap_or_default();
         Some(Self {
             id,
+            hostname,
             pid,
             netns,
             ips,
@@ -128,6 +135,7 @@ mod tests {
     fn inspect() -> serde_json::Value {
         serde_json::json!({
             "Id": "abc123",
+            "Name": "/web",
             "State": { "Pid": 4242 },
             "Config": {
                 "Labels": { "com.example": "x" },

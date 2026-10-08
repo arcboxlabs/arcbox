@@ -52,6 +52,7 @@ arcbox-local-ca.workspace = true
 nfs3_server = "0.11.0"
 xattr = "1.6.1"
 arcbox-storage.workspace = true
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 
 # vsock, the sandbox runtime, the VM-driver port it speaks, and the two
 # adapters this crate composes it over (the Firecracker driver and the TAP
@@ -68,7 +69,6 @@ tonic.workspace = true
 tonic-prost.workspace = true
 tower.workspace = true
 http = "1"
-hyper-util = { version = "0.1.20", features = ["tokio"] }
 toml.workspace = true
 arcbox-transport.workspace = true
 

@@ -207,8 +207,11 @@ non-obvious invariants and failure signatures.
   startup. A container's listeners are read through its init pid only while
   that pid is in the container's netns (`SandboxKey`): an `nsenter -t 1 -n`
   container otherwise reports the VM's own sockets as its own. The design
-  lives in `domains/mod.rs`. Regression signature: siblings get RST on
-  `<name>.arcbox.local:80` while the Mac works — check
+  lives in `domains/mod.rs`.
+  Automatic HTTP discovery requires a real HTTP response to a bounded `HEAD /`
+  probe with the container domain in `Host`. An exposed or listening TCP port
+  alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
+  Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.
 - **k3s runs servicelb (traefik stays disabled), and `KubernetesLoadBalancers`

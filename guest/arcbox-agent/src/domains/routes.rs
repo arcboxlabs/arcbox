@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::http_port::HTTPS_PORT;
 use super::https::Https;
 use super::scans::Scans;
-use super::{Command, ContainerFacts, HttpPorts, RULE_OWNER, http_port, listeners};
+use super::{Command, ContainerFacts, HttpPorts, RULE_OWNER, http_port, listeners, probe};
 use crate::iptables::{self, NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
@@ -142,8 +142,19 @@ impl Routes {
             if listening.is_empty() && tracked.facts.pin.is_none() {
                 continue;
             }
-            let http_port =
-                http_port::choose(tracked.facts.pin, &listening, &tracked.facts.exposed);
+            let mut candidates = listening.clone();
+            let http_port = loop {
+                let choice =
+                    http_port::choose(tracked.facts.pin, &candidates, &tracked.facts.exposed);
+                let Some(port) = choice else { break None };
+                if tracked.facts.pin.is_some()
+                    || probe::responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, false)
+                        .await
+                {
+                    break Some(port);
+                }
+                candidates.remove(&port);
+            };
             self.ports.route(tracked.facts.ips(), http_port);
             // A container serving TLS on 443 itself keeps it.
             let https = self.https && !listening.contains(&HTTPS_PORT);
