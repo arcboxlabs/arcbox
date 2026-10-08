@@ -76,6 +76,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-08 — Why can copying into a stopped container fail with OverlayFS EBUSY?](experiments/2026-10-08-overlay-copy-lifetime.md) — [guest lifecycle recorder](../tests/bench/signoz/probe-overlay-lifecycle.sh)
 - [2026-10-08 — Does ClickHouse still stall with a low-cost observer?](experiments/2026-10-08-clickhouse-native-observer.md) — [native observer](../tests/bench/signoz/observe_clickhouse.c)
 - [2026-10-08 — Can kernel events retain the ClickHouse stall path?](experiments/2026-10-08-clickhouse-kernel-events.md) — [recorder controller](../tests/bench/signoz/clickhouse_trace.py), [guest helper](../tests/bench/signoz/trace-clickhouse.sh), [capture validator](../tests/bench/signoz/validate_clickhouse_trace.py), [spin/runtime analyzer](../tests/bench/signoz/analyze_clickhouse_spin.py), [stack integrity and association checks](../tests/bench/signoz/analyze_clickhouse_stacks.py), [host scheduler analyzer](../tests/bench/signoz/analyze_host_ktrace.py)
 - [2026-10-08 — Can host CPU contention stall real ClickHouse threads?](experiments/2026-10-08-clickhouse-restart-contention.md) — [procfs reader probe](../tests/bench/signoz/probe_status_read.sh), [reader checks](../tests/bench/signoz/analyze_status_read.py)
