@@ -1216,28 +1216,23 @@ fn expected_host_holds_reject_stopping_replaced_and_unstarted_runs() {
 }
 
 #[test]
-fn removal_does_not_claim_a_machine_with_an_active_stop() {
+fn removal_requires_force_for_a_machine_with_an_active_stop() {
     let dir = tempdir().unwrap();
-    let bus = crate::event::EventBus::new();
-    let mut events = bus.subscribe();
-    let manager = test_machine_manager_with_bus(dir.path(), bus);
-    manager.register_mock_machine("stopping", 7).unwrap();
-    manager
-        .machines
-        .write()
-        .unwrap()
-        .get_mut("stopping")
-        .unwrap()
-        .state = MachineState::Stopping;
-    for force in [false, true] {
-        let error = manager.remove("stopping", force).unwrap_err();
-        assert!(error.to_string().contains("another stop owns"));
-        assert_eq!(
-            manager.get("stopping").unwrap().state,
-            MachineState::Stopping
-        );
-        assert!(events.try_recv().is_err());
-    }
+    let manager = test_machine_manager(dir.path());
+    let expected = model_running_machine(&manager, "stopping");
+    let graceful = manager.admit_stop("stopping", &expected, true).unwrap();
+    let error = manager.remove("stopping", false).unwrap_err();
+    assert!(error.to_string().contains("use --force"));
+    assert_eq!(
+        manager.get("stopping").unwrap().state,
+        MachineState::Stopping
+    );
+    let result = manager.finish_stop(
+        "stopping",
+        &graceful,
+        stop_owner::Completion::Graceful(Ok(false)),
+    );
+    assert!(!result.unwrap());
 }
 
 fn model_running_machine(manager: &MachineManager, name: &str) -> VmIncarnation {
@@ -1329,4 +1324,186 @@ fn failed_force_preserves_graceful_completion_in_either_order() {
             assert!(manager.stop_operations.lock().unwrap().is_empty());
         }
     }
+}
+
+#[test]
+fn forced_removal_withdraws_holds_and_cannot_stop_a_replacement() {
+    use crate::event::Event;
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = Arc::new(test_machine_manager_with_bus(dir.path(), bus));
+    let expected = model_running_machine(&manager, "removing");
+    let hold = manager.host_hold_expected("removing", &expected).unwrap();
+    let worker = Arc::clone(&manager);
+    let removal = std::thread::spawn(move || worker.remove("removing", true));
+    assert!(matches!(
+        events.blocking_recv().unwrap(),
+        Event::MachineStopping { .. }
+    ));
+    assert_eq!(
+        manager.get("removing").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(manager.host_hold_expected("removing", &expected).is_err());
+    let (id, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("removing").unwrap();
+        machine.vm_id = id;
+        machine.state = MachineState::Running;
+    }
+    drop(hold);
+    assert!(removal.join().unwrap().is_err());
+    assert_eq!(
+        manager.get("removing").unwrap().state,
+        MachineState::Running
+    );
+    drop(manager.host_hold_expected("removing", &current).unwrap());
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn graceful_timeout_keeps_stop_admission_closed_until_force_finishes() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "timeout");
+    let run = manager.admit_stop("timeout", &expected, true).unwrap();
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopping { .. }
+    ));
+    assert!(
+        !manager
+            .finish_stop("timeout", &run, Graceful(Ok(false)))
+            .unwrap()
+    );
+    assert_eq!(
+        manager.get("timeout").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(manager.host_hold_expected("timeout", &expected).is_err());
+    assert!(manager.admit_stop("timeout", &expected, false).is_err());
+    assert!(events.try_recv().is_err());
+    manager.require_force_owner("timeout", &run).unwrap();
+    let result = manager.finish_stop(
+        "timeout",
+        &run,
+        Forced(Err(EngineError::invalid_state("failed"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("timeout").unwrap().state, MachineState::Running);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+}
+
+#[test]
+fn successful_takeover_rejects_late_graceful_failure() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "late");
+    let graceful = manager.admit_stop("late", &expected, true).unwrap();
+    let force = manager.admit_stop("late", &expected, false).unwrap();
+    while events.try_recv().is_ok() {}
+    assert!(manager.finish_stop("late", &force, Forced(Ok(()))).unwrap());
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopped { .. }
+    ));
+    let result = manager.finish_stop(
+        "late",
+        &graceful,
+        Graceful(Err(EngineError::invalid_state("late"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("late").unwrap().state, MachineState::Stopped);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn old_completion_cannot_claim_a_replacement_stop() {
+    use crate::event::Event;
+    use stop_owner::Completion::Forced;
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "replace");
+    let old = manager.admit_stop("replace", &expected, false).unwrap();
+    let (id, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("replace").unwrap();
+        machine.vm_id = id;
+        machine.state = MachineState::Running;
+    }
+    let replacement = manager.admit_stop("replace", &current, false).unwrap();
+    while events.try_recv().is_ok() {}
+    assert!(
+        manager
+            .finish_stop("replace", &old, Forced(Ok(())))
+            .is_err()
+    );
+    assert_eq!(
+        manager.get("replace").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+    manager
+        .require_force_owner("replace", &replacement)
+        .unwrap();
+    let result = manager.finish_stop(
+        "replace",
+        &replacement,
+        Forced(Err(EngineError::invalid_state("failed"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("replace").unwrap().state, MachineState::Running);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+}
+
+#[test]
+fn failed_takeover_after_graceful_timeout_reopens_admission() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "timed-out");
+    let graceful = manager.admit_stop("timed-out", &expected, true).unwrap();
+    let force = manager.admit_stop("timed-out", &expected, false).unwrap();
+    while events.try_recv().is_ok() {}
+    let result = manager.finish_stop("timed-out", &graceful, Graceful(Ok(false)));
+    assert!(result.is_err());
+    assert_eq!(
+        manager.get("timed-out").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+    let failure = Forced(Err(EngineError::invalid_state("force failed")));
+    assert!(manager.finish_stop("timed-out", &force, failure).is_err());
+    assert_eq!(
+        manager.get("timed-out").unwrap().state,
+        MachineState::Running
+    );
+    drop(manager.host_hold_expected("timed-out", &expected).unwrap());
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+    assert!(events.try_recv().is_err());
 }

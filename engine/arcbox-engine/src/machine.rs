@@ -1777,48 +1777,24 @@ impl MachineManager {
             return Ok(false);
         };
 
-        if machine.state == MachineState::Stopping {
-            return Err(EngineError::invalid_state(
-                "another stop owns this machine run",
-            ));
-        }
         let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
-        // Check if machine is running
-        if machine.state == MachineState::Running && !force {
-            return Err(EngineError::invalid_state(
-                "cannot remove running machine (use --force)".to_string(),
-            ));
-        }
-
-        // Stop if running and force is set
-        if machine.state == MachineState::Running {
-            let vm_id = machine.vm_id.clone();
-            self.vm_manager
-                .with_run_incarnation(&vm_id, &expected, || {
-                    self.publish_event(
-                        name,
-                        crate::event::Event::MachineStopping {
-                            name: name.to_string(),
-                        },
-                    );
-                })?;
+        if matches!(
+            machine.state,
+            MachineState::Running | MachineState::Stopping
+        ) {
+            if !force {
+                return Err(EngineError::invalid_state(
+                    "cannot remove running or stopping machine (use --force)",
+                ));
+            }
             drop(machines);
-            // The VM dies below; what the host holds of the machine (its
-            // root mount) must be released while the machine still answers.
+            let operation = self.admit_stop(name, &expected, false)?;
             self.await_host_release(name);
+            self.force_stop_expected(name, &operation)?;
             machines = self
                 .machines
                 .write()
                 .map_err(|_| EngineError::LockPoisoned)?;
-            if machines
-                .get(name)
-                .is_some_and(|machine| machine.state == MachineState::Stopping)
-            {
-                return Err(EngineError::invalid_state(
-                    "another stop owns this machine run",
-                ));
-            }
-            self.vm_manager.stop(&vm_id, &expected)?;
         }
 
         // Get VM ID before removing from map.
@@ -1841,13 +1817,13 @@ impl MachineManager {
         // restart even though VM and in-memory state are already gone.
         self.persistence.remove(name)?;
 
-        drop(machines);
         self.publish_event(
             name,
             crate::event::Event::MachineRemoved {
                 name: name.to_string(),
             },
         );
+        drop(machines);
         tracing::info!("Removed machine '{}'", name);
         Ok(true)
     }

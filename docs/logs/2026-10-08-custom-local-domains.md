@@ -446,3 +446,7 @@ The Engine test target compiled, but macOS held the executable at `_dyld_start` 
 The unchanged test commands resumed without environment changes. All 35 machine tests, ten VM tests, and the API internal-event regression passed. Workspace formatting and diff checks also passed. These fixtures do not start a native VM or change Keychain trust.
 
 Machine stop admission now retains one owner for each captured physical run, including a graceful predecessor during forced takeover. The test target compiled, but two executions remained at `_dyld_start` before the harness started; both task-owned processes were terminated. Strict Engine, API, Core, and daemon all-target Clippy, workspace formatting, and diff checks passed. Runtime execution of this prefix remains pending.
+
+The unchanged cached stop-owner test target subsequently started without environment changes. All 36 machine tests passed, including both graceful/forced completion orders. This establishes the model regression gate; native VM shutdown remains unverified.
+
+Forced removal now retains stop ownership and the captured physical run until final deletion. All 41 machine tests passed, including competing stop completion and replacement rejection. Strict Engine, API, Core, and daemon all-target Clippy, workspace formatting, and diff checks passed. These fixtures do not start a native VM.
