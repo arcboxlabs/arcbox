@@ -23,7 +23,7 @@ use crate::rpc::{
 };
 
 #[cfg(test)]
-mod instance_authority_tests;
+pub(in crate::agent) mod instance_authority_tests;
 mod readiness;
 
 use super::disk::handle_disk_trim;

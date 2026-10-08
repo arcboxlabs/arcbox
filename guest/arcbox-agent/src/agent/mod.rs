@@ -13,6 +13,8 @@ pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
 mod exec_error;
 mod instance_authority;
+#[cfg(all(test, target_os = "linux"))]
+pub use linux::rpc::instance_authority_tests::AuthorityPeer;
 #[cfg(any(target_os = "linux", test))]
 mod login_session;
 #[cfg(any(target_os = "linux", test))]

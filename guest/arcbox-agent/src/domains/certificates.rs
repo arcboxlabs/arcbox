@@ -95,3 +95,44 @@ impl Certificates {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported)).context("vsock requires Linux")
     }
 }
+
+/// Primes the real cache and rejects any subsequent signing attempt.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) struct CachedConfiguration(Cache);
+
+#[cfg(all(test, target_os = "linux"))]
+impl CachedConfiguration {
+    pub(super) async fn new(name: &str, config: Arc<ServerConfig>) -> Self {
+        let cache = Cache::default();
+        let now = SystemTime::now();
+        cache
+            .configuration(
+                name,
+                async {
+                    Cached::new(
+                        config,
+                        CertificateValidity {
+                            not_before: (now - std::time::Duration::from_secs(60)).into(),
+                            not_after: (now + std::time::Duration::from_secs(3600)).into(),
+                        },
+                        now,
+                        b"test-root".to_vec(),
+                    )
+                },
+                || async { Ok(b"test-root".to_vec()) },
+            )
+            .await
+            .unwrap();
+        Self(cache)
+    }
+
+    pub(super) async fn configuration(&self, name: &str) -> Result<Arc<ServerConfig>> {
+        self.0
+            .configuration(
+                name,
+                async { panic!("cached TLS must not request another signature") },
+                || async { Ok(b"test-root".to_vec()) },
+            )
+            .await
+    }
+}

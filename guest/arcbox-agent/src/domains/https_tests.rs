@@ -1,11 +1,18 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::agent::{AuthorityPeer, Services};
 use crate::dns_server::ContainerRegistry;
+#[cfg(target_os = "linux")]
+use arcbox_connect::v1::{InstanceAuthorityRoot, ReplaceInstanceAuthorityRequest};
 use arcbox_dns::container::ContainerMetadata;
 use std::future::Future;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+#[cfg(target_os = "linux")]
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
+#[cfg(target_os = "linux")]
 const NAME: &str = "web.arcbox.local";
 
 async fn within<T>(future: impl Future<Output = T>) -> T {
@@ -14,6 +21,7 @@ async fn within<T>(future: impl Future<Output = T>) -> T {
         .unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn configuration() -> Arc<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
     Arc::new(
@@ -60,11 +68,26 @@ fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, port: u
     );
 }
 
+#[cfg(target_os = "linux")]
 fn replace_owner(services: &WebServices, dns: &ContainerRegistry, port: u16) {
     dns.write().unwrap().remove("a");
     publish(services, dns, "b", port, "arcbox.local");
 }
 
+#[cfg(target_os = "linux")]
+fn authority_snapshot(authority_revision: u64) -> ReplaceInstanceAuthorityRequest {
+    ReplaceInstanceAuthorityRequest {
+        authority_revision,
+        roots: vec![InstanceAuthorityRoot {
+            root: "arcbox.local".into(),
+            target: arcbox_connect::v1::instance_authority_root::Target::Current.into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn head(stream: &mut (impl AsyncRead + Unpin)) -> String {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
@@ -122,13 +145,20 @@ async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
 }
 
 #[tokio::test]
-async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
-    for stage in [
-        "configuration",
-        "handshake",
-        "connect",
-        "reinstalled",
-        "valid",
+#[cfg(target_os = "linux")]
+async fn ownership_changes_at_each_tls_stage_stop_application_forwarding() {
+    for (stage, mutation) in [
+        ("configuration", "resource"),
+        ("handshake", "resource"),
+        ("connect", "resource"),
+        ("reinstalled", "resource"),
+        ("valid", "resource"),
+        ("configuration", "aba"),
+        ("handshake", "aba"),
+        ("connect", "aba"),
+        ("configuration", "eof"),
+        ("handshake", "eof"),
+        ("connect", "eof"),
     ] {
         within(async {
             let incoming = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -138,6 +168,30 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
             let dns = ContainerRegistry::default();
             let services = WebServices::new(dns.clone());
             publish(&services, &dns, "a", port, "arcbox.local");
+            let mut authority = if mutation == "resource" {
+                None
+            } else {
+                let mut peer =
+                    AuthorityPeer::open(Services::system(services.clone(), dns.clone())).await;
+                peer.replace(authority_snapshot(10)).await;
+                Some(peer)
+            };
+            let mut change_owner = async || match mutation {
+                "resource" => replace_owner(&services, &dns, port),
+                "aba" => {
+                    authority
+                        .as_mut()
+                        .unwrap()
+                        .replace(authority_snapshot(12))
+                        .await;
+                }
+                "eof" => {
+                    authority.take().unwrap().close().await.unwrap_err();
+                }
+                _ => unreachable!(),
+            };
+            let cached =
+                super::super::certificates::CachedConfiguration::new(NAME, configuration()).await;
             let (configured, configuration_started) = oneshot::channel();
             let (configure, configuration_released) = oneshot::channel();
             let (connected, mut connection_started) = oneshot::channel();
@@ -154,7 +208,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                             assert_eq!(name, NAME);
                             configured.send(()).unwrap();
                             configuration_released.await.unwrap();
-                            Ok(configuration())
+                            cached.configuration(name).await
                         },
                         async move |address: (Ipv4Addr, u16)| {
                             assert_eq!(address, (Ipv4Addr::LOCALHOST, port));
@@ -175,7 +229,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                 result = configuration_started => result.unwrap(),
             }
             if stage == "configuration" {
-                replace_owner(&services, &dns, port);
+                change_owner().await;
             }
             configure.send(()).unwrap();
             if stage == "handshake" {
@@ -184,7 +238,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                     handshake.get_ref().unwrap().peek(&mut [0]).await.unwrap(),
                     0
                 );
-                replace_owner(&services, &dns, port);
+                change_owner().await;
             }
             if stage == "configuration" {
                 let error = relay.await.unwrap().unwrap_err();
@@ -194,6 +248,10 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                     connection_started.try_recv(),
                     Err(oneshot::error::TryRecvError::Closed)
                 ));
+                drop(change_owner);
+                if let Some(peer) = authority.take() {
+                    peer.close().await.unwrap_err();
+                }
                 return;
             }
             let mut client = handshake.await.unwrap();
@@ -204,6 +262,10 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                     connection_started.try_recv(),
                     Err(oneshot::error::TryRecvError::Closed)
                 ));
+                drop(change_owner);
+                if let Some(peer) = authority.take() {
+                    peer.close().await.unwrap_err();
+                }
                 return;
             }
             connection_started.await.unwrap();
@@ -213,18 +275,22 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                 .await
                 .unwrap();
             if stage == "connect" {
-                replace_owner(&services, &dns, port);
+                change_owner().await;
             } else if stage == "reinstalled" {
                 let revision = dns.read().unwrap().get("a").unwrap().revision;
                 services.remove("a");
                 publish(&services, &dns, "a", port, "arcbox.local");
                 assert_eq!(dns.read().unwrap().get("a").unwrap().revision, revision);
             }
+            drop(change_owner);
             connect.send(()).unwrap();
             if matches!(stage, "connect" | "reinstalled") {
                 let error = relay.await.unwrap().unwrap_err();
                 assert!(format!("{error:#}").contains("changed during the handshake"));
                 assert_eq!(upstream.read(&mut [0]).await.unwrap(), 0);
+                if let Some(peer) = authority.take() {
+                    peer.close().await.unwrap_err();
+                }
                 return;
             }
             let request = head(&mut upstream).await.to_ascii_lowercase();

@@ -15,7 +15,7 @@ mod metadata_volume;
 mod port_forward;
 mod probe;
 mod proxy;
-mod rpc;
+pub(super) mod rpc;
 mod runtime;
 mod runtime_cache;
 mod sandbox;

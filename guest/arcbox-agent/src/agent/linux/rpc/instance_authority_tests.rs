@@ -11,7 +11,8 @@ use arcbox_connect::v1::{
 use arcbox_dns::registry::{InstanceTarget, Lookup};
 use tokio::io::AsyncWriteExt as _;
 
-struct AuthorityPeer {
+/// A real framed host peer for guest authority and TLS regressions.
+pub struct AuthorityPeer {
     client: tokio::net::UnixStream,
     task: tokio::task::JoinHandle<Result<()>>,
 }
@@ -42,7 +43,8 @@ impl AuthorityPeer {
         self.response().await.unwrap()
     }
 
-    async fn open(services: Services) -> Self {
+    /// Opens the exclusive authority channel through the production dispatcher.
+    pub async fn open(services: Services) -> Self {
         let mut peer = Self::spawn(services, Guest::SystemVm, tokio_vsock::VMADDR_CID_HOST);
         assert_eq!(
             peer.request_open().await.0,
@@ -62,7 +64,8 @@ impl AuthorityPeer {
         .unwrap();
     }
 
-    async fn replace(&mut self, request: ReplaceInstanceAuthorityRequest) {
+    /// Applies a complete source snapshot and verifies its committed acknowledgement.
+    pub async fn replace(&mut self, request: ReplaceInstanceAuthorityRequest) {
         self.send(&request).await;
         let (kind, trace, payload) = self.response().await.unwrap();
         assert_eq!(kind, MessageType::InstanceAuthorityAck);
@@ -75,7 +78,8 @@ impl AuthorityPeer {
         );
     }
 
-    async fn close(self) -> Result<()> {
+    /// Closes the peer and joins the dispatcher before returning.
+    pub async fn close(self) -> Result<()> {
         drop(self.client);
         tokio::time::timeout(Duration::from_secs(3), self.task)
             .await
@@ -300,5 +304,62 @@ async fn malformed_and_unexpected_frames_revoke_the_active_snapshot() {
         assert!(peer.response().await.is_err());
         peer.close().await.unwrap_err();
         assert_eq!(instance(&registry).0, InstanceTarget::Unavailable);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_partial_read_or_ack_revokes_before_the_next_open() {
+    for phase in ["partial-frame", "ack"] {
+        let registry = ContainerRegistry::default();
+        let services = services(&registry);
+        let (mut client, server) = tokio::io::duplex(1);
+        let task = tokio::spawn({
+            let services = services.clone();
+            async move { handle_connection(server, Guest::SystemVm, &services, 2).await }
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            write_message(
+                &mut client,
+                MessageType::OpenInstanceAuthorityRequest,
+                "",
+                &[],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read_message(&mut client).await.unwrap().0,
+                MessageType::OpenInstanceAuthorityResponse
+            );
+            write_message(
+                &mut client,
+                MessageType::ReplaceInstanceAuthorityRequest,
+                "",
+                &replacement(10).encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            if phase == "partial-frame" {
+                assert_eq!(
+                    read_message(&mut client).await.unwrap().0,
+                    MessageType::InstanceAuthorityAck
+                );
+                // A one-byte buffer proves the server consumed part of this incomplete header.
+                client.write_all(&[0, 0]).await.unwrap();
+            } else {
+                // Reading one byte proves commit; the remaining ACK cannot fit in the buffer.
+                client.read_exact(&mut [0]).await.unwrap();
+            }
+            assert_eq!(instance(&registry).0, InstanceTarget::Current);
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(instance(&registry).0, InstanceTarget::Unavailable);
+            let mut next = AuthorityPeer::open(services).await;
+            assert_eq!(instance(&registry).0, InstanceTarget::Unavailable);
+            next.replace(replacement(0)).await;
+            assert_eq!(instance(&registry).0, InstanceTarget::Current);
+            next.close().await.unwrap_err();
+        })
+        .await
+        .expect("authority cancellation exceeded the test deadline");
     }
 }
