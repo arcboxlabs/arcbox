@@ -60,7 +60,7 @@ impl AccessSource for RuntimeSource {
     }
 
     fn resolve(&self, hostname: &str) -> Option<IpAddr> {
-        self.0.container_dns_address(hostname)
+        self.0.web_service_dns_address(hostname)
     }
 
     async fn reconcile(

@@ -17,32 +17,35 @@ impl Runtime {
     /// Authorizes a local FQDN for signing and returns its DNS resolution revision.
     /// Effective resource or instance changes invalidate the revision across asynchronous work.
     pub async fn https_signing_revision(&self, fqdn: &str) -> Option<u64> {
-        let name = fqdn.parse::<Domain>().ok()?;
-        let registry = self
-            .dns_registry
-            .read()
-            .expect("DNS registry lock poisoned");
-        match registry.resolve(&name) {
-            Lookup::Matched {
-                claim, revision, ..
-            } if Self::is_container_dns_owner(claim.owner()) => Some(revision),
-            _ => None,
-        }
+        self.web_service_dns_entry(fqdn)
+            .map(|(_, revision)| revision)
     }
 
-    /// Returns the selected container address for a current, conflict-free DNS name.
-    pub fn container_dns_address(&self, fqdn: &str) -> Option<std::net::IpAddr> {
+    /// Returns the current container or built-in index address for a conflict-free DNS name.
+    pub fn web_service_dns_address(&self, fqdn: &str) -> Option<std::net::IpAddr> {
+        self.web_service_dns_entry(fqdn).map(|(address, _)| address)
+    }
+
+    fn web_service_dns_entry(&self, fqdn: &str) -> Option<(std::net::IpAddr, u64)> {
         let name = fqdn.parse::<Domain>().ok()?;
         let registry = self
             .dns_registry
             .read()
             .expect("DNS registry lock poisoned");
-        match registry.resolve(&name) {
-            Lookup::Matched { claim, address, .. }
-                if Self::is_container_dns_owner(claim.owner()) =>
-            {
-                Some(address)
+        if name == self.config.network.dns_domain {
+            return IndexEndpoint {
+                apex: &self.config.network.dns_domain,
+                gateway: self.config.container.cidr.docker_bridge_gateway(),
             }
+            .current(&registry);
+        }
+        match registry.resolve(&name) {
+            Lookup::Matched {
+                claim,
+                address,
+                revision,
+                ..
+            } if Self::is_container_dns_owner(claim.owner()) => Some((address, revision)),
             _ => None,
         }
     }
@@ -148,6 +151,27 @@ struct IndexEndpoint<'a> {
 }
 
 impl IndexEndpoint<'_> {
+    fn current(&self, registry: &Registry) -> Option<(std::net::IpAddr, u64)> {
+        if registry.get("system:index")?.claims.len() != 1 {
+            return None;
+        }
+        match registry.resolve(self.apex) {
+            Lookup::Matched {
+                claim,
+                address,
+                revision,
+                publishable: true,
+            } if claim.owner() == "system:index"
+                && claim.authority() == "index"
+                && claim.pattern() == &arcbox_dns::NamePattern::Exact(self.apex.clone())
+                && address == std::net::IpAddr::V4(self.gateway) =>
+            {
+                Some((address, revision))
+            }
+            _ => None,
+        }
+    }
+
     fn project(&self, route: IndexWebService, registry: &Registry) -> Result<Vec<WebService>> {
         let Self { apex, gateway } = *self;
         if route.hostname != apex.as_str() || route.ipv4_address != gateway.to_string() {
@@ -155,11 +179,7 @@ impl IndexEndpoint<'_> {
                 "guest index does not match the configured apex and gateway".into(),
             ));
         }
-        if !matches!(registry.resolve(apex), Lookup::Matched { claim, address, publishable: true, .. }
-        if claim.owner() == "system:index" && claim.authority() == "index"
-            && claim.pattern() == &arcbox_dns::NamePattern::Exact(apex.clone())
-            && address == std::net::IpAddr::V4(gateway))
-        {
+        if self.current(registry).is_none() {
             return Ok(Vec::new());
         }
         let mode = if route.managed_https {
@@ -285,13 +305,13 @@ mod tests {
             .unwrap();
         for name in ["web.arcbox.local", "custom.local", "v1.api.local"] {
             assert_eq!(
-                runtime.container_dns_address(name),
+                runtime.web_service_dns_address(name),
                 Some("10.0.2.3".parse().unwrap())
             );
             assert_eq!(runtime.https_signing_revision(name).await, Some(revision));
         }
         for name in ["custom.local.arcbox.local", "api.local"] {
-            assert_eq!(runtime.container_dns_address(name), None);
+            assert_eq!(runtime.web_service_dns_address(name), None);
             assert_eq!(runtime.https_signing_revision(name).await, None);
         }
         let hosts = runtime.network_manager().local_hosts_table();
@@ -318,7 +338,7 @@ mod tests {
                 .await
                 .contains("container")
         );
-        assert_eq!(runtime.container_dns_address("custom.local"), None);
+        assert_eq!(runtime.web_service_dns_address("custom.local"), None);
         assert_eq!(runtime.https_signing_revision("custom.local").await, None);
         assert!(!hosts.read().unwrap().contains_key("custom.local"));
         runtime.deregister_dns_by_id("container").await;
@@ -675,6 +695,83 @@ mod tests {
                 []
             );
         }
+    }
+
+    #[tokio::test]
+    async fn index_signing_and_observation_require_the_exact_published_endpoint() {
+        use arcbox_dns::{
+            NamePattern,
+            claims::Claim,
+            registry::{InstanceAuthority, InstanceTarget},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(crate::Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let apex = runtime.config.network.dns_domain.clone();
+        let gateway = runtime.config.container.cidr.docker_bridge_gateway();
+        let claim = Claim::exclusive(
+            NamePattern::Exact(apex.clone()),
+            "system:index".into(),
+            "index".into(),
+        );
+        runtime.replace_dns_registration("system:index", vec![claim.clone()], Some(gateway.into()));
+        assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+        assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
+        runtime
+            .dns_registry
+            .write()
+            .unwrap()
+            .replace_instance_authorities(vec![InstanceAuthority {
+                root: apex.clone(),
+                target: InstanceTarget::Current,
+            }]);
+        let revision = runtime.https_signing_revision(apex.as_str()).await.unwrap();
+        assert_eq!(
+            runtime.web_service_dns_address(apex.as_str()),
+            Some(gateway.into())
+        );
+        runtime.replace_dns_registration("system:index", vec![claim.clone()], Some(gateway.into()));
+        assert_eq!(
+            runtime.https_signing_revision(apex.as_str()).await,
+            Some(revision)
+        );
+        for name in [
+            "host.arcbox.local",
+            "other.arcbox.local",
+            "child.arcbox.local",
+        ] {
+            assert_eq!(runtime.https_signing_revision(name).await, None);
+            assert_eq!(runtime.web_service_dns_address(name), None);
+        }
+        let extra = Claim::exclusive(
+            NamePattern::Exact("extra.local".parse().unwrap()),
+            "system:index".into(),
+            "index".into(),
+        );
+        for (claims, address) in [
+            (vec![claim.clone()], Some("172.17.0.2".parse().unwrap())),
+            (vec![claim.clone(), extra], Some(gateway.into())),
+            (vec![claim.clone()], None),
+        ] {
+            runtime.replace_dns_registration("system:index", claims, address);
+            assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+            assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
+        }
+        runtime.replace_dns_registration("system:index", vec![claim], Some(gateway.into()));
+        assert_ne!(
+            runtime.https_signing_revision(apex.as_str()).await.unwrap(),
+            revision
+        );
+        runtime
+            .dns_registry
+            .write()
+            .unwrap()
+            .invalidate_instance_authorities();
+        assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+        assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
     }
 
     #[test]

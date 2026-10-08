@@ -328,7 +328,7 @@ mod tests {
         // Nothing torn down, nothing set up, on a query failure.
         assert!(runtime.registered_container_ids().await.contains("c"));
         assert_eq!(
-            runtime.container_dns_address("c.local"),
+            runtime.web_service_dns_address("c.local"),
             Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
         );
         assert_eq!(guest.queries(), 1);
@@ -354,9 +354,9 @@ mod tests {
                 .as_deref(),
             Some("known")
         );
-        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(runtime.web_service_dns_address("old.arcbox.local"), None);
         assert_eq!(
-            runtime.container_dns_address("renamed.arcbox.local"),
+            runtime.web_service_dns_address("renamed.arcbox.local"),
             Some("172.17.0.3".parse().unwrap())
         );
         assert!(
@@ -413,7 +413,7 @@ mod tests {
                 Some(id)
             );
             assert_eq!(
-                runtime.container_dns_address(&format!("{name}.arcbox.local")),
+                runtime.web_service_dns_address(&format!("{name}.arcbox.local")),
                 Some(ip.parse().unwrap())
             );
         }
@@ -473,7 +473,7 @@ mod tests {
                 Some("current")
             );
             assert_eq!(
-                runtime.container_dns_address("current.arcbox.local"),
+                runtime.web_service_dns_address("current.arcbox.local"),
                 Some("172.17.0.2".parse().unwrap())
             );
             assert_eq!(
@@ -523,7 +523,7 @@ mod tests {
         settle(Duration::ZERO).await;
         assert_eq!(guest.active_queries.load(Ordering::Relaxed), 0);
         assert_eq!(runtime.resolve_registered_container("old").await, None);
-        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(runtime.web_service_dns_address("old.arcbox.local"), None);
         assert_eq!(
             runtime.resolve_registered_container("replacement").await,
             None
@@ -540,7 +540,7 @@ mod tests {
             Some("replacement")
         );
         assert_eq!(
-            runtime.container_dns_address("replacement.arcbox.local"),
+            runtime.web_service_dns_address("replacement.arcbox.local"),
             Some("172.17.0.2".parse().unwrap())
         );
         assert_eq!(runtime.resolve_registered_container("old").await, None);
@@ -574,7 +574,7 @@ mod tests {
         settle(RECONCILE_INTERVAL).await;
         assert_eq!(guest.queries(), 1);
         assert_eq!(runtime.resolve_registered_container("web").await, None);
-        assert_eq!(runtime.container_dns_address("web.arcbox.local"), None);
+        assert_eq!(runtime.web_service_dns_address("web.arcbox.local"), None);
 
         fixture.restart();
         settle(RETURN_RETRY).await;
@@ -584,7 +584,7 @@ mod tests {
             Some("web")
         );
         assert_eq!(
-            runtime.container_dns_address("web.arcbox.local"),
+            runtime.web_service_dns_address("web.arcbox.local"),
             Some("172.17.0.2".parse().unwrap())
         );
 
@@ -636,7 +636,7 @@ mod tests {
             .await
             .expect("the next tick queries the replacement VM");
         assert_eq!(runtime.resolve_registered_container("old").await, None);
-        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(runtime.web_service_dns_address("old.arcbox.local"), None);
         assert_eq!(guest.queries(), 2);
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(1), guest.query_finished.notified())
