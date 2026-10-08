@@ -826,20 +826,20 @@ mod tests {
     async fn https_observation_requires_host_cid_and_valid_addresses_over_the_wire() {
         use crate::rpc::MessageType;
         use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
-        for (cid, address, error_code) in [
-            (tokio_vsock::VMADDR_CID_HOST, "192.168.64.1", None),
-            (tokio_vsock::VMADDR_CID_HOST, "192.168.64.0/24", Some(400)),
-            (tokio_vsock::VMADDR_CID_HOST + 1, "192.168.64.1", Some(403)),
-        ] {
+        for (guest, (cid, address, error_code)) in [Guest::SystemVm, Guest::DistroMachine]
+            .into_iter()
+            .flat_map(|guest| {
+                [
+                    (tokio_vsock::VMADDR_CID_HOST, "192.168.64.1", None),
+                    (tokio_vsock::VMADDR_CID_HOST, "192.168.64.0/24", Some(400)),
+                    (tokio_vsock::VMADDR_CID_HOST + 1, "192.168.64.1", Some(403)),
+                ]
+                .map(|case| (guest, case))
+            })
+        {
             let (mut client, server) = tokio::io::duplex(4096);
             let task = tokio::spawn(async move {
-                handle_connection(
-                    server,
-                    Guest::SystemVm,
-                    &crate::agent::Services::default(),
-                    cid,
-                )
-                .await
+                handle_connection(server, guest, &crate::agent::Services::default(), cid).await
             });
             let request = ReconcileHttpsAccessRequest {
                 observation_id: "wire-test".into(),
