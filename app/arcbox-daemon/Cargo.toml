@@ -33,7 +33,7 @@ arcbox-net = { workspace = true }
 axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 arcbox-docker-tools.workspace = true
 filetime = "0.2.29"
 arcbox-transport.workspace = true

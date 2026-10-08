@@ -201,3 +201,7 @@ Five authority regressions cover acquisition/replacement/release notifications, 
 ## Forward other-instance DNS to the accepted endpoint
 
 Host and VMM DNS now use the selected instance's explicit loopback port. This path bypasses ordinary upstream caching and rechecks authority after receiving the reply. Real UDP fixtures verify cache isolation, stale-authority rejection, and no default-upstream packet after a bad transaction ID. Net passed 117 tests with five ignored, plus strict Clippy, formatting, and diff checks. Daemon authority delivery and installed multi-instance validation remain pending.
+
+## Retain resolver cleanup through startup cancellation
+
+The daemon now retains the resolver publication task in a shared slot across startup and shutdown. A cancelled waiter leaves the task owned, and the next waiter receives cleanup errors. Normal shutdown, interrupted startup, and failed startup join publication before stopping Runtime. Recovery separates container snapshot replay from Docker tool installation without changing startup order. The cancellation regression, seven mDNS tests, four shutdown tests, strict daemon Clippy, and formatting passed. The task currently owns Bonjour only; helper lease integration and native teardown validation remain pending.

@@ -24,7 +24,6 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arcbox_core::Runtime;
 use arcbox_net::NetworkManager;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
@@ -39,26 +38,6 @@ use mirror::{Event, Mirror, Registrar};
 /// Local Network access in System Settings at any time, and mDNSResponder
 /// does not revisit a refused registration on its own.
 const RETRY_DENIED: Duration = Duration::from_secs(60);
-
-/// Starts the mirror for `domain` when it is an mDNS domain.
-///
-/// The caller decides ownership: only the daemon that owns the host's
-/// resolver for `domain` may announce its names, or the production and a
-/// development daemon would both claim `host.arcbox.local`.
-pub fn spawn(runtime: &Arc<Runtime>, domain: &str, shutdown: &CancellationToken) {
-    if !is_mdns_domain(domain) {
-        debug!(domain, "not an mDNS domain; no Bonjour records");
-        return;
-    }
-    let network_manager = Arc::clone(runtime.network_manager());
-    let domain = domain.to_owned();
-    let shutdown = shutdown.clone();
-    drop(tokio::spawn(async move {
-        if let Err(error) = run(network_manager, &domain, shutdown).await {
-            warn!(%error, domain, "mDNS mirror stopped; names resolve through the resolver file only");
-        }
-    }));
-}
 
 /// RFC 6762: `.local` is the mDNS domain. DNS names compare case-insensitively.
 fn is_mdns_domain(domain: &str) -> bool {
@@ -88,11 +67,15 @@ impl Registrar for Connection {
     }
 }
 
-async fn run(
+/// Runs the resolver owner's mirror until shutdown; the caller retains this future.
+pub async fn run(
     network_manager: Arc<NetworkManager>,
     domain: &str,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
+    if !is_mdns_domain(domain) {
+        return Ok(());
+    }
     // Subscribe before the snapshot so no change falls between the two.
     let mut changes = network_manager.subscribe_dns_changes();
     let connection = Connection::open()?;

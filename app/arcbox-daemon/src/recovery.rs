@@ -9,7 +9,12 @@ use anyhow::{Context, Result};
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::paths::HostLayout;
 use arcbox_core::Runtime;
-use tracing::info;
+
+mod container_network;
+mod docker_tools;
+
+use container_network::recover_container_networking;
+use docker_tools::ensure_docker_tools;
 
 use crate::context::DaemonContext;
 use crate::self_setup;
@@ -103,7 +108,18 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
     // would conflict.
     #[cfg(target_os = "macos")]
     if owns_dns {
-        crate::mdns::spawn(runtime, ctx.dns_domain.as_str(), &ctx.shutdown);
+        let network_manager = Arc::clone(runtime.network_manager());
+        let domain = ctx.dns_domain.to_string();
+        let shutdown = ctx.shutdown.clone();
+        ctx.resolver_service
+            .start(async move {
+                let result = crate::mdns::run(network_manager, &domain, shutdown).await;
+                if let Err(error) = &result {
+                    tracing::warn!(%error, domain, "mDNS mirror stopped");
+                }
+                result.map_err(Into::into)
+            })
+            .await;
     }
     // The `/var/run/docker.sock` symlink belongs to the production daemon
     // running its canonical data dir: the link target embeds the
@@ -279,105 +295,6 @@ fn spawn_bridge_mac_route_reconcile(
             }
         }
     }));
-}
-
-// =============================================================================
-// Docker CLI tools
-// =============================================================================
-
-/// Embedded lockfile (same one used by arcbox-core for boot assets).
-const LOCK_TOML: &str = include_str!("../../../assets.lock");
-
-/// Installs Docker CLI tools (docker, buildx, compose, credential helper)
-/// if not already present. Tries the app bundle first, then CDN.
-async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
-    let tools = arcbox_docker_tools::parse_tools_for_group(
-        LOCK_TOML,
-        arcbox_docker_tools::ToolGroup::Docker,
-    )
-    .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
-
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "x86_64"
-    };
-
-    let install_dir = data_dir.join("runtime/bin");
-    let mgr = arcbox_docker_tools::HostToolManager::new(tools, arch, install_dir);
-
-    // Docker tools are already seeded from the app bundle by
-    // seed_from_bundle() (via Resources/runtime/bin/). This check
-    // is a fast no-op when they're present and checksums match.
-    if mgr.validate_all().await.is_ok() {
-        tracing::debug!("Docker CLI tools already installed and valid");
-        return Ok(());
-    }
-
-    mgr.install_all(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("docker tools install failed: {e}"))?;
-
-    info!("Docker CLI tools installed");
-    Ok(())
-}
-
-// =============================================================================
-// Container networking recovery
-// =============================================================================
-
-/// Re-registers DNS entries and port forwarding for all running containers.
-///
-/// Reports nothing about VM liveness: `services::vm_running_loop` owns
-/// `SetupStatus.vm_running` and follows the lifecycle across restarts, which
-/// a one-shot observation made here could not.
-async fn recover_container_networking(runtime: &Arc<Runtime>) -> Result<()> {
-    use arcbox_docker::guest_query;
-    use arcbox_docker::proxy::{GuestHttpClient, VsockConnector};
-
-    let client = GuestHttpClient::new(Arc::new(VsockConnector::new(Arc::clone(runtime))));
-    let running = guest_query::running_container_snapshot(&client).await?;
-
-    let mut recovered_dns = 0u32;
-    let mut recovered_ports = 0u32;
-    for inspect in &running {
-        let id = &inspect.metadata.id;
-        runtime.register_container_dns(&inspect.metadata).await;
-        if inspect.metadata.primary_ipv4().is_some() {
-            recovered_dns += 1;
-        }
-
-        let bindings = arcbox_docker::port_bindings::parse_port_bindings(&inspect.body);
-        if !bindings.is_empty() {
-            let rules: Vec<_> = bindings
-                .iter()
-                .map(|b| {
-                    (
-                        b.host_ip.clone(),
-                        b.host_port,
-                        b.container_port,
-                        b.protocol.clone(),
-                    )
-                })
-                .collect();
-            match runtime
-                .start_port_forwarding_for(runtime.default_machine_name(), id, &rules)
-                .await
-            {
-                Ok(()) => recovered_ports += 1,
-                Err(e) => tracing::warn!("Failed to recover port forwarding for {id}: {e}"),
-            }
-        }
-    }
-
-    if recovered_dns > 0 || recovered_ports > 0 {
-        info!(
-            dns = recovered_dns,
-            ports = recovered_ports,
-            "Recovered networking for running containers"
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

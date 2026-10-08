@@ -17,6 +17,7 @@ mod mdns;
 mod nfs_mount;
 mod power;
 mod recovery;
+mod resolver_service;
 mod sandbox_cleanup;
 mod self_setup;
 mod services;

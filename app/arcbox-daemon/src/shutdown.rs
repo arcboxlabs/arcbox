@@ -50,6 +50,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     crate::nfs_mount::cleanup(&ctx).await;
     crate::machine_mount::cleanup().await;
     ctx.shutdown.cancel();
+    if let Err(error) = ctx.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed");
+    }
 
     drain(&mut handles).await;
 
@@ -218,6 +221,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
         .set_failed("startup interrupted by shutdown signal");
     tokio::time::sleep(Duration::from_millis(200)).await;
     handles.shutdown.cancel();
+    if let Err(error) = handles.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed during startup cancellation");
+    }
 
     // `early_runtime` is filled before the VM boots, so it covers every
     // window in which a VM can exist; empty means nothing to tear down.
@@ -241,6 +247,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
 /// letting the original startup error reach the caller.
 pub async fn abort_failed_startup(handles: &StartupHandles) {
     handles.shutdown.cancel();
+    if let Err(error) = handles.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed after startup error");
+    }
     if let Some(runtime) = handles.early_runtime.get() {
         if let Err(error) = runtime.shutdown_force().await {
             warn!(%error, "failed to force-clean runtime after startup error");

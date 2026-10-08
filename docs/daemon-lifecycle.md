@@ -150,6 +150,7 @@ write current PID
 ```
 signal received
   ├─ cancel CancellationToken         → all services begin draining
+  ├─ join resolver publication        → Bonjour connection and records are released
   ├─ drain(DNS, Docker, gRPC)         → 5 s timeout, then abort
   │   Docker and the control plane close idle keep-alive connections at
   │   once and finish in-flight requests with `Connection: close`; only
@@ -191,6 +192,7 @@ kill-and-orphan:
 signal received during startup
   ├─ SetupState.set_failed("startup interrupted…")  → WatchSetupStatus clients see the cause
   ├─ cancel CancellationToken                       → gRPC (if started) drains
+  ├─ join resolver publication                       → retain cleanup across a cancelled join
   ├─ early_runtime empty?  → exit (nothing to tear down)
   ├─ runtime.shutdown()    → bounded to 10 s: an in-flight boot parks
   │                          graceful Stop behind itself, so an unbounded
@@ -209,6 +211,8 @@ while this process is still tearing down its VM. The flock releases at
 process exit, as in every other path.
 
 Startup interruption follows the same shutdown error contract: route cleanup completes before the daemon reports a stop error or task panic. A forced stop retains direct process exit and uses status 1 when shutdown failed.
+
+`ResolverService` is shared through the pre-pipeline handles and daemon context. The shared slot retains the publication task until its join completes, including when the first waiter is cancelled. Normal shutdown, interrupted startup, and failed startup all join the same task before stopping Runtime. The current task owns Bonjour publication; helper resolver lease ownership is a separate integration step.
 
 ## Crash / SIGKILL
 
