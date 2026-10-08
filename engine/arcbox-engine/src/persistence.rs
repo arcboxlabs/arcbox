@@ -1,6 +1,7 @@
 //! Machine configuration persistence.
 //!
 //! Stores machine configurations to disk so they survive process restarts.
+//! Serializes writes through one manager to preserve concurrent field updates.
 
 use crate::error::{EngineError, Result};
 use crate::machine::{MachineInfo, MachineState};
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Persisted machine data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +196,7 @@ fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
 pub struct MachinePersistence {
     /// Base directory for machine configs.
     base_dir: PathBuf,
+    writer: Mutex<()>,
 }
 
 impl MachinePersistence {
@@ -201,6 +204,7 @@ impl MachinePersistence {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
+            writer: Mutex::new(()),
         }
     }
 
@@ -220,6 +224,7 @@ impl MachinePersistence {
     ///
     /// Returns an error if the configuration cannot be saved.
     pub fn save(&self, machine: &MachineInfo) -> Result<()> {
+        let _writer = self.writer.lock().map_err(|_| EngineError::LockPoisoned)?;
         let dir = self.machine_dir(&machine.name);
         fs::create_dir_all(&dir)?;
 
@@ -276,6 +281,7 @@ impl MachinePersistence {
     ///
     /// Returns an error if the configuration cannot be removed.
     pub fn remove(&self, name: &str) -> Result<()> {
+        let _writer = self.writer.lock().map_err(|_| EngineError::LockPoisoned)?;
         let dir = self.machine_dir(name);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
@@ -298,10 +304,13 @@ impl MachinePersistence {
     /// Applies a mutation to a persisted machine config in a single
     /// load→mutate→write cycle.
     ///
+    /// The callback must not call a write method on the same persistence manager.
+    ///
     /// # Errors
     ///
     /// Returns an error if the config cannot be loaded or written.
     pub fn update(&self, name: &str, mutate: impl FnOnce(&mut PersistedMachine)) -> Result<()> {
+        let _writer = self.writer.lock().map_err(|_| EngineError::LockPoisoned)?;
         let mut machine = self.load(name)?;
         mutate(&mut machine);
 
@@ -486,6 +495,60 @@ mod tests {
         let loaded = persistence.load("test-vm").unwrap();
         assert_eq!(loaded.state, PersistedState::Running);
         assert_eq!(loaded.ip_address.as_deref(), Some("10.0.2.15"));
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_web_policy_and_bridge_address() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = TempDir::new().unwrap();
+        let persistence = MachinePersistence::new(temp.path());
+        let directory = temp.path().join("web");
+        fs::create_dir(&directory).unwrap();
+        fs::write(
+            directory.join("config.toml"),
+            "name = 'web'\ncpus = 2\nmemory_mb = 2048\ndisk_gb = 10\nstate = 'running'\nvm_id = 'web'\n",
+        )
+        .unwrap();
+
+        let timeout = Duration::from_secs(3);
+        let (loaded, loading) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let (completed, completion) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let store = &persistence;
+            let address = scope.spawn(move || {
+                store.update("web", |machine| {
+                    loaded.send(()).unwrap();
+                    released.recv_timeout(timeout).unwrap();
+                    machine.bridge_ip_address = Some("192.168.64.2".into());
+                })
+            });
+            loading.recv_timeout(timeout).unwrap();
+            let policy = scope.spawn(|| {
+                started.send(()).unwrap();
+                let result = persistence.update("web", |machine| {
+                    machine.web_ports.http_port = "8080".parse().unwrap();
+                });
+                completed.send(result).unwrap();
+            });
+            starting.recv_timeout(timeout).unwrap();
+            let premature = completion.recv_timeout(Duration::from_millis(250));
+            release.send(()).unwrap();
+            address.join().unwrap().unwrap();
+            policy.join().unwrap();
+            assert!(
+                matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+                "a second writer completed while the first writer held an older record"
+            );
+            completion.recv_timeout(timeout).unwrap().unwrap();
+        });
+
+        let saved = persistence.load("web").unwrap();
+        assert_eq!(saved.bridge_ip_address.as_deref(), Some("192.168.64.2"));
+        assert_eq!(saved.web_ports.http_port, "8080".parse().unwrap());
     }
 
     #[test]
