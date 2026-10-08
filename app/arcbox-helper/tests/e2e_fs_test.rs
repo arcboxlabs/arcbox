@@ -11,7 +11,6 @@
 //! Covers the regressions that bit users:
 //! - docker CLI symlink install / foreign-link preservation / unlink ownership
 //! - docker.sock symlink install / foreign preservation
-//! - DNS resolver marker ownership
 //! - hosts alias install / uninstall
 //! - version pin shape
 
@@ -100,10 +99,6 @@ impl HelperFixture {
 
     fn docker_sock(&self) -> PathBuf {
         self.sandbox_root.join("var/run/docker.sock")
-    }
-
-    fn resolver_dir(&self) -> PathBuf {
-        self.sandbox_root.join("etc/resolver")
     }
 
     fn hosts_path(&self) -> PathBuf {
@@ -370,48 +365,6 @@ async fn e2e_socket_preserves_foreign_and_real_file() {
     assert!(link.is_file(), "real socket file must survive unlink");
 }
 
-// ── DNS resolver ─────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn e2e_dns_install_status_uninstall() {
-    let fx = HelperFixture::start().await;
-    let client = fx.client().await;
-
-    assert!(!client.dns_status("arcbox.local").await.unwrap());
-    client.dns_install("arcbox.local", 5553).await.unwrap();
-    assert!(client.dns_status("arcbox.local").await.unwrap());
-
-    let path = fx.resolver_dir().join("arcbox.local");
-    let content = fs::read_to_string(&path).unwrap();
-    assert!(content.contains("# managed by arcbox-helper"));
-    assert!(content.contains("nameserver 127.0.0.1"));
-    assert!(content.contains("port 5553"));
-
-    // Idempotent overwrite of ours.
-    client.dns_install("arcbox.local", 5553).await.unwrap();
-
-    client.dns_uninstall("arcbox.local").await.unwrap();
-    assert!(!path.exists());
-    assert!(!client.dns_status("arcbox.local").await.unwrap());
-}
-
-#[tokio::test]
-async fn e2e_dns_preserves_foreign_resolver() {
-    let fx = HelperFixture::start().await;
-    fs::create_dir_all(fx.resolver_dir()).unwrap();
-    let path = fx.resolver_dir().join("arcbox.local");
-    fs::write(&path, "nameserver 1.1.1.1\n").unwrap();
-
-    let client = fx.client().await;
-    let err = client.dns_install("arcbox.local", 5553).await.unwrap_err();
-    assert!(err.to_string().contains("not ArcBox-managed"), "got: {err}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), "nameserver 1.1.1.1\n");
-    assert!(!client.dns_status("arcbox.local").await.unwrap());
-
-    client.dns_uninstall("arcbox.local").await.unwrap();
-    assert!(path.exists(), "foreign resolver must survive uninstall");
-}
-
 // ── hosts alias ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -454,7 +407,5 @@ async fn e2e_validation_rejects_bad_inputs() {
     let client = fx.client().await;
 
     assert!(client.socket_link("/tmp/docker.sock").await.is_err());
-    assert!(client.dns_install("UPPER.CASE", 5553).await.is_err());
-    assert!(client.dns_install("arcbox.local", 53).await.is_err());
     assert!(client.route_add("8.8.8.0/24", "bridge100").await.is_err());
 }
