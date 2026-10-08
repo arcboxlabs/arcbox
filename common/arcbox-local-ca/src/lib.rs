@@ -50,6 +50,8 @@ mod operation;
 mod public;
 mod request;
 #[cfg(target_os = "macos")]
+mod rotation;
+#[cfg(target_os = "macos")]
 mod trust;
 mod validity;
 
@@ -68,6 +70,8 @@ pub use self::public::PublicAuthority;
 #[cfg(any(target_os = "macos", test))]
 pub use self::request::VerifiedCertificateRequest;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
+#[cfg(target_os = "macos")]
+pub use self::rotation::Rotation;
 pub use self::validity::CertificateValidity;
 
 /// Why the CA could not be created, loaded, or used.

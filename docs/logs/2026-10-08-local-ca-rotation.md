@@ -14,6 +14,8 @@ Only `preparing` may create a candidate key or certificate. A malformed journal 
 
 The initial journal commit validates persistence and rejected state transitions. Keychain integration, CLI orchestration, Desktop actions, and native rotation acceptance are subsequent steps; that commit does not expose a rotation command.
 
+The rotation library now prepares one candidate in the inactive slot, reads a pending pair without mutation, and commits only after the candidate has TLS-only Admin trust and the previous root has no User or Admin trust. Commit retries persist the journal before publishing or deleting native items. A completed retry verifies the selected candidate without allocating another key.
+
 ## Validation
 
 The crate tests cover reloads at each journal phase, retention of the previous identity during cleanup, malformed records, duplicate identities, and invalid target slots. Native trust and browser acceptance are not covered by these tests.
@@ -40,3 +42,5 @@ macOS persists both members of the generated key pair. Cleanup verifies and remo
 - All four isolated Keychain regressions passed: journal selection and missing journal, missing private key, missing recorded identity, and interrupted cleanup retaining only a public key or an unfinished key pair. The existing native migration regression also passed. These tests do not install trust.
 - Swift generation, formatting, lint, and all three local HTTPS test suites passed. The full Desktop suite failed two existing saved-window-frame tests. AppKit mapped frames from the external display to the current built-in display; the tests expect unchanged coordinates. The tests remain unchanged pending approval.
 - Native Admin trust authorization, the browser flow, and a signed build containing these changes remain unverified. Rotation orchestration and the Desktop renewal action are still pending.
+
+The failed early cleanup probe left one isolated public key and certificate. An exact-reference cleanup verified the profile label, public-key hash, full certificate SHA-256, absent private key, and absent User/Admin trust before deleting those two items. The empty temporary directory was removed. No production root or trust setting changed.
