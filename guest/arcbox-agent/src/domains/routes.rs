@@ -89,7 +89,10 @@ impl Routes {
                 () = cancel.cancelled() => break,
                 command = inbox.recv() => match command {
                     Some(Command::Track(facts)) => self.track(facts),
-                    Some(Command::Forget(id)) => self.forget(&id).await,
+                    Some(Command::Forget(id, reply)) => {
+                        // Shutdown can drop the caller while rule cleanup finishes.
+                        let _ = reply.send(self.forget(&id).await);
+                    }
                     None => break,
                 },
                 () = sleep_until(due) => self.scan_due().await,
@@ -124,13 +127,11 @@ impl Routes {
         self.containers.insert(tracked.facts.id.clone(), tracked);
     }
 
-    async fn forget(&mut self, container_id: &str) {
+    async fn forget(&mut self, container_id: &str) -> anyhow::Result<()> {
         if let Some(tracked) = self.containers.remove(container_id) {
             self.ports.route(tracked.facts.ips(), None);
         }
-        if let Err(e) = self.rules.remove(container_id).await {
-            tracing::warn!(container_id, error = %format!("{e:#}"), "failed to remove container domain rules");
-        }
+        self.rules.remove(container_id).await
     }
 
     /// Rescans every container whose scan is due and follows its choice.

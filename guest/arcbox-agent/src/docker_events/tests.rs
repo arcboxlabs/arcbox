@@ -11,13 +11,104 @@ fn network_changes_reinspect_the_container_instead_of_the_network() {
             "Type": "network", "Action": action,
             "Actor": { "ID": "network-id", "Attributes": { "container": "container-id" } }
         });
-        assert_eq!(network_container_id(&event), Some("container-id"));
+        assert_eq!(network_container_id(&event).unwrap(), Some("container-id"));
         event["Action"] = "destroy".into();
-        assert_eq!(network_container_id(&event), None);
+        assert_eq!(network_container_id(&event).unwrap(), None);
         event["Action"] = action.into();
         event["Actor"]["Attributes"]["container"] = "".into();
-        assert_eq!(network_container_id(&event), None);
+        assert!(network_container_id(&event).is_err());
     }
+}
+
+#[tokio::test]
+async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
+    let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    sync_dns(
+        &dns,
+        &serde_json::json!({
+            "Id": id, "Name": "/web",
+            "NetworkSettings": { "Networks": { "bridge": { "IPAddress": "172.17.0.2" } } }
+        }),
+    )
+    .await
+    .unwrap();
+    let registry = dns.containers();
+    let (domains, mut commands) = DomainRoutes::test_channel();
+    let mut sync = ContainerSync {
+        dns: &dns,
+        mirror: PublishMirror::new("eth0".into()),
+        domains,
+    };
+    for (action, fail) in [("die", true), ("destroy", false)] {
+        let event =
+            serde_json::json!({ "Type": "container", "Action": action, "Actor": { "ID": id } })
+                .to_string();
+        let (result, ()) = timeout(Duration::from_secs(2), async {
+            tokio::join!(handle_event(&mut sync, &event), async {
+                let crate::domains::Command::Forget(owner, reply) = commands.recv().await.unwrap()
+                else {
+                    panic!("cleanup must send Forget");
+                };
+                assert_eq!(owner, id);
+                let entries = registry.read().await;
+                let unavailable = entries
+                    .get(id)
+                    .expect("owner survives until cleanup completes");
+                assert_eq!(unavailable.address, None);
+                assert_eq!(unavailable.claims, []);
+                drop(entries);
+                reply
+                    .send(if fail {
+                        Err(anyhow::anyhow!("rule deletion failed"))
+                    } else {
+                        Ok(())
+                    })
+                    .unwrap();
+            })
+        })
+        .await
+        .unwrap();
+        if fail {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("rule deletion failed")
+            );
+            assert!(registry.read().await.get(id).is_some());
+        } else {
+            result.unwrap();
+            assert!(registry.read().await.get(id).is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership() {
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let (domains, commands) = DomainRoutes::test_channel();
+    drop(commands);
+    let facts = ContainerFacts::from_inspect(
+        &serde_json::json!({
+            "Id": "owner", "Name": "/web", "State": { "Pid": 1 },
+            "NetworkSettings": {
+                "SandboxKey": "/var/run/docker/netns/web",
+                "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+            }
+        }),
+        dns.domain(),
+    )
+    .unwrap();
+    assert!(domains.track(facts).is_err());
+    let mut sync = ContainerSync {
+        dns: &dns,
+        mirror: PublishMirror::new("eth0".into()),
+        domains,
+    };
+    let error = forget_container(&mut sync, "owner").await.unwrap_err();
+    assert!(error.to_string().contains("rules task stopped"));
+    assert!(dns.containers().read().await.get("owner").is_some());
 }
 
 #[tokio::test]

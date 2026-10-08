@@ -77,9 +77,7 @@ async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> a
             continue;
         }
 
-        if let Err(e) = handle_event(sync, trimmed).await {
-            tracing::debug!(error = %e, "failed to process docker event");
-        }
+        handle_event(sync, trimmed).await?;
     }
 }
 
@@ -159,7 +157,7 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>) -> anyhow::Result<()> 
 async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::Result<()> {
     let event: serde_json::Value = serde_json::from_str(json_str)?;
 
-    if let Some(id) = network_container_id(&event) {
+    if let Some(id) = network_container_id(&event)? {
         return register_container_by_id(sync, id).await;
     }
     if event["Type"].as_str() != Some("container") {
@@ -168,16 +166,15 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
 
     let action = event["Action"].as_str().unwrap_or_default();
     let id_full = event["Actor"]["ID"].as_str().unwrap_or_default();
-    let id = &id_full[..12.min(id_full.len())];
 
     match action {
         "start" | "rename" => {
-            register_container_by_id(sync, id).await?;
+            anyhow::ensure!(!id_full.is_empty(), "container {action} event omitted ID");
+            register_container_by_id(sync, id_full).await?;
         }
-        "die" | "destroy" if !id_full.is_empty() => {
-            sync.dns.containers().write().await.remove(id_full);
-            sync.domains.forget(id_full);
-            sync.mirror.remove(id_full).await?;
+        "die" | "destroy" => {
+            anyhow::ensure!(!id_full.is_empty(), "container {action} event omitted ID");
+            forget_container(sync, id_full).await?;
         }
         _ => {}
     }
@@ -185,16 +182,31 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
     Ok(())
 }
 
-fn network_container_id(event: &serde_json::Value) -> Option<&str> {
+fn network_container_id(event: &serde_json::Value) -> anyhow::Result<Option<&str>> {
     if event["Type"].as_str() != Some("network")
         || !matches!(event["Action"].as_str(), Some("connect" | "disconnect"))
     {
-        return None;
+        return Ok(None);
     }
-    event
-        .pointer("/Actor/Attributes/container")?
-        .as_str()
+    let id = event
+        .pointer("/Actor/Attributes/container")
+        .and_then(serde_json::Value::as_str)
         .filter(|id| !id.is_empty())
+        .context("network connect/disconnect event omitted container ID")?;
+    Ok(Some(id))
+}
+
+async fn forget_container(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
+    let registry = sync.dns.containers();
+    // An unavailable owner remains enumerable until every external cleanup succeeds.
+    registry
+        .write()
+        .await
+        .replace(id.to_owned(), Vec::new(), None)?;
+    sync.domains.forget(id).await?;
+    sync.mirror.remove(id).await?;
+    registry.write().await.remove(id);
+    Ok(())
 }
 
 /// Inspects a container and registers its name + IP in the DNS server,
@@ -202,23 +214,23 @@ fn network_container_id(event: &serde_json::Value) -> Option<&str> {
 /// hands it to the domain routes.
 async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
     let info = docker_get(&format!("/containers/{id}/json")).await?;
+    sync_dns(sync.dns, &info).await?;
 
     // Keyed by the full ID: the die/destroy events carry that, not the name.
     if let Some(full_id) = info["Id"].as_str() {
         match ContainerFacts::from_inspect(&info, sync.dns.domain()) {
-            Some(facts) => sync.domains.track(facts),
-            None => sync.domains.forget(full_id),
+            Some(facts) => sync.domains.track(facts)?,
+            None => sync.domains.forget(full_id).await?,
         }
         sync.mirror.apply(full_id, &pinned_publishes(&info)).await?;
     }
 
-    sync_dns(sync.dns, &info).await
+    Ok(())
 }
 
 async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
-    let Some(metadata) = ContainerMetadata::from_inspect(info) else {
-        return Ok(());
-    };
+    let metadata = ContainerMetadata::from_inspect(info)
+        .context("Docker inspect omitted container identity")?;
     let claims = metadata.claims(dns.domain(), "container");
     for warning in claims.warnings {
         tracing::warn!(container_id = %metadata.id, %warning, "rejected container DNS name");

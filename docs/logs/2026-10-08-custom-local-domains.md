@@ -97,3 +97,9 @@ The full host-executed guest suites passed 99 library and 184 binary tests with 
 Host start, restart, rename, network refresh, reconciliation, and startup recovery now register validated inspect metadata through one Runtime entry. Invalid inspect responses propagate errors without synthesizing identity from a request token. A successful Docker rename followed by invalid inspect returns HTTP 500 and preserves previous host ownership.
 
 Docker library tests passed 127 cases, mock API tests passed eight, and daemon recovery tests passed four. Strict all-target Clippy and formatting passed. All 28 Runtime tests passed serially; parallel runs still failed in unchanged listener tests, including an address-rebind race. These results do not establish VM or browser acceptance.
+
+## Acknowledge guest route cleanup
+
+Container removal first makes its complete-ID registration unavailable. The Docker event task removes that owner only after domain-rule cleanup and published-port cleanup succeed. A failed rule deletion or closed domain task propagates an error and preserves the owner for retry.
+
+All eight Docker event tests passed, including failed cleanup acknowledgment and closed-task regressions. Strict Linux musl all-target Clippy, formatting, and diff checks passed. Native iptables deletion and reconnect snapshot retry remain unverified.

@@ -47,7 +47,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock};
 
-use tokio::sync::mpsc;
+use anyhow::Context;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -88,9 +89,10 @@ pub struct DomainRoutes {
     services: WebServices,
 }
 
-enum Command {
+/// Commands processed by the container domain rules task.
+pub enum Command {
     Track(ContainerFacts),
-    Forget(String),
+    Forget(String, oneshot::Sender<anyhow::Result<()>>),
 }
 
 impl DomainRoutes {
@@ -115,15 +117,34 @@ impl DomainRoutes {
     }
 
     /// Starts following a running container, or invalidates its discovered protocols.
-    pub fn track(&self, facts: ContainerFacts) {
+    pub fn track(&self, facts: ContainerFacts) -> anyhow::Result<()> {
         self.services.remove(&facts.id);
-        // The inbox closes only once the task has stopped for shutdown.
-        let _ = self.commands.send(Command::Track(facts));
+        self.commands
+            .send(Command::Track(facts))
+            .map_err(|_| anyhow::anyhow!("container domain rules task stopped"))
     }
 
-    /// Stops following a container and removes its rules.
-    pub fn forget(&self, container_id: &str) {
+    /// Stops following a container and acknowledges removal of every held rule.
+    pub async fn forget(&self, container_id: &str) -> anyhow::Result<()> {
         self.services.remove(container_id);
-        let _ = self.commands.send(Command::Forget(container_id.to_owned()));
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::Forget(container_id.to_owned(), reply))
+            .map_err(|_| anyhow::anyhow!("container domain rules task stopped"))?;
+        response
+            .await
+            .context("container domain cleanup response was dropped")?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::UnboundedReceiver<Command>) {
+        let (commands, inbox) = mpsc::unbounded_channel();
+        (
+            Self {
+                commands,
+                services: WebServices::default(),
+            },
+            inbox,
+        )
     }
 }
