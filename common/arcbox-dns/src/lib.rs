@@ -12,6 +12,7 @@ pub use names::NamePattern;
 
 pub mod claims;
 pub mod container;
+pub mod registry;
 
 /// Shared local-hosts table used by both host-side and VMM-side DNS forwarders.
 pub type LocalHostsTable = RwLock<HashMap<String, IpAddr>>;

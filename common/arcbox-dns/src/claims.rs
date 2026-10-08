@@ -170,11 +170,11 @@ pub enum Resolution<'a> {
 ///
 /// Shared Compose service claims select the smallest complete container ID.
 /// Delegations block all local claims; the closest reservation restricts authority and pattern scope.
-pub fn resolve<'a>(
-    name: &Domain,
-    claims: &'a [Claim],
-    boundaries: &'a [Boundary],
-) -> Resolution<'a> {
+pub fn resolve<'a, C>(name: &Domain, claims: C, boundaries: &'a [Boundary]) -> Resolution<'a>
+where
+    C: IntoIterator<Item = &'a Claim>,
+    C::IntoIter: Clone,
+{
     let Ok(delegated) = Boundary::nearest(name, boundaries, true) else {
         return Resolution::Conflict;
     };
@@ -185,7 +185,7 @@ pub fn resolve<'a>(
         return Resolution::Conflict;
     };
     let ranked = claims
-        .iter()
+        .into_iter()
         .filter(|claim| reserved.is_none_or(|boundary| boundary.permits(claim)))
         .filter_map(|claim| claim.pattern.rank(name).map(|rank| (rank, claim)));
     let Some((rank, winner)) = ranked.clone().max_by_key(|(rank, claim)| {
