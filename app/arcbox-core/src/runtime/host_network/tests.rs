@@ -187,3 +187,69 @@ async fn snapshots_skip_active_mutations_and_reject_changed_generations_or_vms()
         arcbox_dns::registry::Lookup::Matched { .. }
     ));
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn stale_and_failed_snapshots_preserve_a_healthy_listener() {
+    use arcbox_net::darwin::inbound_relay::{InboundCommand, InboundListenerManager};
+    let (runtime, _dir) = runtime().await;
+    let runtime = runtime.with_network_fixture(NetworkFixture::default());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    runtime
+        .adopt_test_manager(
+            runtime.default_machine_name(),
+            InboundListenerManager::new(tx),
+        )
+        .await;
+    let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let metadata =
+        ContainerMetadata::from_inspect(&serde_json::json!({"Id":"web", "Name":"/web"})).unwrap();
+    let mutation = runtime
+        .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+        .await
+        .unwrap();
+    mutation
+        .commit(ContainerChange::Publish(
+            &metadata,
+            &[("127.0.0.1".into(), port, 81, "tcp".into())],
+        ))
+        .await
+        .unwrap();
+    drop(mutation);
+    assert!(!snapshot.commit(&[]).await.unwrap());
+    let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let failing = ContainerNetwork {
+        metadata: ContainerMetadata::from_inspect(
+            &serde_json::json!({"Id":"blocked", "Name":"/blocked"}),
+        )
+        .unwrap(),
+        bindings: vec![(
+            "127.0.0.1".into(),
+            occupied.local_addr().unwrap().port(),
+            82,
+            "tcp".into(),
+        )],
+    };
+    let healthy = ContainerNetwork {
+        metadata,
+        bindings: vec![("127.0.0.1".into(), port, 81, "tcp".into())],
+    };
+    let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    assert!(snapshot.commit(&[failing, healthy]).await.is_err());
+    let _stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap(),
+        Some(InboundCommand::TcpAccepted {
+            container_port: 81,
+            ..
+        })
+    ));
+    runtime.stop_port_forwarding_all().await;
+}
