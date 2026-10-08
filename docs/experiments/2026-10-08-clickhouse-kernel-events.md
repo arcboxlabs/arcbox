@@ -188,3 +188,10 @@ The stack-instance begin is at 7492.207343 and its stack at 7492.207344, inside 
 Version-exact [Linux `do_sigaction`](https://github.com/gregkh/linux/blob/v6.18.38/kernel/signal.c#L4314) takes `current->sighand->siglock` at this call site. This establishes a ClickHouse contender in the guest kernel's process-shared signal lock. [ClickHouse QueryProfiler](https://github.com/ClickHouse/ClickHouse/blob/6b09ccf262fd16345434572fb4d45dfd608f86c2/src/Common/QueryProfiler.cpp#L245) installs a signal action before creating and setting its timer, consistent with the captured startup paths. The kernel stack alone does not identify the user-space caller or signal number. A timer-create stack alone also cannot distinguish its timer lock from the sighand lock.
 
 The result directly connects an identified signal-lock wait, a scheduler charge, and a long runnable interval in a real application startup. It does not identify the lock holder, measure physical execution, establish EEVDF debt, or prove the original glibc notifier chain. The earlier capture's unresolved hash is not retroactively assigned an identity. Production behavior remains unchanged.
+
+The [stack checker](../../tests/bench/signoz/analyze_clickhouse_stacks.py) validates stack-instance settings, both rings' record counts and loss counters, and conservative begin/stack associations. Its nine self-checks exercise frame counting, ambiguous nesting, identity/context changes, timestamps, CPU IDs, and malformed records. Its PASS is not a complete application-case validation. The 13843 chain also has one recorded fork, no exit, exec, or repeated fork, and an after start tick matching that birth. No intervening switch for that TID occurs in its 19.985895-second runnable interval.
+
+```sh
+python3 tests/bench/signoz/analyze_clickhouse_stacks.py --self-test
+python3 tests/bench/signoz/analyze_clickhouse_stacks.py /absolute/startup-stacks-on-02
+```
