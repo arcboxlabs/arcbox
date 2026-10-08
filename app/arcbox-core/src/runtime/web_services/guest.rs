@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 
+use arcbox_connect::v1::OpenMachineWebRequest;
 use arcbox_constants::{dns::Domain, ports::TLS_SIGNING_PORT};
 use arcbox_dns::{
     NamePattern,
@@ -9,12 +10,13 @@ use arcbox_dns::{
     registry::{Lookup, Registry},
 };
 use arcbox_engine::{
-    machine::{MachineInfo, MachineState, machine_hostname},
+    machine::{MachineInfo, MachineState, MachineWebPorts, machine_hostname},
     vm::VmIncarnation,
 };
 
 use super::super::machine_dns::MACHINE_DNS_OWNER_PREFIX;
 use super::{Result, Runtime};
+use crate::error::CoreError;
 
 /// A host-captured machine name and physical VM run, without cached DNS authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +25,64 @@ pub struct CapturedWebGuest {
     incarnation: VmIncarnation,
 }
 
+/// One guarded machine identity, exact DNS claim, and complete saved web policies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapturedMachineWeb {
+    /// Physical guest that owns the connection.
+    pub guest: CapturedWebGuest,
+    /// Canonical name and bridge IPv4 address authorized by the exact claim.
+    pub open: OpenMachineWebRequest,
+    /// Revision of the exact machine DNS claim.
+    pub claim_revision: u64,
+    /// Complete saved backend selection.
+    pub ports: MachineWebPorts,
+}
+
+impl CapturedMachineWeb {
+    /// Reports whether a retained session can apply only a policy replacement.
+    #[must_use]
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.guest == other.guest
+            && self.open == other.open
+            && self.claim_revision == other.claim_revision
+    }
+}
+
 impl Runtime {
+    /// Captures a machine web session under the machine, VM, and DNS registry guards.
+    ///
+    /// # Errors
+    /// Returns an error if the machine, physical run, bridge IPv4 address, or exact claim is unavailable.
+    pub fn capture_machine_web(&self, name: &str) -> Result<CapturedMachineWeb> {
+        if name == self.default_machine_name() {
+            return Err(CoreError::invalid_state(
+                "System VM cannot own a machine web session",
+            ));
+        }
+        let guest = self.capture_web_guest(name)?;
+        self.machine_manager
+            .with_network_incarnation(name, &guest.incarnation, |machine| {
+                let registry = self
+                    .dns_registry
+                    .read()
+                    .expect("DNS registry lock poisoned");
+                guest.machine_web(self, machine, &registry)
+            })?
+    }
+
+    /// Connects to the captured agent. Retain a host hold through native connection and session cleanup.
+    ///
+    /// # Errors
+    /// Returns an error if the captured machine stops, changes, or cannot connect.
+    pub fn connect_web_guest_agent(
+        &self,
+        guest: &CapturedWebGuest,
+    ) -> Result<arcbox_engine::agent_client::AgentClient> {
+        Ok(self
+            .machine_manager
+            .connect_agent_expected(&guest.machine, &guest.incarnation)?)
+    }
+
     /// Captures a guest before opening its signing or observation connection.
     ///
     /// # Errors
@@ -105,6 +164,36 @@ impl Runtime {
 }
 
 impl CapturedWebGuest {
+    fn machine_web(
+        &self,
+        runtime: &Runtime,
+        machine: &MachineInfo,
+        registry: &Registry,
+    ) -> Result<CapturedMachineWeb> {
+        let hostname = machine_hostname(&self.machine)?;
+        let name = ResourceScope::Machine
+            .name(&hostname, &runtime.config.network.dns_domain)
+            .map_err(CoreError::config)?;
+        let Some((IpAddr::V4(address), claim_revision)) =
+            self.machine_claim(runtime, machine, registry, &name)
+        else {
+            return Err(CoreError::invalid_state(
+                "machine web IPv4 claim is unavailable",
+            ));
+        };
+        Ok(CapturedMachineWeb {
+            guest: self.clone(),
+            open: OpenMachineWebRequest {
+                machine_name: self.machine.clone(),
+                hostname: name.to_string(),
+                ipv4_address: address.to_string(),
+                ..Default::default()
+            },
+            claim_revision,
+            ports: machine.web_ports,
+        })
+    }
+
     fn machine_claim(
         &self,
         runtime: &Runtime,
@@ -236,6 +325,25 @@ mod tests {
             guest.machine_claim(&runtime, &machine, &registry, &name),
             Some((address, revision))
         );
+        let captured = guest.machine_web(&runtime, &machine, &registry).unwrap();
+        assert_eq!(captured.guest, guest);
+        assert_eq!(captured.open.machine_name, "first_vm");
+        assert_eq!(captured.open.hostname, "first-vm.machine.arcbox.local");
+        assert_eq!(captured.open.ipv4_address, "192.168.64.8");
+        assert_eq!(captured.claim_revision, revision);
+        machine.web_ports.http_port = "8080".parse().unwrap();
+        machine.web_ports.https_port = "off".parse().unwrap();
+        let policies = guest.machine_web(&runtime, &machine, &registry).unwrap();
+        assert!(captured.same_identity(&policies));
+        assert_eq!(policies.ports, machine.web_ports);
+        assert_ne!(captured.ports, policies.ports);
+        // A record fixture without a live VMM must not bypass production capture.
+        assert!(runtime.capture_machine_web("first_vm").is_err());
+        assert!(
+            runtime
+                .capture_machine_web(runtime.default_machine_name())
+                .is_err()
+        );
         for (fqdn, owner, authority) in [
             ("second.machine.arcbox.local", "machine:second", "machine"),
             ("web.arcbox.local", "container", "container"),
@@ -270,6 +378,7 @@ mod tests {
                 guest.machine_claim(&runtime, &machine, &registry, &name),
                 None
             );
+            assert!(guest.machine_web(&runtime, &machine, &registry).is_err());
         }
         machine.state = MachineState::Running;
         machine.bridge_ip_address = None;
@@ -277,11 +386,13 @@ mod tests {
             guest.machine_claim(&runtime, &machine, &registry, &name),
             None
         );
+        assert!(guest.machine_web(&runtime, &machine, &registry).is_err());
         machine.bridge_ip_address = Some("192.168.64.9".into());
         assert_eq!(
             guest.machine_claim(&runtime, &machine, &registry, &name),
             None
         );
+        assert!(guest.machine_web(&runtime, &machine, &registry).is_err());
         machine.bridge_ip_address = Some(address.to_string());
         for (owner, authority, pattern) in [
             ("machine:other", "machine", NamePattern::Exact(name.clone())),
@@ -324,6 +435,9 @@ mod tests {
             .unwrap()
             .1;
         assert_ne!(renewed, revision);
+        assert!(
+            !captured.same_identity(&guest.machine_web(&runtime, &machine, &registry).unwrap())
+        );
         registry
             .replace(
                 "machine:conflict".into(),
@@ -345,5 +459,19 @@ mod tests {
             guest.machine_claim(&runtime, &machine, &registry, &name),
             None
         );
+        let ipv6: IpAddr = "fd00::8".parse().unwrap();
+        machine.bridge_ip_address = Some(ipv6.to_string());
+        registry
+            .replace(
+                "machine:first_vm".into(),
+                vec![Claim::exclusive(
+                    NamePattern::Exact(name),
+                    "machine:first_vm".into(),
+                    "machine".into(),
+                )],
+                Some(ipv6),
+            )
+            .unwrap();
+        assert!(guest.machine_web(&runtime, &machine, &registry).is_err());
     }
 }

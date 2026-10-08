@@ -197,6 +197,27 @@ message InstanceAuthorityAck {
     uint64 authority_revision = 1;
 }
 
+// Fixes identity for one host-owned distro-machine configuration connection.
+message OpenMachineWebRequest {
+    // Raw machine name before hostname normalization.
+    string machine_name = 1;
+    // Exact canonical DNS name assigned by the host.
+    string hostname = 2;
+    string ipv4_address = 3;
+}
+message OpenMachineWebResponse {}
+
+// Replaces the complete policy. The first revision is positive; later revisions increase.
+message ReplaceMachineWebRequest {
+    uint64 source_revision = 1;
+    MachineWebPorts ports = 2;
+}
+
+// Confirms validated session configuration, not installed routing.
+message MachineWebAck {
+    uint64 source_revision = 1;
+}
+
 // An installed route selected through protocol discovery or an explicit port label.
 message ContainerWebService {
     string container_id = 1;

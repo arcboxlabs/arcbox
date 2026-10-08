@@ -11,7 +11,7 @@ use arcbox_dns::web_services::{HttpsMode as UrlHttpsMode, WebServiceUrls};
 use tokio_util::sync::CancellationToken;
 
 mod guest;
-pub use guest::CapturedWebGuest;
+pub use guest::{CapturedMachineWeb, CapturedWebGuest};
 
 #[cfg(test)]
 mod https_access_tests;

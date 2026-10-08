@@ -48,6 +48,8 @@ The daemon and the in-VM `arcbox-agent` ship together. Update paired callers and
 
 `MachineService.SetWebPorts` saves per-machine HTTP and HTTPS backend policies. The shared `common.proto` defines `WebPortPolicy` and `MachineWebPorts` for host and guest consumers. Each policy selects automatic discovery, disabled routing, or a port from 1 through 65535. An explicit HTTPS port selects native TLS. Omitted update fields preserve their values. `MachineInfo.web_ports` and the setter response report saved configuration; neither reports installed routes.
 
+Machine web configuration uses an exclusive agent connection. `OpenMachineWebRequest` fixes the raw machine name, canonical hostname, and bridge IPv4 address. `ReplaceMachineWebRequest` supplies both policies and a positive, increasing session revision; `MachineWebAck` confirms that revision. The host captures the physical VM, exact DNS claim revision, and saved policies together. A changed identity requires a new session. Configuration acknowledgement does not establish installed routes.
+
 `SetupStatus.storage_health` reports persistent storage independently of startup
 phase and daemon liveness. Each observation names the Btrfs data volume and the
 ext4 metadata volume. `MOUNTED_READ_WRITE` reports mount mode; it does not prove

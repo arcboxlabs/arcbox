@@ -87,6 +87,10 @@ pub enum MessageType {
     ReplaceInstanceAuthorityRequest = 0x0019,
     /// Replaces or removes the guest client trust anchor from a host certificate.
     ReconcileGuestTrustRequest = 0x001A,
+    /// Opens an exclusive machine web configuration session.
+    OpenMachineWebRequest = 0x001B,
+    /// Replaces the complete machine web policy.
+    ReplaceMachineWebRequest = 0x001C,
     /// Ask a distro machine's agent to serve the machine's root over NFSv3
     /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
     /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
@@ -339,6 +343,10 @@ pub enum MessageType {
     InstanceAuthorityAck = 0x1019,
     /// Confirms the completed guest client trust update.
     ReconcileGuestTrustResponse = 0x101A,
+    /// Confirms admission to an exclusive machine web configuration session.
+    OpenMachineWebResponse = 0x101B,
+    /// Acknowledges the complete machine web policy.
+    MachineWebAck = 0x101C,
     /// Answers [`Self::EnsureMachineExportRequest`] (payload:
     /// `arcbox.v1.EnsureMachineExportResponse`).
     EnsureMachineExportResponse = 0x10A8,
@@ -505,6 +513,8 @@ impl MessageType {
             0x0018 => Some(Self::OpenInstanceAuthorityRequest),
             0x0019 => Some(Self::ReplaceInstanceAuthorityRequest),
             0x001A => Some(Self::ReconcileGuestTrustRequest),
+            0x001B => Some(Self::OpenMachineWebRequest),
+            0x001C => Some(Self::ReplaceMachineWebRequest),
             0x00A8 => Some(Self::EnsureMachineExportRequest),
             0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
@@ -588,6 +598,8 @@ impl MessageType {
             0x1018 => Some(Self::OpenInstanceAuthorityResponse),
             0x1019 => Some(Self::InstanceAuthorityAck),
             0x101A => Some(Self::ReconcileGuestTrustResponse),
+            0x101B => Some(Self::OpenMachineWebResponse),
+            0x101C => Some(Self::MachineWebAck),
             0x10A8 => Some(Self::EnsureMachineExportResponse),
             0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
@@ -773,6 +785,8 @@ mod tests {
             (0x0018, MessageType::OpenInstanceAuthorityRequest),
             (0x0019, MessageType::ReplaceInstanceAuthorityRequest),
             (0x001A, MessageType::ReconcileGuestTrustRequest),
+            (0x001B, MessageType::OpenMachineWebRequest),
+            (0x001C, MessageType::ReplaceMachineWebRequest),
             (0x00A8, MessageType::EnsureMachineExportRequest),
             (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
@@ -785,6 +799,8 @@ mod tests {
             (0x1018, MessageType::OpenInstanceAuthorityResponse),
             (0x1019, MessageType::InstanceAuthorityAck),
             (0x101A, MessageType::ReconcileGuestTrustResponse),
+            (0x101B, MessageType::OpenMachineWebResponse),
+            (0x101C, MessageType::MachineWebAck),
             (0x10A8, MessageType::EnsureMachineExportResponse),
             (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),

@@ -123,6 +123,9 @@ pub mod agent {
         container_web_service, guest_web_service, kubernetes_host_port, machine_web_service,
         memory_pressure_event, readiness_event, storage_check_request,
     };
+    pub use super::v1::{
+        MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
+    };
 
     // Backward compatibility type aliases (short names without Agent prefix).
     pub type PingRequest = super::v1::AgentPingRequest;
@@ -232,6 +235,9 @@ pub use v1::{
     RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
     StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
     container_web_service, guest_web_service, machine_web_service, storage_check_request,
+};
+pub use v1::{
+    MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
 };
 
 // API types - Network

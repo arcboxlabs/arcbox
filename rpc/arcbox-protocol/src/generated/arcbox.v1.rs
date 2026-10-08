@@ -3832,6 +3832,34 @@ pub struct InstanceAuthorityAck {
     #[prost(uint64, tag = "1")]
     pub authority_revision: u64,
 }
+/// Fixes identity for one host-owned distro-machine configuration connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenMachineWebRequest {
+    /// Raw machine name before hostname normalization.
+    #[prost(string, tag = "1")]
+    pub machine_name: ::prost::alloc::string::String,
+    /// Exact canonical DNS name assigned by the host.
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenMachineWebResponse {}
+/// Replaces the complete policy. The first revision is positive; later revisions increase.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReplaceMachineWebRequest {
+    #[prost(uint64, tag = "1")]
+    pub source_revision: u64,
+    #[prost(message, optional, tag = "2")]
+    pub ports: ::core::option::Option<MachineWebPorts>,
+}
+/// Confirms validated session configuration, not installed routing.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebAck {
+    #[prost(uint64, tag = "1")]
+    pub source_revision: u64,
+}
 /// An installed route selected through protocol discovery or an explicit port label.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ContainerWebService {
