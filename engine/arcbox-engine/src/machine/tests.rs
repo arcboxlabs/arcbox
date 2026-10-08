@@ -1665,3 +1665,36 @@ fn completed_predecessor_does_not_hide_a_host_drain_timeout() {
     assert!(!manager.exists("completed"));
     assert!(manager.vm_manager.get(&id).is_none());
 }
+
+#[test]
+fn network_publication_reads_the_guarded_record_and_rejects_replacement() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "web");
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("web")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert_eq!(
+        manager
+            .with_network_incarnation("web", &expected, |machine| machine.state)
+            .unwrap(),
+        MachineState::Stopping
+    );
+    let (replacement, _) = manager.vm_manager.modeled_running_vm();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("web")
+        .unwrap()
+        .vm_id = replacement;
+    assert!(
+        manager
+            .with_network_incarnation("web", &expected, |_| panic!("retired run must not publish"))
+            .is_err()
+    );
+}

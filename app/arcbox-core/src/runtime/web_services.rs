@@ -10,6 +10,9 @@ use arcbox_dns::registry::{Lookup, Registry};
 use arcbox_dns::web_services::{HttpsMode as UrlHttpsMode, WebServiceUrls};
 use tokio_util::sync::CancellationToken;
 
+mod guest;
+pub use guest::CapturedWebGuest;
+
 #[cfg(test)]
 mod https_access_tests;
 mod index;
@@ -36,14 +39,22 @@ impl Runtime {
             .dns_registry
             .read()
             .expect("DNS registry lock poisoned");
-        if name == self.config.network.dns_domain {
+        self.system_web_service_dns_entry(&registry, &name)
+    }
+
+    fn system_web_service_dns_entry(
+        &self,
+        registry: &Registry,
+        name: &Domain,
+    ) -> Option<(std::net::IpAddr, u64)> {
+        if name == &self.config.network.dns_domain {
             return IndexEndpoint {
                 apex: &self.config.network.dns_domain,
                 gateway: self.config.container.cidr.docker_bridge_gateway(),
             }
-            .current(&registry);
+            .current(registry);
         }
-        match registry.resolve(&name) {
+        match registry.resolve(name) {
             Lookup::Matched {
                 claim,
                 address,

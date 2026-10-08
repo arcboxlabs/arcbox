@@ -202,7 +202,7 @@ impl Runtime {
         }
         Ok(self
             .machine_manager
-            .with_network_incarnation(machine, expected, publish)?)
+            .with_network_incarnation(machine, expected, |_| publish())?)
     }
 
     #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]

@@ -24,6 +24,7 @@ pub use host_network::NetworkFixture;
 pub use host_network::{ContainerChange, ContainerNetwork, HostMutationLease, HostNetworkSnapshot};
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
+pub use web_services::CapturedWebGuest;
 
 use crate::config::Config;
 use crate::container_backend::{DynContainerBackend, create_backend};

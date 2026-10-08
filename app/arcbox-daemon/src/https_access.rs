@@ -60,7 +60,7 @@ impl AccessSource for RuntimeSource {
         Ok(self.0.machine_manager().with_network_incarnation(
             DEFAULT_MACHINE_NAME,
             expected,
-            publish,
+            |_| publish(),
         )?)
     }
 

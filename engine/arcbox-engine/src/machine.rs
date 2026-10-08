@@ -1878,7 +1878,8 @@ impl MachineManager {
         self.vm_manager.network_incarnation(&machine.vm_id)
     }
 
-    /// Keeps the machine name and physical VM stable during synchronous publication.
+    /// Keeps the canonical machine record and physical VM stable during synchronous publication.
+    /// The callback must not acquire another machine or VM registry lock.
     ///
     /// # Errors
     /// Returns an error if the expected live VM is unavailable.
@@ -1886,7 +1887,7 @@ impl MachineManager {
         &self,
         name: &str,
         expected: &VmIncarnation,
-        publish: impl FnOnce() -> T,
+        publish: impl FnOnce(&MachineInfo) -> T,
     ) -> Result<T> {
         let machines = self
             .machines
@@ -1896,7 +1897,7 @@ impl MachineManager {
             .get(name)
             .ok_or_else(|| EngineError::not_found(name))?;
         self.vm_manager
-            .with_network_incarnation(&machine.vm_id, expected, publish)
+            .with_network_incarnation(&machine.vm_id, expected, || publish(machine))
     }
 
     /// Takes a manager only while the machine still names the expected live VM.
