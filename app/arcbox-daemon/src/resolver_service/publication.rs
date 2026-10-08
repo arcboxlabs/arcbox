@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use arcbox_constants::dns::Domain;
@@ -23,10 +23,11 @@ use crate::context::DaemonContext;
 pub async fn start(ctx: &DaemonContext, manager: Arc<NetworkManager>, port: u16) -> Result<()> {
     let (ready, started) = oneshot::channel();
     let publisher = Publisher {
-        manager,
+        manager: Arc::clone(&manager),
         domain: ctx.dns_domain.clone(),
         setup: Arc::clone(&ctx.setup_state),
         shutdown: ctx.shutdown.clone(),
+        socket: arcbox_helper::socket_path(),
         request: ResolverLease {
             profile: ctx.profile.as_str().into(),
             nonce: *uuid::Uuid::new_v4().as_bytes(),
@@ -38,7 +39,9 @@ pub async fn start(ctx: &DaemonContext, manager: Arc<NetworkManager>, port: u16)
     };
     let required = ctx.install_dns_resolver;
     ctx.resolver_service
-        .start(publisher.run(ready, required))
+        .start(publisher.run(ready, required, move |stop| {
+            crate::mdns::run(Arc::clone(&manager), stop)
+        }))
         .await;
     if required {
         started
@@ -53,17 +56,23 @@ struct Publisher {
     domain: Domain,
     setup: Arc<arcbox_api::SetupState>,
     shutdown: CancellationToken,
+    socket: String,
     request: ResolverLease,
     authorities: Vec<InstanceAuthority>,
 }
 
 impl Publisher {
-    async fn run(mut self, ready: oneshot::Sender<Result<()>>, required: bool) -> Result<()> {
+    async fn run<F: Future<Output = std::io::Result<()>>>(
+        mut self,
+        ready: oneshot::Sender<Result<()>>,
+        required: bool,
+        mut run_mirror: impl FnMut(CancellationToken) -> F,
+    ) -> Result<()> {
         let mut ready = Some(ready);
         loop {
             self.unavailable();
             self.request.revision = 0;
-            match self.connection(&mut ready).await {
+            match self.connection(&mut ready, &mut run_mirror).await {
                 Ok(()) => return Ok(()),
                 Err(error) if required && ready.is_some() => {
                     let _ = ready.take().unwrap().send(Err(error));
@@ -80,15 +89,17 @@ impl Publisher {
         }
     }
 
-    async fn connection(&mut self, ready: &mut Option<oneshot::Sender<Result<()>>>) -> Result<()> {
-        let socket = arcbox_helper::socket_path();
+    async fn connection<F: Future<Output = std::io::Result<()>>>(
+        &mut self,
+        ready: &mut Option<oneshot::Sender<Result<()>>>,
+        run_mirror: impl FnOnce(CancellationToken) -> F,
+    ) -> Result<()> {
         let (client, mut dispatch) = tokio::select! {
             () = self.shutdown.cancelled() => return Ok(()),
-            connected = Client::connect_owned_to(&socket) => connected?,
+            connected = Client::connect_owned_to(&self.socket) => connected?,
         };
         let (start, started) = oneshot::channel();
         let stop = CancellationToken::new();
-        let manager = Arc::clone(&self.manager);
         let shutdown = self.shutdown.clone();
         let mut mirror = Box::pin(async {
             tokio::select! {
@@ -96,7 +107,7 @@ impl Publisher {
                 () = stop.cancelled() => Ok(()),
                 result = started => {
                     result.context("resolver lease was not acquired")?;
-                    crate::mdns::run(manager, stop.clone()).await.context("mDNS mirror failed")
+                    run_mirror(stop.clone()).await.context("mDNS mirror failed")
                 }
             }
         });

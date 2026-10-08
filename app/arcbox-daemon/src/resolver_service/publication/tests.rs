@@ -1,3 +1,5 @@
+mod lifecycle;
+
 use super::*;
 
 #[test]
@@ -32,6 +34,7 @@ fn publisher() -> Publisher {
         domain: "arcbox.local".parse().unwrap(),
         setup: Arc::new(arcbox_api::SetupState::new()),
         shutdown: CancellationToken::new(),
+        socket: String::new(),
         request: ResolverLease {
             profile: "production".into(),
             nonce: [42; 16],

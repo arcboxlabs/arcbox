@@ -241,3 +241,7 @@ The paired wire schema adds an empty Open, a complete root snapshot with its sou
 The obsolete DNS record-delta channel is removed after its final production consumer moved to the Registry watch. Projection tests now assert the complete accepted snapshot and ownership notifications, preserving exact address, conflict, withdrawal, and unchanged-update checks. The complete net suite again passed 118 tests with five ignored cases; strict all-target net Clippy and formatting passed.
 
 The Docker server now retains its reconciler task. Pending guest snapshot queries are canceled by shutdown or VM-state changes; server-scope cancellation also drops the query. Seven reconciler tests passed, including a permanently pending query canceled through both owner paths without publishing stale state. Strict Docker Clippy and formatting passed. Physical identity convergence during a coalesced lifecycle notification remains pending.
+
+## Verify resolver connection lifetime
+
+Real temporary Unix sockets now cover cancellation before the first lease acknowledgment, helper EOF, authority-watch updates, mirror cleanup before client closure, primary and cleanup errors together, and fresh-transport retries with one service nonce. The initial-failure fixture rejects any mirror start. Eleven resolver tests, strict all-target daemon Clippy, formatting, and diff checks passed. Native Keychain, resolver files, installed helper, and VM state were not changed.

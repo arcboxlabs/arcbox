@@ -600,6 +600,7 @@ dependencies = [
  "security-framework",
  "sentry",
  "serde_json",
+ "tarpc",
  "tempfile",
  "tokio",
  "tokio-stream",
