@@ -2,6 +2,7 @@
 
 mod authority;
 pub mod lease;
+pub mod maintenance;
 mod storage;
 
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ const MARKER: &str = "# managed by arcbox-helper";
 
 pub struct ResolverStore {
     directory: PathBuf,
+    expected_owner: u32,
     mutation: Mutex<lease::State>,
     authority_epoch: tokio::sync::watch::Sender<u64>,
 }
@@ -22,6 +24,8 @@ impl ResolverStore {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
+            // SAFETY: geteuid has no arguments or failure case.
+            expected_owner: unsafe { libc::geteuid() },
             mutation: Mutex::new(lease::State::default()),
             authority_epoch: tokio::sync::watch::channel(0).0,
         }

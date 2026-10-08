@@ -24,6 +24,8 @@ use tokio::task::JoinSet;
 use arcbox_helper::HelperService as _;
 use handler::HelperServer;
 
+pub use mutations::dns::maintenance::check_resolvers;
+
 /// Exit after this many seconds with zero active connections.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 

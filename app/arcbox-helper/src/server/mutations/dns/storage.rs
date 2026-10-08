@@ -8,7 +8,10 @@ use std::path::Path;
 
 use arcbox_helper::HelperError;
 
-pub(super) fn open_directory(path: &Path) -> Result<Option<File>, HelperError> {
+pub(super) fn open_directory(
+    path: &Path,
+    expected_owner: u32,
+) -> Result<Option<File>, HelperError> {
     let directory = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -21,7 +24,7 @@ pub(super) fn open_directory(path: &Path) -> Result<Option<File>, HelperError> {
     let metadata = directory
         .metadata()
         .map_err(|e| HelperError::io("stat", path, e))?;
-    if !private_writer(&metadata) || has_acl(&directory, path)? {
+    if !private_writer(&metadata, expected_owner) || has_acl(&directory, path)? {
         return Err(HelperError::foreign_managed(path));
     }
     Ok(Some(directory))
@@ -34,9 +37,8 @@ pub(super) enum ManagedFile {
     Owned,
 }
 
-fn private_writer(metadata: &fs::Metadata) -> bool {
-    // SAFETY: geteuid takes no arguments and has no failure case.
-    metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o022 == 0
+fn private_writer(metadata: &fs::Metadata, expected_owner: u32) -> bool {
+    metadata.uid() == expected_owner && metadata.mode() & 0o022 == 0
 }
 
 fn has_acl(file: &File, path: &Path) -> Result<bool, HelperError> {
@@ -76,6 +78,7 @@ fn has_acl(file: &File, path: &Path) -> Result<bool, HelperError> {
 
 pub(super) fn inspect(
     path: &Path,
+    expected_owner: u32,
     owns: impl FnOnce(&[u8]) -> bool,
 ) -> Result<ManagedFile, HelperError> {
     let file = match OpenOptions::new()
@@ -95,7 +98,7 @@ pub(super) fn inspect(
         .map_err(|e| HelperError::io("stat", path, e))?;
     if !metadata.is_file()
         || metadata.nlink() != 1
-        || !private_writer(&metadata)
+        || !private_writer(&metadata, expected_owner)
         || metadata.len() > 256
         || has_acl(&file, path)?
     {

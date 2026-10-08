@@ -215,16 +215,17 @@ impl ResolverStore {
         }
         fs::create_dir_all(&self.directory)
             .map_err(|e| HelperError::io("create_dir", &self.directory, e))?;
-        let _directory = open_directory(&self.directory)?.ok_or_else(|| {
-            HelperError::io("open", &self.directory, "resolver directory disappeared")
-        })?;
+        let _directory =
+            open_directory(&self.directory, self.expected_owner)?.ok_or_else(|| {
+                HelperError::io("open", &self.directory, "resolver directory disappeared")
+            })?;
         let current = state
             .connections
             .get(&connection)
             .expect("connection was checked under lock");
         for root in &update.roots {
             let path = self.directory.join(root.as_str());
-            if storage::inspect(&path, |bytes| {
+            if storage::inspect(&path, self.expected_owner, |bytes| {
                 current.records.iter().any(|record| {
                     record.roots.contains(root) && bytes == record.contents.as_bytes()
                 })
@@ -260,12 +261,13 @@ impl ResolverStore {
             remove(
                 &lease.records[..lease.records.len() - 1],
                 &self.directory,
+                self.expected_owner,
                 &next.roots,
             )?;
             Ok(())
         })();
         if let Err(error) = result {
-            return match remove(&lease.records, &self.directory, &[]) {
+            return match remove(&lease.records, &self.directory, self.expected_owner, &[]) {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(HelperError::other(format!(
                     "{error}; resolver cleanup failed: {cleanup}"
@@ -290,7 +292,7 @@ impl ResolverStore {
                 return Ok(());
             };
             lease.failed = true;
-            remove(&lease.records, &self.directory, &[])?;
+            remove(&lease.records, &self.directory, self.expected_owner, &[])?;
             state.connections.remove(&connection);
             Ok(())
         })
@@ -301,7 +303,7 @@ impl ResolverStore {
             .mutation
             .lock()
             .expect("DNS resolver mutation lock poisoned");
-        let Some(_directory) = open_directory(&self.directory)? else {
+        let Some(_directory) = open_directory(&self.directory, self.expected_owner)? else {
             return Ok(());
         };
         for entry in fs::read_dir(&self.directory)
@@ -312,7 +314,8 @@ impl ResolverStore {
                 .file_name()
                 .to_str()
                 .is_some_and(|name| name.parse::<Domain>().is_ok())
-                && storage::inspect(&entry.path(), is_record)? == ManagedFile::Owned
+                && storage::inspect(&entry.path(), self.expected_owner, is_record)?
+                    == ManagedFile::Owned
             {
                 fs::remove_file(entry.path())
                     .map_err(|e| HelperError::io("remove", entry.path(), e))?;
@@ -322,24 +325,31 @@ impl ResolverStore {
     }
 }
 
-fn remove(records: &[Record], directory: &Path, keep: &[Domain]) -> Result<(), HelperError> {
+fn remove(
+    records: &[Record],
+    directory: &Path,
+    expected_owner: u32,
+    keep: &[Domain],
+) -> Result<(), HelperError> {
     if records.is_empty() {
         return Ok(());
     }
-    let Some(_directory) = open_directory(directory)? else {
+    let Some(_directory) = open_directory(directory, expected_owner)? else {
         return Ok(());
     };
     let mut errors = Vec::new();
     for record in records {
         for root in record.roots.iter().filter(|root| !keep.contains(root)) {
             let path = directory.join(root.as_str());
-            let result = storage::inspect(&path, |bytes| bytes == record.contents.as_bytes())
-                .and_then(|file| {
-                    if file == ManagedFile::Owned {
-                        fs::remove_file(&path).map_err(|e| HelperError::io("remove", &path, e))?;
-                    }
-                    Ok(())
-                });
+            let result = storage::inspect(&path, expected_owner, |bytes| {
+                bytes == record.contents.as_bytes()
+            })
+            .and_then(|file| {
+                if file == ManagedFile::Owned {
+                    fs::remove_file(&path).map_err(|e| HelperError::io("remove", &path, e))?;
+                }
+                Ok(())
+            });
             if let Err(error) = result {
                 errors.push(error.to_string());
             }

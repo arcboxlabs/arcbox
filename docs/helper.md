@@ -51,6 +51,8 @@ Installing or upgrading the helper requires admin authorization (AppleScript /
 semver is **≥** the bundled helper, subsequent ArcBox app updates that only
 bump the runtime (`0.4.x`) must **not** re-prompt.
 
+`arcbox-helper --check-resolvers [ROOT...]` reads only the selected resolver roots and prints each exact legacy root on its own line. The check requires root-owned files and directory metadata even when the caller is a login user. It does not start the service or change files. An empty root set does not inspect `/etc/resolver`.
+
 ## Threat model
 
 ### Socket mode `0666` / `SockPathMode` 438
