@@ -42,17 +42,14 @@
 /// v7: adds persistent storage observations and controlled storage checks.
 /// All VM sessions require v7. Recovery boots require the dedicated recovery
 /// init entry and read-only disk attachments.
-///
-/// v8: local HTTPS requires host-side CA signing over TLS_SIGNING_PORT.
-/// The shared directory no longer contains a CA private key.
-pub const AGENT_PROTOCOL_VERSION: u32 = 8;
+pub const AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Oldest agent protocol version this host still accepts.
 ///
 /// Agents reporting less (including `0` — agents that predate the
 /// handshake field) are rejected at boot with an actionable error
 /// instead of silently misbehaving under field skew.
-pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 8;
+pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Window each sandbox streaming RPC opens with.
 ///
