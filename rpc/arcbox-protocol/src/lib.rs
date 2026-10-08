@@ -105,20 +105,22 @@ pub mod image {
 pub mod agent {
     pub use super::v1::{
         AgentPingRequest, AgentPingResponse, ContainerFsPathsRequest, ContainerFsPathsResponse,
-        ContainerStats, DiskTrimRequest, DiskTrimResponse, EnsureMachineExportRequest,
-        EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
-        ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
-        KubernetesDeleteResponse, KubernetesHostPort, KubernetesKubeconfigRequest,
-        KubernetesKubeconfigResponse, KubernetesLoadBalancer, KubernetesLoadBalancersRequest,
-        KubernetesLoadBalancersResponse, KubernetesServicePort, KubernetesStartRequest,
-        KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-        KubernetesStopRequest, KubernetesStopResponse, MachineStats, MemoryPressureEvent,
-        MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved,
-        ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-        RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
-        StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
-        WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest, kubernetes_host_port,
-        memory_pressure_event, readiness_event, storage_check_request,
+        ContainerStats, ContainerWebService, DiskTrimRequest, DiskTrimResponse,
+        EnsureMachineExportRequest, EnsureMachineExportResponse, EnsureNfsExportRequest,
+        EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse,
+        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+        KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+        KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+        KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+        KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
+        ListContainerWebServicesRequest, ListContainerWebServicesResponse, MachineStats,
+        MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
+        PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
+        ShutdownResponse, StorageCheckRequest, StorageCheckResponse, StorageCheckResult,
+        SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+        container_web_service, kubernetes_host_port, memory_pressure_event, readiness_event,
+        storage_check_request,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -152,9 +154,9 @@ pub mod api {
     // System service types
     pub use super::v1::{
         Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-        GetVersionResponse, PruneRequest, PruneResponse, ResolveContainerFsRequest,
-        ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse,
-        SystemPingRequest, SystemPingResponse,
+        GetVersionResponse, ListWebServicesResponse, LocalHttpsStatus, PruneRequest, PruneResponse,
+        ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
+        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
     };
 
     // Volume service types
@@ -214,15 +216,16 @@ pub use v1::{
 
 // Agent types
 pub use v1::{
-    AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
-    KubernetesHostPort, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesLoadBalancer, KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse,
-    KubernetesServicePort, KubernetesStartRequest, KubernetesStartResponse,
-    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
-    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
-    StorageCheckResult, SystemInfo, storage_check_request,
+    AgentPingRequest, AgentPingResponse, ContainerWebService, KubernetesDeleteRequest,
+    KubernetesDeleteResponse, KubernetesHostPort, KubernetesKubeconfigRequest,
+    KubernetesKubeconfigResponse, KubernetesLoadBalancer, KubernetesLoadBalancersRequest,
+    KubernetesLoadBalancersResponse, KubernetesServicePort, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, ListContainerWebServicesRequest,
+    ListContainerWebServicesResponse, PortBindingsChanged, PortBindingsRemoved,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ServiceStatus, ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
+    StorageCheckResult, SystemInfo, container_web_service, storage_check_request,
 };
 
 // API types - Network
@@ -235,9 +238,9 @@ pub use v1::{
 // API types - System
 pub use v1::{
     Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-    GetVersionResponse, PruneRequest, PruneResponse, ResolveContainerFsRequest,
-    ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
-    SystemPingResponse,
+    GetVersionResponse, ListWebServicesResponse, LocalHttpsStatus, PruneRequest, PruneResponse,
+    ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
+    ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
 };
 
 // API types - Volume

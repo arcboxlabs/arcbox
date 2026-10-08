@@ -1385,6 +1385,9 @@ pub struct SetupStatus {
     /// Current or most recent recovery operation, including terminal results.
     #[prost(message, optional, tag = "10")]
     pub storage_recovery: ::core::option::Option<StorageRecoveryProgress>,
+    /// Local HTTPS trust does not gate VM or Docker readiness.
+    #[prost(message, optional, tag = "11")]
+    pub local_https: ::core::option::Option<LocalHttpsStatus>,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
@@ -1395,7 +1398,7 @@ pub mod setup_status {
     /// value and never compare ordinals. The happy path is:
     ///
     ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> \[DOWNLOADING_ASSETS\]
-    ///    -> ASSETS_READY -> \[AWAITING_HTTPS_TRUST -> ASSETS_READY\]
+    ///    -> ASSETS_READY
     ///    -> \[VM_STARTING -> VM_READY\] -> NETWORK_READY -> READY
     ///
     /// Bracketed steps are conditional: CLEANING_UP only when a displaced
@@ -1435,8 +1438,7 @@ pub mod setup_status {
         /// Startup failed fatally; the daemon exits shortly after
         /// publishing this phase. See the `error` field for the cause.
         Failed = 10,
-        /// The production CA needs authorization in the logged-in user's session.
-        /// The daemon stays alive without booting the VM until trust is configured.
+        /// Legacy startup gate. New daemons report local_https independently.
         AwaitingHttpsTrust = 11,
     }
     impl Phase {
@@ -1579,6 +1581,126 @@ pub mod storage_recovery_progress {
                 "VERIFYING" => Some(Self::Verifying),
                 "COMPLETE" => Some(Self::Complete),
                 "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Public CA metadata and native trust. This does not assert network reachability.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListWebServicesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub services: ::prost::alloc::vec::Vec<WebService>,
+}
+/// A runtime-confirmed or explicitly configured web service.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WebService {
+    /// Stable resource key: container:<id>, machine:<name>, or k8s:<namespace>/<name>.
+    #[prost(string, tag = "1")]
+    pub owner: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "3")]
+    pub domains: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Empty when the route is absent. Clients must not reconstruct these URLs from ports.
+    #[prost(string, tag = "4")]
+    pub http_url: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub https_url: ::prost::alloc::string::String,
+    #[prost(enumeration = "web_service::HttpsMode", tag = "6")]
+    pub https_mode: i32,
+    /// Upstream ports; these are not the ports in the public URLs.
+    #[prost(uint32, tag = "7")]
+    pub http_port: u32,
+    #[prost(uint32, tag = "8")]
+    pub https_port: u32,
+}
+/// Nested message and enum types in `WebService`.
+pub mod web_service {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum HttpsMode {
+        None = 0,
+        Managed = 1,
+        Passthrough = 2,
+    }
+    impl HttpsMode {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::None => "NONE",
+                Self::Managed => "MANAGED",
+                Self::Passthrough => "PASSTHROUGH",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "NONE" => Some(Self::None),
+                "MANAGED" => Some(Self::Managed),
+                "PASSTHROUGH" => Some(Self::Passthrough),
+                _ => None,
+            }
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalHttpsStatus {
+    #[prost(enumeration = "local_https_status::TrustState", tag = "1")]
+    pub trust_state: i32,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    /// Uppercase colon-separated SHA-256 fingerprint of the public root.
+    #[prost(string, tag = "3")]
+    pub certificate_sha256: ::prost::alloc::string::String,
+    /// UTC Unix seconds; zero when no certificate is available.
+    #[prost(int64, tag = "4")]
+    pub certificate_not_before_unix_seconds: i64,
+    #[prost(int64, tag = "5")]
+    pub certificate_not_after_unix_seconds: i64,
+    #[prost(bool, tag = "6")]
+    pub legacy_user_trust: bool,
+}
+/// Nested message and enum types in `LocalHttpsStatus`.
+pub mod local_https_status {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum TrustState {
+        Unspecified = 0,
+        /// The current CA needs explicit authorization or migration.
+        Untrusted = 1,
+        /// The current, valid CA has TLS-only Admin trust and no User override.
+        Trusted = 2,
+        /// Inspection or certificate preparation failed. See message.
+        Error = 3,
+        /// This daemon does not provide automatic HTTPS.
+        Unavailable = 4,
+    }
+    impl TrustState {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "TRUST_STATE_UNSPECIFIED",
+                Self::Untrusted => "UNTRUSTED",
+                Self::Trusted => "TRUSTED",
+                Self::Error => "ERROR",
+                Self::Unavailable => "UNAVAILABLE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "TRUST_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "UNTRUSTED" => Some(Self::Untrusted),
+                "TRUSTED" => Some(Self::Trusted),
+                "ERROR" => Some(Self::Error),
+                "UNAVAILABLE" => Some(Self::Unavailable),
                 _ => None,
             }
         }
@@ -3349,6 +3471,40 @@ pub struct AgentPingResponse {
     /// its minimum supported version at boot.
     #[prost(uint32, tag = "3")]
     pub protocol_version: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListContainerWebServicesRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListContainerWebServicesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub services: ::prost::alloc::vec::Vec<ContainerWebService>,
+}
+/// An installed route selected through protocol discovery or an explicit port label.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContainerWebService {
+    #[prost(string, tag = "1")]
+    pub container_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub hostnames: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// Zero means no managed HTTP route.
+    #[prost(uint32, tag = "4")]
+    pub http_port: u32,
+    #[prost(oneof = "container_web_service::HttpsBackend", tags = "5, 6")]
+    pub https_backend: ::core::option::Option<container_web_service::HttpsBackend>,
+}
+/// Nested message and enum types in `ContainerWebService`.
+pub mod container_web_service {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum HttpsBackend {
+        /// Preserve the application's TLS handshake and certificate.
+        #[prost(uint32, tag = "5")]
+        NativeHttpsPort(u32),
+        /// Terminate TLS in the guest, then relay HTTP to this port.
+        #[prost(uint32, tag = "6")]
+        TerminatedHttpPort(u32),
+    }
 }
 /// System information from the guest.
 #[derive(Clone, PartialEq, ::prost::Message)]

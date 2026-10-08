@@ -196,6 +196,12 @@ service SystemService {
     // replays progress and the terminal result for the operation ID.
     rpc RecoverStorage(RecoverStorageRequest) returns (stream StorageRecoveryProgress);
 
+    // Lists installed web routes. URLs describe routing, not a health probe.
+    rpc ListWebServices(Empty) returns (ListWebServicesResponse);
+
+    // Streams complete route snapshots and fails when the guest is unavailable.
+    rpc WatchWebServices(Empty) returns (stream ListWebServicesResponse);
+
     // Gets the System VM's current hypervisor backend.
     rpc GetSystemVmBackend(Empty) returns (SystemVmBackendInfo);
 
@@ -1070,7 +1076,7 @@ message SetupStatus {
     // value and never compare ordinals. The happy path is:
     //
     //   INITIALIZING -> [CLEANING_UP -> INITIALIZING] -> [DOWNLOADING_ASSETS]
-    //   -> ASSETS_READY -> [AWAITING_HTTPS_TRUST -> ASSETS_READY]
+    //   -> ASSETS_READY
     //   -> [VM_STARTING -> VM_READY] -> NETWORK_READY -> READY
     //
     // Bracketed steps are conditional: CLEANING_UP only when a displaced
@@ -1108,8 +1114,7 @@ message SetupStatus {
         // Startup failed fatally; the daemon exits shortly after
         // publishing this phase. See the `error` field for the cause.
         FAILED = 10;
-        // The production CA needs authorization in the logged-in user's session.
-        // The daemon stays alive without booting the VM until trust is configured.
+        // Legacy startup gate. New daemons report local_https independently.
         AWAITING_HTTPS_TRUST = 11;
     }
 
@@ -1142,6 +1147,8 @@ message SetupStatus {
     StorageHealth storage_health = 9;
     // Current or most recent recovery operation, including terminal results.
     StorageRecoveryProgress storage_recovery = 10;
+    // Local HTTPS trust does not gate VM or Docker readiness.
+    LocalHttpsStatus local_https = 11;
 }
 
 // Explicitly starts a storage check or recovery. Both actions stop workloads.
@@ -1176,4 +1183,51 @@ message StorageRecoveryProgress {
     string operation_id = 4;
     // Remains true after CHECK_ONLY, failure, or interruption. Only verified recovery clears it.
     bool storage_protected = 5;
+}
+
+// Public CA metadata and native trust. This does not assert network reachability.
+message ListWebServicesResponse {
+    repeated WebService services = 1;
+}
+
+// A runtime-confirmed or explicitly configured web service.
+message WebService {
+    enum HttpsMode {
+        NONE = 0;
+        MANAGED = 1;
+        PASSTHROUGH = 2;
+    }
+    // Stable resource key: container:<id>, machine:<name>, or k8s:<namespace>/<name>.
+    string owner = 1;
+    string hostname = 2;
+    repeated string domains = 3;
+    // Empty when the route is absent. Clients must not reconstruct these URLs from ports.
+    string http_url = 4;
+    string https_url = 5;
+    HttpsMode https_mode = 6;
+    // Upstream ports; these are not the ports in the public URLs.
+    uint32 http_port = 7;
+    uint32 https_port = 8;
+}
+
+message LocalHttpsStatus {
+    enum TrustState {
+        TRUST_STATE_UNSPECIFIED = 0;
+        // The current CA needs explicit authorization or migration.
+        UNTRUSTED = 1;
+        // The current, valid CA has TLS-only Admin trust and no User override.
+        TRUSTED = 2;
+        // Inspection or certificate preparation failed. See message.
+        ERROR = 3;
+        // This daemon does not provide automatic HTTPS.
+        UNAVAILABLE = 4;
+    }
+    TrustState trust_state = 1;
+    string message = 2;
+    // Uppercase colon-separated SHA-256 fingerprint of the public root.
+    string certificate_sha256 = 3;
+    // UTC Unix seconds; zero when no certificate is available.
+    int64 certificate_not_before_unix_seconds = 4;
+    int64 certificate_not_after_unix_seconds = 5;
+    bool legacy_user_trust = 6;
 }

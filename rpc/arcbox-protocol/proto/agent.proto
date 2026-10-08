@@ -40,6 +40,9 @@ service AgentService {
     // Lists the guest cluster's Services of type LoadBalancer.
     rpc ListKubernetesLoadBalancers(KubernetesLoadBalancersRequest) returns (KubernetesLoadBalancersResponse);
 
+    // Lists installed container web routes selected by the guest.
+    rpc ListContainerWebServices(ListContainerWebServicesRequest) returns (ListContainerWebServicesResponse);
+
     // Requests graceful guest shutdown. The agent responds immediately,
     // then performs orderly process teardown and powers off the VM.
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
@@ -80,6 +83,27 @@ message AgentPingResponse {
     // agents that predate the handshake; the host rejects agents below
     // its minimum supported version at boot.
     uint32 protocol_version = 3;
+}
+
+message ListContainerWebServicesRequest {}
+
+message ListContainerWebServicesResponse {
+    repeated ContainerWebService services = 1;
+}
+
+// An installed route selected through protocol discovery or an explicit port label.
+message ContainerWebService {
+    string container_id = 1;
+    repeated string hostnames = 2;
+    string ipv4_address = 3;
+    // Zero means no managed HTTP route.
+    uint32 http_port = 4;
+    oneof https_backend {
+        // Preserve the application's TLS handshake and certificate.
+        uint32 native_https_port = 5;
+        // Terminate TLS in the guest, then relay HTTP to this port.
+        uint32 terminated_http_port = 6;
+    }
 }
 
 // System information from the guest.
