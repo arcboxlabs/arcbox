@@ -86,6 +86,26 @@ impl Journal {
         Ok(())
     }
 
+    pub(crate) fn remove(dir: &Path) -> Result<(), Error> {
+        let path = dir.join(FILE_NAME);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::Io { path, source }),
+        }
+        match fs::File::open(dir) {
+            Ok(directory) => directory.sync_all().map_err(|source| Error::Io {
+                path: dir.to_owned(),
+                source,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::Io {
+                path: dir.to_owned(),
+                source,
+            }),
+        }
+    }
+
     pub(crate) fn current(&self) -> &Root {
         match self {
             Self::Stable { current }

@@ -120,6 +120,8 @@ distribution".
   before pairing them with guest keys.
   Hold the profile operation lock during identity mutation or native trust changes.
   Release the CLI lock before requesting a daemon operation; the daemon acquires the same lock.
+  Preserve `tls/identity.json` until every retained identity is untrusted and deleted.
+  Resolve certificates through recorded DER or exact public-key identity, never a shared subject name.
 
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled

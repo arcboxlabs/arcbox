@@ -39,7 +39,7 @@
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 mod journal;
 #[cfg(target_os = "macos")]
 mod keychain;

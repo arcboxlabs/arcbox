@@ -156,9 +156,12 @@ The shared directory contains the public certificate for client trust. Trust mod
 |------|---------|---------|
 | `tls/ca.pem` | Public CA certificate, name-constrained to `arcbox.local`; native user-session authorization sets Admin TLS trust, and the helper stores the System Keychain copy | daemon |
 | `tls/ca-key.pem` | Legacy private key; removed before VM boot | legacy daemon |
+| `tls/identity.json` | Public root identities and durable rotation phase; contains no private key | daemon |
 | `tls/operation.lock` | Serializes identity changes, trust, repair, and revocation for this profile | daemon; CLI |
 
-Deleting `tls/` does not rotate the Keychain CA: the daemon exports the same public certificate again. The Keychain key uses `dev.arcbox.local-ca.v2:<canonical tls directory>` as its label. Migration generates a new key, removes the old shared key, revokes the old certificate's trust, and then replaces `ca.pem`. The old public certificate stays in place if trust removal fails, so the next start can retry.
+Deleting only `tls/ca.pem` does not rotate the Keychain CA: the daemon exports the selected public certificate again. Preserve `tls/identity.json`; it selects the current root and retains unfinished rotation identities. If the replacement slot exists without this record, ArcBox stops CA preparation instead of choosing an identity. The primary Keychain label is `dev.arcbox.local-ca.v2:<canonical tls directory>`; the replacement label adds `:replacement`.
+
+Migration generates a new key and removes the old shared key. A login-session action revokes the old certificate's trust before replacing `ca.pem`. The old public certificate stays in place if trust removal fails, so authorization can retry. `abctl tls untrust` includes the current, pending, retired, and separately published roots. Uninstall deletes their user Keychain identities only after all trust revocations succeed.
 
 CA trust is independent of VM and Docker startup. Desktop invokes `abctl tls trust` in the login user's session after a deliberate managed HTTPS action. macOS authorizes trust changes separately from helper installation; correct existing trust needs no new prompt. Migration also removes legacy User trust for an unchanged certificate, because User settings override Admin policy. Development and isolated instances do not install trust automatically. `abctl tls status` checks Admin trust, the System Keychain copy, and absence of legacy User trust. `abctl tls untrust` revokes Admin and legacy User trust before removing that copy. Trust, repair, and revocation hold `operation.lock` through authorization, so concurrent commands for the same profile fail without opening another prompt.
 

@@ -1,6 +1,4 @@
-//! The host signs with a persistent Keychain key; no API exports its private bytes.
-
-mod cleanup;
+//! The journal selects a persistent Keychain root; no API exports its private bytes.
 
 use std::path::Path;
 
@@ -15,7 +13,12 @@ use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey};
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::errSecItemNotFound;
 
-use crate::{CertificateValidity, Error, VerifiedCertificateRequest, authority, request};
+use crate::journal::{Journal, Root, Slot};
+use crate::{
+    CertificateValidity, Error, PublicAuthority, VerifiedCertificateRequest, authority, request,
+};
+
+mod cleanup;
 
 /// A per-profile CA whose root private key stays in the macOS Keychain.
 pub struct KeychainAuthority {
@@ -28,16 +31,32 @@ impl KeychainAuthority {
     /// Opens or creates the profile's key and certificate in the user's keychain.
     /// The default file-keychain ACL trusts the creating application's code identity.
     pub fn open(tls_dir: &Path) -> Result<Self, Error> {
-        let label = Self::label(tls_dir)?;
-        let key = match find(
-            ItemSearchOptions::new()
-                .key_class(KeyClass::private())
-                .label(&label)
-                .load_refs(true),
-        )? {
-            Some(Reference::Key(key)) => key,
-            Some(_) => return Err(Error::InvalidAuthority("expected a private key")),
+        if let Some(journal) = Self::journal(tls_dir)? {
+            return Self::load_root(tls_dir, journal.current());
+        }
+        let authority = Self::open_slot(tls_dir, Slot::Primary, true)?;
+        Journal::Stable {
+            current: authority.root(Slot::Primary),
+        }
+        .persist(tls_dir)?;
+        Ok(authority)
+    }
+
+    pub(crate) fn open_slot(tls_dir: &Path, slot: Slot, create: bool) -> Result<Self, Error> {
+        let label = Self::slot_label(tls_dir, slot)?;
+        let key = match find_key(&label)? {
+            Some(key) => key,
+            None if !create => {
+                return Err(Error::InvalidAuthority(
+                    "recorded CA private key is missing",
+                ));
+            }
             None => {
+                if Self::slot_has_keys(tls_dir, slot)? {
+                    return Err(Error::InvalidAuthority(
+                        "CA slot exists without its private key",
+                    ));
+                }
                 let mut options = GenerateKeyOptions::default();
                 options
                     .set_key_type(KeyType::ec())
@@ -52,11 +71,15 @@ impl KeychainAuthority {
         let key = KeychainKey { key, public };
         let certificate = match existing {
             Some(certificate) => certificate,
+            None if !create => {
+                return Err(Error::InvalidAuthority(
+                    "recorded CA certificate is missing",
+                ));
+            }
             None => {
                 let cert = authority::parameters().self_signed(&key)?;
                 let certificate = SecCertificate::from_der(cert.der())?;
                 ItemAddOptions::new(ItemAddValue::Ref(AddRef::Certificate(certificate.clone())))
-                    .set_label(&label)
                     .set_location(Location::DefaultFileKeychain)
                     .add()?;
                 certificate
@@ -90,16 +113,95 @@ impl KeychainAuthority {
 
     /// Finds this profile's existing public certificate without creating or signing anything.
     pub fn existing_certificate(tls_dir: &Path) -> Result<Option<Vec<u8>>, Error> {
-        match find(
-            ItemSearchOptions::new()
-                .key_class(KeyClass::private())
-                .label(&Self::label(tls_dir)?)
-                .load_refs(true),
-        )? {
-            Some(Reference::Key(key)) => Ok(certificate_for_key(&key)?.map(|cert| cert.to_der())),
-            Some(_) => Err(Error::InvalidAuthority("expected a private key")),
-            None => Ok(None),
+        if let Some(journal) = Self::journal(tls_dir)? {
+            return Ok(Some(
+                Self::load_root(tls_dir, journal.current())?
+                    .certificate
+                    .to_der(),
+            ));
         }
+        Self::slot_certificate(tls_dir, Slot::Primary)
+    }
+
+    /// Returns every recorded root for explicit revocation, including unfinished rotation.
+    /// No key or certificate is created, and expired public roots remain available.
+    pub fn owned_certificates(tls_dir: &Path) -> Result<Vec<PublicAuthority>, Error> {
+        let Some(journal) = Self::journal(tls_dir)? else {
+            return Self::slot_certificate(tls_dir, Slot::Primary)?
+                .map(PublicAuthority::try_from)
+                .transpose()
+                .map(|root| root.into_iter().collect());
+        };
+        let mut roots: Vec<_> = journal
+            .owned_roots()
+            .map(Root::public)
+            .collect::<Result<_, _>>()?;
+        if let Journal::Preparing { target_slot, .. } = journal
+            && let Some(der) = Self::slot_certificate(tls_dir, target_slot)?
+        {
+            roots.push(PublicAuthority::try_from(der)?);
+        }
+        Ok(roots)
+    }
+
+    pub(crate) fn journal(tls_dir: &Path) -> Result<Option<Journal>, Error> {
+        let journal = Journal::load(tls_dir)?;
+        if journal.is_none() && Self::slot_has_keys(tls_dir, Slot::Replacement)? {
+            return Err(Error::InvalidAuthority(
+                "CA rotation journal is missing while the replacement slot exists",
+            ));
+        }
+        Ok(journal)
+    }
+
+    pub(crate) fn load_root(tls_dir: &Path, root: &Root) -> Result<Self, Error> {
+        let authority = Self::open_slot(tls_dir, root.slot, false)?;
+        if authority.certificate.to_der() != root.der {
+            return Err(Error::InvalidAuthority(
+                "Keychain CA differs from the recorded certificate",
+            ));
+        }
+        Ok(authority)
+    }
+
+    pub(crate) fn root(&self, slot: Slot) -> Root {
+        Root {
+            slot,
+            der: self.certificate.to_der(),
+        }
+    }
+
+    pub(crate) fn slot_has_keys(tls_dir: &Path, slot: Slot) -> Result<bool, Error> {
+        let label = Self::slot_label(tls_dir, slot)?;
+        match ItemSearchOptions::new()
+            .keychains(&[SecKeychain::default()?])
+            .class(ItemClass::key())
+            .label(&label)
+            .load_refs(true)
+            .limit(Limit::All)
+            .search()
+        {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(error) if error.code() == errSecItemNotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn slot_certificate(tls_dir: &Path, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        let label = Self::slot_label(tls_dir, slot)?;
+        let certificate = match find_key(&label)? {
+            Some(key) => certificate_for_key(&key)?,
+            None => certificate_without_private_key(&label)?,
+        };
+        Ok(certificate.map(|certificate| certificate.to_der()))
+    }
+
+    fn slot_label(tls_dir: &Path, slot: Slot) -> Result<String, Error> {
+        let base = Self::label(tls_dir)?;
+        Ok(match slot {
+            Slot::Primary => base,
+            Slot::Replacement => format!("{base}:replacement"),
+        })
     }
 
     // Resolve surviving ancestors so uninstall can find keys after the TLS directory is removed.
@@ -124,8 +226,41 @@ impl KeychainAuthority {
     }
 }
 
+fn certificate_without_private_key(label: &str) -> Result<Option<SecCertificate>, Error> {
+    let Some(public) = find_key_class(label, KeyClass::public())? else {
+        return Ok(None);
+    };
+    let bytes = public
+        .external_representation()
+        .ok_or(Error::InvalidAuthority("missing stored public key bytes"))?;
+    certificate_by_public_key(&public_key_hash(&public)?, bytes.bytes())
+}
+
+fn find_key(label: &str) -> Result<Option<SecKey>, Error> {
+    find_key_class(label, KeyClass::private())
+}
+
+fn find_key_class(label: &str, class: KeyClass) -> Result<Option<SecKey>, Error> {
+    match find(
+        ItemSearchOptions::new()
+            .key_class(class)
+            .label(label)
+            .load_refs(true),
+    )? {
+        Some(Reference::Key(key)) => Ok(Some(key)),
+        Some(_) => Err(Error::InvalidAuthority("expected a key")),
+        None => Ok(None),
+    }
+}
+
 fn certificate_for_key(key: &SecKey) -> Result<Option<SecCertificate>, Error> {
-    let hash = public_key_hash(key)?;
+    certificate_by_public_key(&public_key_hash(key)?, &public_key_bytes(key)?)
+}
+
+fn certificate_by_public_key(
+    hash: &CFData,
+    public: &[u8],
+) -> Result<Option<SecCertificate>, Error> {
     match find(
         ItemSearchOptions::new()
             .class(ItemClass::certificate())
@@ -133,20 +268,31 @@ fn certificate_for_key(key: &SecKey) -> Result<Option<SecCertificate>, Error> {
             .load_refs(true),
     )? {
         Some(Reference::Certificate(certificate)) => {
-            let certificate_public = certificate
+            let bytes = certificate
                 .public_key()?
                 .external_representation()
                 .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
-            if certificate_public.bytes() != public_key_bytes(key)? {
-                return Err(Error::InvalidAuthority(
-                    "certificate and private key differ",
-                ));
+            if bytes.bytes() != public {
+                return Err(Error::InvalidAuthority("certificate and public key differ"));
             }
             Ok(Some(certificate))
         }
         Some(_) => Err(Error::InvalidAuthority("expected a certificate")),
         None => Ok(None),
     }
+}
+
+fn check_certificate_key(certificate: &SecCertificate, key: &SecKey) -> Result<(), Error> {
+    let certificate_public = certificate
+        .public_key()?
+        .external_representation()
+        .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
+    if certificate_public.bytes() != public_key_bytes(key)? {
+        return Err(Error::InvalidAuthority(
+            "certificate and private key differ",
+        ));
+    }
+    Ok(())
 }
 
 fn public_key_bytes(key: &SecKey) -> Result<Vec<u8>, Error> {

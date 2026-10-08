@@ -159,9 +159,8 @@ fn certificate(pem: &[u8]) -> Result<SecCertificate, Error> {
     Ok(SecCertificate::from_der(&der)?)
 }
 
-pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
-    let certificate = certificate(pem)?;
-    trust::remove(&certificate, Domain::User)?;
+pub fn delete_certificate_der(der: &[u8]) -> Result<(), Error> {
+    let certificate = SecCertificate::from_der(der)?;
     // A certificate parsed from DER has no persistent reference. Delete the
     // matching Keychain reference, never another certificate with the same serial.
     let found = ItemSearchOptions::new()

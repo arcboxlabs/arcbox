@@ -27,3 +27,9 @@ Regenerating the complete paired Swift client exposed `MachineService.Import` as
 ## Mutation ordering
 
 The CLI and daemon use the same per-profile file lock for mutations. The CLI holds the lock through native trust changes. Daemon preparation holds the lock through publication and signer activation. Uninstall holds the lock across revocation and identity deletion, then removes the lock directory through its inventory.
+
+## Keychain integration
+
+`tls/identity.json` now selects the current Keychain identity. Missing recorded keys or certificates stop preparation without generating replacements. Untrust enumerates current, pending, retired, and separately published roots. Cleanup retains public DER until exact certificate and key removal succeeds.
+
+macOS persists both members of the generated key pair. Cleanup verifies and removes the public key before the certificate and private key. A missing private key does not prevent finding the certificate through the persistent public key's hash and bytes. Apple ignores the supplied certificate label when `SecItemAdd` receives `kSecValueRef`; identity lookup therefore does not rely on certificate labels. The [Apple implementation](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/SecItem.cpp#L4932) and the isolated native regression agree on this behavior.

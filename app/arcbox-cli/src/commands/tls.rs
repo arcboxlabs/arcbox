@@ -136,7 +136,7 @@ fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
     Ok(())
 }
 
-/// Revoke both identities if migration has not yet replaced the public file.
+/// Revoke current, pending, retired, and separately published roots.
 /// Keep the public file and private identity available until every removal succeeds.
 pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
     let _operation = lock_profile(tls_dir)?;
@@ -145,11 +145,7 @@ pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
 
 /// The caller must hold the profile lock through this call and any subsequent identity deletion.
 pub(super) async fn remove_trust_locked(tls_dir: &Path) -> Result<()> {
-    let mut authorities: Vec<_> = KeychainAuthority::existing_certificate(tls_dir)?
-        .map(PublicAuthority::try_from)
-        .transpose()?
-        .into_iter()
-        .collect();
+    let mut authorities = KeychainAuthority::owned_certificates(tls_dir)?;
     if let Some(published) = published_authority(tls_dir)?
         && !authorities.iter().any(|ca| ca.der() == published.der())
     {
