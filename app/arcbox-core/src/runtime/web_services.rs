@@ -1,9 +1,9 @@
 //! Host-owned signing names and guest routes projected through shared URL policy.
 
 use arcbox_connect::v1::{
-    ContainerWebService, ListContainerWebServicesRequest, ReconcileHttpsAccessRequest,
+    ContainerWebService, GuestWebService, ListGuestWebServicesRequest, ReconcileHttpsAccessRequest,
     ReconcileHttpsAccessResponse, WebService, container_web_service::HttpsBackend,
-    web_service::HttpsMode,
+    guest_web_service::Route, web_service::HttpsMode,
 };
 use arcbox_constants::dns::Domain;
 use arcbox_dns::registry::{Lookup, Registry};
@@ -65,13 +65,13 @@ impl Runtime {
             .map_err(Into::into)
     }
 
-    /// Lists container web services with their current DNS names and installed routes.
+    /// Lists guest web services with their current DNS names and installed routes.
     ///
     /// # Errors
     ///
     /// Returns an error if the guest cannot be reached or reports an invalid route.
     pub async fn list_web_services(&self, hostname: Option<Domain>) -> Result<Vec<WebService>> {
-        let request = ListContainerWebServicesRequest {
+        let request = ListGuestWebServicesRequest {
             hostname: hostname
                 .as_ref()
                 .map_or_else(String::new, ToString::to_string),
@@ -79,11 +79,11 @@ impl Runtime {
         };
         let mut agent = self.connect_system_agent().await?;
         let response = if agent.is_blocking() {
-            tokio::task::spawn_blocking(move || agent.list_container_web_services_blocking(request))
+            tokio::task::spawn_blocking(move || agent.list_guest_web_services_blocking(request))
                 .await
                 .map_err(|error| CoreError::Vm(format!("web services task panicked: {error}")))??
         } else {
-            agent.list_container_web_services(request).await?
+            agent.list_guest_web_services(request).await?
         };
         let registry = self
             .dns_registry
@@ -94,25 +94,34 @@ impl Runtime {
 }
 
 fn selected_services(
-    routes: Vec<ContainerWebService>,
+    routes: Vec<GuestWebService>,
     hostname: Option<&Domain>,
     registry: &Registry,
 ) -> Result<Vec<WebService>> {
-    if let Some(name) = hostname {
-        if routes.len() > 1
-            || routes
-                .iter()
-                .any(|route| route.hostnames != [name.as_str()])
-        {
-            return Err(CoreError::Vm(
-                "guest web route does not match the requested hostname".into(),
-            ));
-        }
+    if hostname.is_some() && routes.len() > 1 {
+        return Err(CoreError::Vm(
+            "guest returned multiple routes for one hostname".into(),
+        ));
     }
     routes
         .into_iter()
         .try_fold(Vec::new(), |mut services, route| {
-            services.extend(container_services(route, registry)?);
+            match route.route {
+                Some(Route::Container(route)) => {
+                    if hostname.is_some_and(|name| route.hostnames != [name.as_str()]) {
+                        return Err(CoreError::Vm(
+                            "guest web route does not match the requested hostname".into(),
+                        ));
+                    }
+                    services.extend(container_services(*route, registry)?);
+                }
+                Some(Route::Index(_)) => {
+                    return Err(CoreError::Vm(
+                        "guest index route has no host publication".into(),
+                    ));
+                }
+                None => return Err(CoreError::Vm("guest web route has no resource kind".into())),
+            }
             Ok(services)
         })
 }
@@ -309,6 +318,35 @@ mod tests {
         assert_eq!(runtime.https_signing_revision(name).await, Some(first));
         runtime.deregister_dns_by_id("first").await;
         assert_eq!(runtime.https_signing_revision(name).await, None);
+    }
+
+    fn selected_container_services(
+        routes: Vec<ContainerWebService>,
+        hostname: Option<&Domain>,
+        registry: &Registry,
+    ) -> Result<Vec<WebService>> {
+        selected_services(
+            routes
+                .into_iter()
+                .map(|container| GuestWebService {
+                    route: container.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            hostname,
+            registry,
+        )
+    }
+
+    #[test]
+    fn missing_or_invalid_typed_routes_are_rejected() {
+        for route in [None, Some(Route::Index(Default::default()))] {
+            let service = GuestWebService {
+                route,
+                ..Default::default()
+            };
+            assert!(selected_services(vec![service], None, &registry()).is_err());
+        }
     }
 
     fn route() -> ContainerWebService {
@@ -541,12 +579,14 @@ mod tests {
             .unwrap();
         let mut route = route();
         route.hostnames = vec![name.to_string()];
-        let services = selected_services(vec![route.clone()], Some(&name), &registry).unwrap();
+        let services =
+            selected_container_services(vec![route.clone()], Some(&name), &registry).unwrap();
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].https_url, "https://first.api.local");
         assert_eq!(services[0].https_mode, HttpsMode::Managed);
         assert!(
-            selected_services(vec![route.clone(), route.clone()], Some(&name), &registry).is_err()
+            selected_container_services(vec![route.clone(), route.clone()], Some(&name), &registry)
+                .is_err()
         );
         for hostnames in [
             vec![],
@@ -555,14 +595,14 @@ mod tests {
         ] {
             let mut tampered = route.clone();
             tampered.hostnames = hostnames;
-            assert!(selected_services(vec![tampered], Some(&name), &registry).is_err());
+            assert!(selected_container_services(vec![tampered], Some(&name), &registry).is_err());
         }
         for (owner, address) in [("other", "10.0.2.3"), ("abc123", "10.0.2.4")] {
             let mut stale = route.clone();
             stale.container_id = owner.into();
             stale.ipv4_address = address.into();
             assert_eq!(
-                selected_services(vec![stale], Some(&name), &registry).unwrap(),
+                selected_container_services(vec![stale], Some(&name), &registry).unwrap(),
                 []
             );
         }

@@ -1,7 +1,7 @@
 //! Guest-owned web route snapshots over both agent transports.
 
 use arcbox_connect::v1::{
-    ListContainerWebServicesRequest, ListContainerWebServicesResponse, ReconcileHttpsAccessRequest,
+    ListGuestWebServicesRequest, ListGuestWebServicesResponse, ReconcileHttpsAccessRequest,
     ReconcileHttpsAccessResponse,
 };
 use arcbox_constants::wire::MessageType;
@@ -47,36 +47,36 @@ impl AgentClient {
         .await
     }
 
-    /// Lists installed container web routes and their current DNS aliases.
+    /// Lists installed guest web routes and their current DNS names.
     ///
     /// # Errors
     ///
     /// Returns an error if the agent request fails.
-    pub async fn list_container_web_services(
+    pub async fn list_guest_web_services(
         &mut self,
-        request: ListContainerWebServicesRequest,
-    ) -> Result<ListContainerWebServicesResponse> {
+        request: ListGuestWebServicesRequest,
+    ) -> Result<ListGuestWebServicesResponse> {
         self.unary_rpc(
-            MessageType::ListContainerWebServicesRequest,
+            MessageType::ListGuestWebServicesRequest,
             &request.encode_to_vec(),
-            MessageType::ListContainerWebServicesResponse,
+            MessageType::ListGuestWebServicesResponse,
         )
         .await
     }
 
-    /// Lists container web routes on the HV socketpair. Call from `spawn_blocking`.
+    /// Lists guest web routes on the HV socketpair. Call from `spawn_blocking`.
     ///
     /// # Errors
     ///
     /// Returns an error if the agent request fails.
-    pub fn list_container_web_services_blocking(
+    pub fn list_guest_web_services_blocking(
         &mut self,
-        request: ListContainerWebServicesRequest,
-    ) -> Result<ListContainerWebServicesResponse> {
+        request: ListGuestWebServicesRequest,
+    ) -> Result<ListGuestWebServicesResponse> {
         self.unary_rpc_blocking(
-            MessageType::ListContainerWebServicesRequest,
+            MessageType::ListGuestWebServicesRequest,
             &request.encode_to_vec(),
-            MessageType::ListContainerWebServicesResponse,
+            MessageType::ListGuestWebServicesResponse,
         )
     }
 }

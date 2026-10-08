@@ -40,8 +40,8 @@ service AgentService {
     // Lists the guest cluster's Services of type LoadBalancer.
     rpc ListKubernetesLoadBalancers(KubernetesLoadBalancersRequest) returns (KubernetesLoadBalancersResponse);
 
-    // Lists installed container web routes selected by the guest.
-    rpc ListContainerWebServices(ListContainerWebServicesRequest) returns (ListContainerWebServicesResponse);
+    // Lists installed container and builtin web routes selected by the guest.
+    rpc ListGuestWebServices(ListGuestWebServicesRequest) returns (ListGuestWebServicesResponse);
 
     // Renews host HTTPS observation and returns the first managed access in that observation.
     rpc ReconcileHttpsAccess(ReconcileHttpsAccessRequest) returns (ReconcileHttpsAccessResponse);
@@ -88,13 +88,29 @@ message AgentPingResponse {
     uint32 protocol_version = 3;
 }
 
-message ListContainerWebServicesRequest {
+message ListGuestWebServicesRequest {
     // Empty lists exact aliases. A concrete name resolves its current installed route.
     string hostname = 1;
 }
 
-message ListContainerWebServicesResponse {
-    repeated ContainerWebService services = 1;
+message ListGuestWebServicesResponse {
+    repeated GuestWebService services = 1;
+}
+
+// A ready guest endpoint, selected by its resource kind.
+message GuestWebService {
+    oneof route {
+        ContainerWebService container = 1;
+        IndexWebService index = 2;
+    }
+}
+
+// The builtin index owns the configured apex at the guest bridge gateway.
+message IndexWebService {
+    string hostname = 1;
+    string ipv4_address = 2;
+    // HTTP is always available while this endpoint is present.
+    bool managed_https = 3;
 }
 
 // The guest releases waiting handshakes after three seconds without renewal.

@@ -120,8 +120,8 @@ pub enum MessageType {
     WatchStorageHealthRequest = 0x0014,
     /// Controlled offline filesystem checks or online write verification.
     StorageCheckRequest = 0x0015,
-    /// Lists installed container web routes (`arcbox.v1.ListContainerWebServicesRequest`).
-    ListContainerWebServicesRequest = 0x0016,
+    /// Lists installed guest web routes (`arcbox.v1.ListGuestWebServicesRequest`).
+    ListGuestWebServicesRequest = 0x0016,
     /// Renews managed HTTPS access observation (`arcbox.v1.ReconcileHttpsAccessRequest`).
     ReconcileHttpsAccessRequest = 0x0017,
     /// Opens an exclusive host connection for System VM instance authority.
@@ -370,8 +370,8 @@ pub enum MessageType {
     /// Answers [`Self::EnsureNfsExportRequest`] (payload:
     /// `arcbox.agent.EnsureNfsExportResponse`).
     EnsureNfsExportResponse = 0x1013,
-    /// Answers [`Self::ListContainerWebServicesRequest`] with the installed route snapshot.
-    ListContainerWebServicesResponse = 0x1016,
+    /// Answers [`Self::ListGuestWebServicesRequest`] with the installed route snapshot.
+    ListGuestWebServicesResponse = 0x1016,
     /// Answers [`Self::ReconcileHttpsAccessRequest`] with the first observed access.
     ReconcileHttpsAccessResponse = 0x1017,
     /// Confirms acquisition of the exclusive instance authority connection.
@@ -539,7 +539,7 @@ impl MessageType {
             0x0013 => Some(Self::EnsureNfsExportRequest),
             0x0014 => Some(Self::WatchStorageHealthRequest),
             0x0015 => Some(Self::StorageCheckRequest),
-            0x0016 => Some(Self::ListContainerWebServicesRequest),
+            0x0016 => Some(Self::ListGuestWebServicesRequest),
             0x0017 => Some(Self::ReconcileHttpsAccessRequest),
             0x0018 => Some(Self::OpenInstanceAuthorityRequest),
             0x0019 => Some(Self::ReplaceInstanceAuthorityRequest),
@@ -621,7 +621,7 @@ impl MessageType {
             0x1013 => Some(Self::EnsureNfsExportResponse),
             0x1014 => Some(Self::StorageHealth),
             0x1015 => Some(Self::StorageCheckResponse),
-            0x1016 => Some(Self::ListContainerWebServicesResponse),
+            0x1016 => Some(Self::ListGuestWebServicesResponse),
             0x1017 => Some(Self::ReconcileHttpsAccessResponse),
             0x1018 => Some(Self::OpenInstanceAuthorityResponse),
             0x1019 => Some(Self::InstanceAuthorityAck),
@@ -754,7 +754,7 @@ impl MessageType {
         matches!(
             self,
             Self::KubernetesLoadBalancersRequest
-                | Self::ListContainerWebServicesRequest
+                | Self::ListGuestWebServicesRequest
                 | Self::ReconcileHttpsAccessRequest
         )
     }
@@ -805,7 +805,7 @@ mod tests {
             (0x0011, MessageType::ContainerFsPathsRequest),
             (0x0012, MessageType::ImageFsPathsRequest),
             (0x0013, MessageType::EnsureNfsExportRequest),
-            (0x0016, MessageType::ListContainerWebServicesRequest),
+            (0x0016, MessageType::ListGuestWebServicesRequest),
             (0x0017, MessageType::ReconcileHttpsAccessRequest),
             (0x0018, MessageType::OpenInstanceAuthorityRequest),
             (0x0019, MessageType::ReplaceInstanceAuthorityRequest),
@@ -816,7 +816,7 @@ mod tests {
             (0x1011, MessageType::ContainerFsPathsResponse),
             (0x1012, MessageType::ImageFsPathsResponse),
             (0x1013, MessageType::EnsureNfsExportResponse),
-            (0x1016, MessageType::ListContainerWebServicesResponse),
+            (0x1016, MessageType::ListGuestWebServicesResponse),
             (0x1017, MessageType::ReconcileHttpsAccessResponse),
             (0x1018, MessageType::OpenInstanceAuthorityResponse),
             (0x1019, MessageType::InstanceAuthorityAck),

@@ -107,21 +107,21 @@ pub mod agent {
         AgentPingRequest, AgentPingResponse, ContainerFsPathsRequest, ContainerFsPathsResponse,
         ContainerStats, ContainerWebService, DiskTrimRequest, DiskTrimResponse,
         EnsureMachineExportRequest, EnsureMachineExportResponse, EnsureNfsExportRequest,
-        EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse,
-        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+        EnsureNfsExportResponse, GuestWebService, ImageFsPathsRequest, ImageFsPathsResponse,
+        IndexWebService, KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
         KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
         KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
         KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
         KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
-        ListContainerWebServicesRequest, ListContainerWebServicesResponse, MachineStats,
+        ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineStats,
         MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
         PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
         ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
         RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
         ShutdownResponse, StorageCheckRequest, StorageCheckResponse, StorageCheckResult,
         SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
-        container_web_service, kubernetes_host_port, memory_pressure_event, readiness_event,
-        storage_check_request,
+        container_web_service, guest_web_service, kubernetes_host_port, memory_pressure_event,
+        readiness_event, storage_check_request,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -219,17 +219,18 @@ pub use v1::{
 
 // Agent types
 pub use v1::{
-    AgentPingRequest, AgentPingResponse, ContainerWebService, KubernetesDeleteRequest,
-    KubernetesDeleteResponse, KubernetesHostPort, KubernetesKubeconfigRequest,
-    KubernetesKubeconfigResponse, KubernetesLoadBalancer, KubernetesLoadBalancersRequest,
-    KubernetesLoadBalancersResponse, KubernetesServicePort, KubernetesStartRequest,
-    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-    KubernetesStopRequest, KubernetesStopResponse, ListContainerWebServicesRequest,
-    ListContainerWebServicesResponse, PortBindingsChanged, PortBindingsRemoved,
-    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
-    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
-    StorageCheckResult, SystemInfo, container_web_service, storage_check_request,
+    AgentPingRequest, AgentPingResponse, ContainerWebService, GuestWebService, IndexWebService,
+    KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+    KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+    KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
+    ListGuestWebServicesRequest, ListGuestWebServicesResponse, PortBindingsChanged,
+    PortBindingsRemoved, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ServiceStatus, ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
+    StorageCheckResult, SystemInfo, container_web_service, guest_web_service,
+    storage_check_request,
 };
 
 // API types - Network

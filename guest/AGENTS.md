@@ -235,7 +235,7 @@ non-obvious invariants and failure signatures.
   Keep DnsRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
   Keep readiness streaming in `agent/linux/rpc/readiness.rs`; the dispatcher owns connection routing and preserves the recovery guest restrictions.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
-  `ListContainerWebServices` reports installed routes, not raw listeners. The
+  `ListGuestWebServices` reports installed routes, not raw listeners. The
   snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.

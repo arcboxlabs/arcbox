@@ -257,7 +257,7 @@ async fn handle_request(
                 Err(error) => RpcResponse::Error(ErrorResponse::new(400, error.to_string())),
             })
         }
-        RpcRequest::ListContainerWebServices(request) => {
+        RpcRequest::ListGuestWebServices(request) => {
             let hostname = if request.hostname.is_empty() {
                 None
             } else {
@@ -270,8 +270,8 @@ async fn handle_request(
                     }
                 }
             };
-            RequestResult::Single(RpcResponse::ListContainerWebServices(
-                arcbox_connect::v1::ListContainerWebServicesResponse {
+            RequestResult::Single(RpcResponse::ListGuestWebServices(
+                arcbox_connect::v1::ListGuestWebServicesResponse {
                     services: web_services.snapshot(hostname.as_ref()),
                     ..Default::default()
                 },
@@ -867,23 +867,23 @@ mod tests {
         });
         write_message(
             &mut client,
-            crate::rpc::MessageType::ListContainerWebServicesRequest,
+            crate::rpc::MessageType::ListGuestWebServicesRequest,
             "web-services-test",
-            &arcbox_connect::v1::ListContainerWebServicesRequest::default().encode_to_vec(),
+            &arcbox_connect::v1::ListGuestWebServicesRequest::default().encode_to_vec(),
         )
         .await
         .unwrap();
         let (kind, trace, payload) = read_message(&mut client).await.unwrap();
-        assert_eq!(
-            kind,
-            crate::rpc::MessageType::ListContainerWebServicesResponse
-        );
+        assert_eq!(kind, crate::rpc::MessageType::ListGuestWebServicesResponse);
         assert_eq!(trace, "web-services-test");
         let response =
-            arcbox_connect::v1::ListContainerWebServicesResponse::decode_from_slice(&payload)
-                .unwrap();
+            arcbox_connect::v1::ListGuestWebServicesResponse::decode_from_slice(&payload).unwrap();
         assert_eq!(response.services.len(), 1);
-        let service = &response.services[0];
+        let Some(arcbox_connect::v1::guest_web_service::Route::Container(service)) =
+            response.services[0].route.as_ref()
+        else {
+            panic!("expected container route")
+        };
         assert_eq!(service.container_id, "a");
         assert_eq!(service.hostnames, ["api.arcbox.local"]);
         assert_eq!(service.ipv4_address, "172.17.0.2");
@@ -942,13 +942,13 @@ mod tests {
                     _ => {}
                 }
             }
-            let request = arcbox_connect::v1::ListContainerWebServicesRequest {
+            let request = arcbox_connect::v1::ListGuestWebServicesRequest {
                 hostname: hostname.into(),
                 ..Default::default()
             };
             write_message(
                 &mut client,
-                crate::rpc::MessageType::ListContainerWebServicesRequest,
+                crate::rpc::MessageType::ListGuestWebServicesRequest,
                 change,
                 &request.encode_to_vec(),
             )
@@ -961,12 +961,9 @@ mod tests {
                 assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 400);
                 continue;
             }
-            assert_eq!(
-                kind,
-                crate::rpc::MessageType::ListContainerWebServicesResponse
-            );
+            assert_eq!(kind, crate::rpc::MessageType::ListGuestWebServicesResponse);
             let response =
-                arcbox_connect::v1::ListContainerWebServicesResponse::decode_from_slice(&payload)
+                arcbox_connect::v1::ListGuestWebServicesResponse::decode_from_slice(&payload)
                     .unwrap();
             assert_eq!(
                 response.services.len(),
@@ -974,7 +971,11 @@ mod tests {
                 "{change}"
             );
             if let Some(owner) = owner {
-                let route = &response.services[0];
+                let Some(arcbox_connect::v1::guest_web_service::Route::Container(route)) =
+                    response.services[0].route.as_ref()
+                else {
+                    panic!("expected container route")
+                };
                 assert_eq!(route.container_id, owner);
                 assert_eq!(route.hostnames, [hostname.to_ascii_lowercase()]);
                 assert_eq!(route.https_backend, service.https_backend);

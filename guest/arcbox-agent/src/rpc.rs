@@ -19,15 +19,14 @@ use arcbox_connect::v1::{
     KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
     KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
     KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-    KubernetesStopRequest, KubernetesStopResponse, ListContainerWebServicesRequest,
-    ListContainerWebServicesResponse, MemoryPressureEvent, MmapReadFileRequest,
-    MmapReadFileResponse, OpenInstanceAuthorityRequest, OpenInstanceAuthorityResponse,
-    PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
-    ReconcileHttpsAccessResponse, ReplaceInstanceAuthorityRequest, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
-    ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
-    WatchStorageHealthRequest,
+    KubernetesStopRequest, KubernetesStopResponse, ListGuestWebServicesRequest,
+    ListGuestWebServicesResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
+    OpenInstanceAuthorityRequest, OpenInstanceAuthorityResponse, PortBindingsChanged,
+    PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
+    ReplaceInstanceAuthorityRequest, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest, ShutdownResponse,
+    StorageCheckRequest, StorageCheckResponse, SystemInfo, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchStatsRequest, WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -78,7 +77,7 @@ impl ErrorResponse {
 pub enum RpcRequest {
     Ping(PingRequest),
     GetSystemInfo,
-    ListContainerWebServices(ListContainerWebServicesRequest),
+    ListGuestWebServices(ListGuestWebServicesRequest),
     ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
     OpenInstanceAuthority(OpenInstanceAuthorityRequest),
     ReplaceInstanceAuthority(ReplaceInstanceAuthorityRequest),
@@ -111,7 +110,7 @@ pub enum RpcRequest {
 pub enum RpcResponse {
     Ping(PingResponse),
     SystemInfo(SystemInfo),
-    ListContainerWebServices(ListContainerWebServicesResponse),
+    ListGuestWebServices(ListGuestWebServicesResponse),
     ReconcileHttpsAccess(ReconcileHttpsAccessResponse),
     OpenInstanceAuthority(OpenInstanceAuthorityResponse),
     InstanceAuthorityAck(InstanceAuthorityAck),
@@ -147,7 +146,7 @@ impl RpcResponse {
         match self {
             Self::Ping(_) => MessageType::PingResponse,
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
-            Self::ListContainerWebServices(_) => MessageType::ListContainerWebServicesResponse,
+            Self::ListGuestWebServices(_) => MessageType::ListGuestWebServicesResponse,
             Self::ReconcileHttpsAccess(_) => MessageType::ReconcileHttpsAccessResponse,
             Self::OpenInstanceAuthority(_) => MessageType::OpenInstanceAuthorityResponse,
             Self::InstanceAuthorityAck(_) => MessageType::InstanceAuthorityAck,
@@ -182,7 +181,7 @@ impl RpcResponse {
         match self {
             Self::Ping(msg) => msg.encode_to_vec(),
             Self::SystemInfo(msg) => msg.encode_to_vec(),
-            Self::ListContainerWebServices(msg) => msg.encode_to_vec(),
+            Self::ListGuestWebServices(msg) => msg.encode_to_vec(),
             Self::ReconcileHttpsAccess(msg) => msg.encode_to_vec(),
             Self::OpenInstanceAuthority(msg) => msg.encode_to_vec(),
             Self::InstanceAuthorityAck(msg) => msg.encode_to_vec(),
@@ -310,9 +309,9 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             Ok(RpcRequest::Ping(req))
         }
         MessageType::GetSystemInfoRequest => Ok(RpcRequest::GetSystemInfo),
-        MessageType::ListContainerWebServicesRequest => {
-            let request = ListContainerWebServicesRequest::decode_from_slice(payload)?;
-            Ok(RpcRequest::ListContainerWebServices(request))
+        MessageType::ListGuestWebServicesRequest => {
+            let request = ListGuestWebServicesRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::ListGuestWebServices(request))
         }
         MessageType::ReconcileHttpsAccessRequest => Ok(RpcRequest::ReconcileHttpsAccess(
             ReconcileHttpsAccessRequest::decode_from_slice(payload)?,

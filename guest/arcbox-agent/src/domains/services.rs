@@ -5,8 +5,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, RwLock};
 
 use arcbox_connect::v1::{
-    ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
-    container_web_service::HttpsBackend,
+    ContainerWebService, GuestWebService, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, container_web_service::HttpsBackend,
 };
 use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
 use arcbox_dns::{
@@ -196,8 +196,19 @@ impl WebServices {
         Ok(())
     }
 
+    /// Returns typed installed endpoints selected by current DNS ownership.
+    pub fn snapshot(&self, hostname: Option<&Domain>) -> Vec<GuestWebService> {
+        self.container_snapshot(hostname)
+            .into_iter()
+            .map(|container| GuestWebService {
+                route: container.into(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
     /// Shared Compose aliases belong only to the container DNS currently selects.
-    pub fn snapshot(&self, hostname: Option<&Domain>) -> Vec<ContainerWebService> {
+    fn container_snapshot(&self, hostname: Option<&Domain>) -> Vec<ContainerWebService> {
         let dns = self.dns.read().expect("DNS registry lock poisoned");
         let installed = self.installed.read().expect("web services lock poisoned");
         if let Some(name) = hostname {
@@ -325,7 +336,7 @@ mod tests {
         ] {
             assert!(services.tls_route(name, ip).is_none(), "{name}");
         }
-        let snapshot = services.snapshot(None);
+        let snapshot = services.container_snapshot(None);
         assert!(
             snapshot[0]
                 .hostnames
@@ -336,7 +347,7 @@ mod tests {
         Arc::make_mut(services.installed.write().unwrap().get_mut("a").unwrap())
             .selected
             .https = Some(super::super::HttpsBackend::Native(8443));
-        let snapshot = services.snapshot(None);
+        let snapshot = services.container_snapshot(None);
         assert!(
             snapshot[0]
                 .hostnames
@@ -520,12 +531,12 @@ mod tests {
                 change == "idempotent",
                 "{change}"
             );
-            let before = services.snapshot(None);
+            let before = services.container_snapshot(None);
             services.invalidate_tls_route(name, ip, &route);
             if change == "idempotent" {
                 assert!(!services.contains("a"));
             } else {
-                assert_eq!(services.snapshot(None), before, "{change}");
+                assert_eq!(services.container_snapshot(None), before, "{change}");
             }
         }
     }
@@ -589,7 +600,7 @@ mod tests {
         ] {
             register(&services, id, &aliases, ip, "one.dev.arcbox.local");
         }
-        let snapshot = services.snapshot(None);
+        let snapshot = services.container_snapshot(None);
         assert_eq!(snapshot[1].hostnames, ["demo-web-2.one.dev.arcbox.local"]);
         assert_eq!(
             snapshot[0].hostnames,
@@ -604,7 +615,7 @@ mod tests {
         );
 
         services.dns.write().unwrap().remove("a");
-        let snapshot = services.snapshot(None);
+        let snapshot = services.container_snapshot(None);
         assert_eq!(
             snapshot[0].hostnames,
             [
@@ -615,6 +626,9 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
 
         services.remove("b");
-        assert_eq!(services.snapshot(None), Vec::<ContainerWebService>::new());
+        assert_eq!(
+            services.container_snapshot(None),
+            Vec::<ContainerWebService>::new()
+        );
     }
 }

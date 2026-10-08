@@ -3595,15 +3595,42 @@ pub struct AgentPingResponse {
     pub protocol_version: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListContainerWebServicesRequest {
+pub struct ListGuestWebServicesRequest {
     /// Empty lists exact aliases. A concrete name resolves its current installed route.
     #[prost(string, tag = "1")]
     pub hostname: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListContainerWebServicesResponse {
+pub struct ListGuestWebServicesResponse {
     #[prost(message, repeated, tag = "1")]
-    pub services: ::prost::alloc::vec::Vec<ContainerWebService>,
+    pub services: ::prost::alloc::vec::Vec<GuestWebService>,
+}
+/// A ready guest endpoint, selected by its resource kind.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestWebService {
+    #[prost(oneof = "guest_web_service::Route", tags = "1, 2")]
+    pub route: ::core::option::Option<guest_web_service::Route>,
+}
+/// Nested message and enum types in `GuestWebService`.
+pub mod guest_web_service {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Route {
+        #[prost(message, tag = "1")]
+        Container(super::ContainerWebService),
+        #[prost(message, tag = "2")]
+        Index(super::IndexWebService),
+    }
+}
+/// The builtin index owns the configured apex at the guest bridge gateway.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IndexWebService {
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// HTTP is always available while this endpoint is present.
+    #[prost(bool, tag = "3")]
+    pub managed_https: bool,
 }
 /// The guest releases waiting handshakes after three seconds without renewal.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
