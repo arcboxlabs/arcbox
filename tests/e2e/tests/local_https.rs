@@ -23,15 +23,10 @@ const MARKER: &str = "keychain-https-ok";
 #[test]
 #[ignore = "boots a VZ System VM and creates an isolated Keychain CA"]
 fn keychain_ca_serves_container_https() -> Result<()> {
-    run_vz_scenario("local_https", |daemon, data_dir, _metrics| {
+    let mut ca_dir = None;
+    let result = run_vz_scenario("local_https", |daemon, data_dir, _metrics| {
+        ca_dir = Some(data_dir.join("tls"));
         daemon.wait_ready_blocking(Duration::from_secs(180))?;
-        struct Cleanup<'a>(&'a Path);
-        impl Drop for Cleanup<'_> {
-            fn drop(&mut self) {
-                KeychainAuthority::delete(&self.0.join("tls")).expect("delete isolated test CA");
-            }
-        }
-        let _cleanup = Cleanup(data_dir);
         let preparation = wait_https_preparation(&daemon.grpc_socket())?;
         let ca = std::fs::read(data_dir.join("tls/ca.pem"))
             .with_context(|| format!("read prepared CA; HTTPS status: {preparation}"))?;
@@ -165,7 +160,12 @@ fn keychain_ca_serves_container_https() -> Result<()> {
             ensure!(output.stdout.is_empty(), "rejected HTTPS returned a body");
         }
         Ok(())
-    })
+    });
+    // The daemon must stop before deletion or background preparation can recreate the test CA.
+    if let Some(dir) = ca_dir {
+        KeychainAuthority::delete(&dir).context("delete isolated test CA")?;
+    }
+    result
 }
 
 fn wait_https_preparation(socket: &Path) -> Result<String> {

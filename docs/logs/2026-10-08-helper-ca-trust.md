@@ -63,3 +63,13 @@ The local Release build initially omitted production service configuration. Pack
 A second normal application launch reached `READY` without entering `AWAITING_HTTPS_TRUST`. Raw Admin trust exports before and after that launch were byte-identical, as was the public CA. A second disposable container with a new hostname passed the same verified HTTPS check, exercising a fresh guest and certificate request. Both disposable containers were removed. The original eight running containers and every saved stopped container were restored to their pre-deployment states.
 
 This validates the installed Desktop-to-CLI authorization path and subsequent startup with existing trust. Live cancellation and retry were not repeated; the focused Desktop tests cover those branches. The earlier native trust lifecycle test remains a failed run pending approval to repair its interactive cleanup. This deployment is a paired local test build; a release must publish the runtime changes and update Desktop's runtime pin together.
+
+## On-demand authorization integration
+
+The new flow keeps agent protocol and minimum versions at 7. Guest observations use a three-second lease and exact Mac source addresses. The daemon checks current DNS ownership and forwards one pending request to Desktop. An observation cycle changes when a root becomes untrusted again, so late responses cannot create another prompt. Cancellation closes the dedicated socket and joins blocking RPC work before the daemon disables observation.
+
+CA preparation now runs independently of startup and retries after failure. The signer selects the current published identity after a CSR arrives and rejects a result if the identity changes. Guest leaf validation verifies the root chain, requested name, server use, and private key match. Replacing the published root invalidates cached leaves.
+
+Validation on 2026-10-08: 91 daemon tests, four API authorization tests, the engine's real-socket cancellation test, and 12 container CA-injection tests passed. The common CA tests passed with 14 tests and two native tests ignored. The guest's 38 domain tests passed on the host; musl Clippy and Linux test-binary compilation passed, but the Linux test binaries have not run in a guest. Targeted host Clippy and workspace formatting passed. Desktop's 37 focused tests and Swift application build passed earlier in this series.
+
+The container E2E now requires default DNS and CA trust without request overrides, curl exit 60 after injection opt-out, and TLS rejection of an unowned SNI name. Compilation does not establish those runtime results. The new paired application, browser authorization, cancellation, and retry still require live validation. The installed checks above cover the earlier startup flow only.
