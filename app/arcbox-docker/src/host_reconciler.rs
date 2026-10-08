@@ -7,23 +7,21 @@
 //! natural exit, `--rm` auto-remove, `docker prune`, an OOM kill, a `docker
 //! stop` issued inside the guest — and, after a System VM restart, every
 //! container dockerd brings back under its restart policy. This task closes
-//! both gaps. Every [`RECONCILE_INTERVAL`] it lists the guest's running
-//! containers, tears down host state for a registered container that is gone,
-//! and sets up host state for a running container it does not know, through
-//! the same inspect-driven path `start_container` uses. It also follows the
+//! both gaps. Every [`RECONCILE_INTERVAL`] it inspects every running
+//! container, then commits the complete host state if no concurrent mutation
+//! invalidated the query. This also refreshes known containers. It follows the
 //! System VM's lifecycle: when the VM goes down it retires every piece of
 //! container state at once (a listener kept alive would hold its port while
 //! injecting into a dead datapath), and when the VM is back it reconciles
-//! promptly — retrying every [`RETURN_RETRY`] until dockerd answers — rather
+//! promptly — retrying every [`RETURN_RETRY`] until a snapshot commits — rather
 //! than waiting out a whole interval.
 
 use crate::api::AppState;
 use crate::error::Result;
-use crate::guest_query::list_running_container_ids;
-use crate::handlers::setup_container_networking;
+use crate::guest_query::running_container_snapshot;
 use crate::proxy::ProxyState;
+use arcbox_core::runtime::ContainerNetwork;
 use arcbox_core::{Runtime, VmLifecycleState};
-use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 /// How often the guest's container set is compared with the host's state.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Cadence after the VM comes back, until the first listing succeeds:
+/// Cadence after the VM comes back, until the first snapshot commits:
 /// dockerd is still starting — and restarting its containers — then.
 const RETURN_RETRY: Duration = Duration::from_secs(2);
 
@@ -59,12 +57,8 @@ pub fn spawn(runtime: Arc<Runtime>, proxy: Arc<ProxyState>, shutdown: Cancellati
 /// The guest side of a reconcile; a seam so the loop is testable without
 /// dockerd.
 trait Guest: Send + Sync {
-    /// The IDs of the containers running in the guest.
-    fn running(&self) -> impl Future<Output = Result<HashSet<String>>> + Send;
-
-    /// Sets up host networking for a running container the host does not
-    /// know.
-    fn set_up(&self, container_id: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Complete validated networking state for every running container.
+    fn snapshot(&self) -> impl Future<Output = Result<Vec<ContainerNetwork>>> + Send;
 }
 
 /// Guest dockerd through the Docker proxy's pooled client.
@@ -73,15 +67,11 @@ struct ProxyGuest {
 }
 
 impl Guest for ProxyGuest {
-    async fn running(&self) -> Result<HashSet<String>> {
+    async fn snapshot(&self) -> Result<Vec<ContainerNetwork>> {
         self.state
             .proxy
             .reset_if_restarted(self.state.runtime.system_vm_restart_generation());
-        list_running_container_ids(self.state.proxy.client()).await
-    }
-
-    async fn set_up(&self, container_id: &str) -> Result<()> {
-        setup_container_networking(&self.state, container_id).await
+        running_container_snapshot(self.state.proxy.client()).await
     }
 }
 
@@ -122,9 +112,9 @@ async fn reconcile_loop(
             }
             () = tokio::time::sleep(delay), if ready => {
                 match reconcile(runtime, guest).await {
-                    Ok(()) => returning = false,
-                    // Fail-safe: a listing error changes nothing this cycle
-                    // rather than risk tearing down live containers.
+                    Ok(true) => returning = false,
+                    Ok(false) => {},
+                    // A failed guest query leaves the existing host state intact.
                     Err(e) => tracing::debug!(error = %e, "host networking reconcile skipped"),
                 }
             }
@@ -132,40 +122,27 @@ async fn reconcile_loop(
     }
 }
 
-/// Makes the host's container state match the guest's running set: tears
-/// down what is registered but gone, sets up what runs but is unknown.
-///
-/// When the listing fails the error propagates and nothing changes, so a
-/// transient guest hiccup can't strip live containers.
-async fn reconcile(runtime: &Runtime, guest: &impl Guest) -> Result<()> {
-    let registered = runtime.registered_container_ids().await;
-    let running = guest.running().await?;
-    for id in registered.difference(&running) {
-        tracing::info!(
-            container_id = %id,
-            "reconciler tearing down host networking for a container no longer running"
-        );
-        runtime.stop_port_forwarding_by_id(id).await;
-        runtime.deregister_dns_by_id(id).await;
-    }
-    for id in running.difference(&registered) {
-        tracing::info!(
-            container_id = %id,
-            "reconciler setting up host networking for a running container it did not know"
-        );
-        guest.set_up(id).await?;
-    }
-    Ok(())
+/// Commits a complete guest query only while its captured generation remains current.
+/// Query failures preserve host state; concurrent mutations cause a skipped commit.
+async fn reconcile(runtime: &Runtime, guest: &impl Guest) -> Result<bool> {
+    let Some(snapshot) = runtime.capture_container_snapshot().await? else {
+        return Ok(false);
+    };
+    let containers = guest.snapshot().await?;
+    snapshot.commit(&containers).await.map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::DockerError;
+    use arcbox_core::runtime::{ContainerChange, NetworkFixture};
     use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+    use arcbox_dns::container::ContainerMetadata;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     fn test_runtime() -> (Arc<Runtime>, TempDir) {
         let tmp = TempDir::new().unwrap();
@@ -177,45 +154,61 @@ mod tests {
             skip_vm_check: true,
             ..Default::default()
         };
-        let runtime = Arc::new(Runtime::with_vm_lifecycle_config(config, vlc).expect("runtime"));
+        let runtime = Arc::new(
+            Runtime::with_vm_lifecycle_config(config, vlc)
+                .expect("runtime")
+                .with_network_fixture(NetworkFixture::default()),
+        );
         (runtime, tmp)
     }
 
-    /// Answers every listing the same way and records what it is asked to
-    /// set up.
+    fn network(id: &str, name: &str, ip: &str) -> ContainerNetwork {
+        ContainerNetwork {
+            metadata: ContainerMetadata::from_inspect(&serde_json::json!({
+                "Id": id, "Name": name,
+                "NetworkSettings": {"Networks": {"bridge": {"IPAddress": ip}}}
+            }))
+            .unwrap(),
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Returns a complete snapshot, optionally pausing before the query finishes.
     struct FakeGuest {
-        running: std::result::Result<HashSet<String>, String>,
-        set_up: Mutex<Vec<String>>,
+        snapshot: std::result::Result<Vec<ContainerNetwork>, String>,
+        queries: AtomicUsize,
+        query_gate: Option<(Notify, Notify)>,
     }
 
     impl FakeGuest {
         fn running(ids: &[&str]) -> Self {
             Self {
-                running: Ok(ids.iter().map(|id| (*id).to_owned()).collect()),
-                set_up: Mutex::new(Vec::new()),
+                snapshot: Ok(ids.iter().map(|id| network(id, id, "172.17.0.2")).collect()),
+                queries: AtomicUsize::new(0),
+                query_gate: None,
             }
         }
 
         fn unreachable() -> Self {
             Self {
-                running: Err("guest unreachable".to_owned()),
-                set_up: Mutex::new(Vec::new()),
+                snapshot: Err("guest unreachable".to_owned()),
+                ..Self::running(&[])
             }
         }
 
-        fn set_up(&self) -> Vec<String> {
-            self.set_up.lock().unwrap().clone()
+        fn queries(&self) -> usize {
+            self.queries.load(Ordering::Relaxed)
         }
     }
 
     impl Guest for FakeGuest {
-        async fn running(&self) -> Result<HashSet<String>> {
-            self.running.clone().map_err(DockerError::Server)
-        }
-
-        async fn set_up(&self, container_id: &str) -> Result<()> {
-            self.set_up.lock().unwrap().push(container_id.to_owned());
-            Ok(())
+        async fn snapshot(&self) -> Result<Vec<ContainerNetwork>> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            if let Some((entered, release)) = &self.query_gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+            self.snapshot.clone().map_err(DockerError::Server)
         }
     }
 
@@ -233,12 +226,12 @@ mod tests {
 
         // Only "alive" is running in the guest.
         let guest = FakeGuest::running(&["alive"]);
-        reconcile(&runtime, &guest).await.unwrap();
+        assert!(reconcile(&runtime, &guest).await.unwrap());
 
         let remaining = runtime.registered_container_ids().await;
         assert!(remaining.contains("alive"));
         assert!(!remaining.contains("dead"));
-        assert_eq!(guest.set_up(), Vec::<String>::new());
+        assert_eq!(guest.queries(), 1);
     }
 
     #[tokio::test]
@@ -258,7 +251,7 @@ mod tests {
             "alias-only containers must be visible to the reconciler"
         );
 
-        reconcile(&runtime, &FakeGuest::running(&[])).await.unwrap();
+        assert!(reconcile(&runtime, &FakeGuest::running(&[])).await.unwrap());
 
         assert!(runtime.registered_container_ids().await.is_empty());
         assert_eq!(
@@ -280,28 +273,95 @@ mod tests {
         assert!(result.is_err());
         // Nothing torn down, nothing set up, on a query failure.
         assert!(runtime.registered_container_ids().await.contains("c"));
-        assert_eq!(guest.set_up(), Vec::<String>::new());
+        assert_eq!(
+            runtime.container_dns_address("c.local"),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(guest.queries(), 1);
     }
 
-    /// A container the guest runs without the host knowing — started inside
-    /// the guest, or brought back by dockerd's restart policy after a VM
-    /// restart — gets its host networking set up.
     #[tokio::test]
-    async fn reconcile_sets_up_running_containers_the_host_does_not_know() {
+    async fn reconcile_refreshes_known_containers_and_registers_unknown_containers() {
         let (runtime, _tmp) = test_runtime();
         runtime
-            .register_dns(
-                "known",
-                &["known.local".into()],
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-            )
+            .register_container_dns(&network("known", "old", "172.17.0.2").metadata)
             .await;
 
-        let guest = FakeGuest::running(&["known", "restarted"]);
-        reconcile(&runtime, &guest).await.unwrap();
+        let mut guest = FakeGuest::running(&["known", "restarted"]);
+        guest.snapshot.as_mut().unwrap()[0] = network("known", "renamed", "172.17.0.3");
+        assert!(reconcile(&runtime, &guest).await.unwrap());
 
-        assert_eq!(guest.set_up(), ["restarted"]);
-        assert!(runtime.registered_container_ids().await.contains("known"));
+        assert_eq!(runtime.resolve_registered_container("old").await, None);
+        assert_eq!(
+            runtime
+                .resolve_registered_container("renamed")
+                .await
+                .as_deref(),
+            Some("known")
+        );
+        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(
+            runtime.container_dns_address("renamed.arcbox.local"),
+            Some("172.17.0.3".parse().unwrap())
+        );
+        assert!(
+            runtime
+                .registered_container_ids()
+                .await
+                .contains("restarted")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mutation_during_a_query_prevents_stale_publication_or_removal() {
+        let (runtime, _tmp) = test_runtime();
+        let guest = Arc::new(FakeGuest {
+            snapshot: Ok(vec![network("canonical", "stale", "172.17.0.2")]),
+            query_gate: Some((Notify::new(), Notify::new())),
+            ..FakeGuest::running(&[])
+        });
+        let task = tokio::spawn({
+            let (runtime, guest) = (Arc::clone(&runtime), Arc::clone(&guest));
+            async move { reconcile(&runtime, guest.as_ref()).await }
+        });
+        let (entered, release) = guest.query_gate.as_ref().unwrap();
+        entered.notified().await;
+        let mutation = runtime
+            .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+            .await
+            .unwrap();
+        let skipped = FakeGuest::running(&[]);
+        assert!(!reconcile(&runtime, &skipped).await.unwrap());
+        assert_eq!(skipped.queries(), 0);
+        for container in [
+            network("canonical", "current", "172.17.0.3"),
+            network("created", "new", "172.17.0.4"),
+        ] {
+            mutation
+                .commit(ContainerChange::Publish(
+                    &container.metadata,
+                    &container.bindings,
+                ))
+                .await
+                .unwrap();
+        }
+        drop(mutation);
+        release.notify_one();
+        assert!(!task.await.unwrap().unwrap());
+        assert_eq!(runtime.resolve_registered_container("stale").await, None);
+        for (name, id, ip) in [
+            ("current", "canonical", "172.17.0.3"),
+            ("new", "created", "172.17.0.4"),
+        ] {
+            assert_eq!(
+                runtime.resolve_registered_container(name).await.as_deref(),
+                Some(id)
+            );
+            assert_eq!(
+                runtime.container_dns_address(&format!("{name}.arcbox.local")),
+                Some(ip.parse().unwrap())
+            );
+        }
     }
 
     /// Lets the loop run until it parks again, advancing paused time by
@@ -327,15 +387,27 @@ mod tests {
             .await;
         let (vm_tx, vm) = watch::channel(VmLifecycleState::Running);
         let shutdown = CancellationToken::new();
+        let mutation = runtime
+            .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+            .await
+            .unwrap();
         let task = tokio::spawn({
             let (runtime, guest, shutdown) =
                 (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
             async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
         });
 
+        // A skipped commit must retain the short return cadence.
+        settle(RETURN_RETRY).await;
+        assert_eq!(guest.queries(), 0);
+        drop(mutation);
+        settle(RETURN_RETRY).await;
+        assert_eq!(guest.queries(), 1);
+
         // Steady state: the guest runs exactly what the host knows.
         settle(RECONCILE_INTERVAL * 2).await;
-        assert_eq!(guest.set_up(), Vec::<String>::new());
+        let queries = guest.queries();
+        assert!(queries >= 2);
         assert!(runtime.registered_container_ids().await.contains("web"));
 
         // The VM goes down: its containers' host state goes at once, and
@@ -344,13 +416,14 @@ mod tests {
         settle(Duration::ZERO).await;
         assert!(runtime.registered_container_ids().await.is_empty());
         settle(RECONCILE_INTERVAL * 2).await;
-        assert_eq!(guest.set_up(), Vec::<String>::new());
+        assert_eq!(guest.queries(), queries);
 
         // The VM returns: the container dockerd brought back is set up within
         // the short retry, not after a whole interval.
         vm_tx.send_replace(VmLifecycleState::Running);
         settle(RETURN_RETRY).await;
-        assert_eq!(guest.set_up(), ["web"]);
+        assert_eq!(guest.queries(), queries + 1);
+        assert!(runtime.registered_container_ids().await.contains("web"));
 
         shutdown.cancel();
         task.await.unwrap();

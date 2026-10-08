@@ -221,3 +221,5 @@ ContainerRegistry now uses the standard RwLock. DNS lookup, route validation, an
 ## Commit complete host container snapshots
 
 Cold recovery captures an idle host generation and physical VM before querying every running container. Publication rejects intervening mutations or VM replacement. Port work holds the shared commit lock; Registry and aliases publish together under the final Engine guard. An ordinary bind failure preserves healthy untouched listeners, but successful earlier listener work may remain. Serial Runtime passed 80 tests, mock Docker API passed 13, and scoped strict all-target Clippy and formatting passed. Shared writer generation and retirement/shutdown fencing remain pending.
+
+Periodic reconciliation now uses the same complete snapshot boundary and refreshes already-known containers. VM return keeps the short retry cadence until a snapshot actually commits. Six reconciler tests passed, including a held query invalidated by a newer mutation and unchanged host state after query failure. Strict scoped Clippy and formatting passed. Query cancellation and retained reconciler task ownership remain pending.

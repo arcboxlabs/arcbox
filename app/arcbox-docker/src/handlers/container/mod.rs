@@ -5,7 +5,6 @@ pub(super) mod lifecycle;
 use super::{proxy_to_system_vm, require_amd64_runtime};
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
-use crate::port_bindings::parse_port_bindings;
 use crate::routing::{query_param, route_container_create};
 use arcbox_dns::container::ContainerMetadata;
 use axum::body::Body;
@@ -259,62 +258,6 @@ pub async fn remove_container(
     }
 
     Ok(response)
-}
-
-/// Inspect a started container and configure port forwarding + DNS registration.
-///
-/// Sets up a running container's host networking from one inspect call: the
-/// name alias, port forwarding, and DNS. Used by host reconciliation.
-///
-/// # Errors
-/// Returns an error when inspect fails or lacks a valid container identity.
-pub async fn setup_container_networking(state: &AppState, container_id: &str) -> Result<()> {
-    let inspect = crate::guest_query::inspect_container(state.proxy.client(), container_id).await?;
-    state
-        .runtime
-        .register_container_dns(&inspect.metadata)
-        .await;
-    setup_port_forwarding_from_inspect(state, &inspect.metadata.id, &inspect.body).await;
-    Ok(())
-}
-
-/// Configures port forwarding from pre-fetched inspect JSON.
-async fn setup_port_forwarding_from_inspect(
-    state: &AppState,
-    canonical_id: &str,
-    body_bytes: &[u8],
-) {
-    let bindings = parse_port_bindings(body_bytes);
-    tracing::info!(
-        "Port forwarding: {} bindings for container {}",
-        bindings.len(),
-        canonical_id,
-    );
-    for b in &bindings {
-        tracing::info!(
-            "  bind {}:{} → container:{}/{}",
-            b.host_ip,
-            b.host_port,
-            b.container_port,
-            b.protocol,
-        );
-    }
-
-    let rules: Vec<_> = bindings.into_iter().map(Into::into).collect();
-
-    let machine_name = state.runtime.default_machine_name();
-    if let Err(e) = state
-        .runtime
-        .start_port_forwarding_for(machine_name, canonical_id, &rules)
-        .await
-    {
-        tracing::warn!(
-            utility_vm = "native",
-            "Failed to start port forwarding for {}: {}",
-            canonical_id,
-            e,
-        );
-    }
 }
 
 /// Extracts DNS aliases and IP address from Docker inspect JSON.
