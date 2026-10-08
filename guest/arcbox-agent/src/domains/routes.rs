@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use arcbox_local_ca::LOCAL_DOMAIN;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -23,7 +22,7 @@ const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptab
 pub(super) struct Routes {
     rules: TaggedRules,
     containers: HashMap<String, Tracked>,
-    /// Whether the domain permits managed HTTPS and proxy binding has not failed.
+    /// Whether managed HTTPS proxy binding has not failed.
     https: bool,
     services: WebServices,
 }
@@ -39,12 +38,10 @@ struct Tracked {
 
 impl Routes {
     pub(super) fn new(services: WebServices) -> Self {
-        let domain = services.domain.as_str();
-        let https = domain == LOCAL_DOMAIN || domain.ends_with(&format!(".{LOCAL_DOMAIN}"));
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
-            https,
+            https: true,
             services,
         }
     }
@@ -292,7 +289,7 @@ mod tests {
                                 "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
                             }
                         }),
-                        &services.domain,
+                        &Default::default(),
                     )
                     .unwrap()
                 })
@@ -352,39 +349,26 @@ mod tests {
     }
 
     #[test]
-    fn foreign_domains_keep_http_and_native_tls_without_managed_routes() {
-        for (domain, managed) in [
-            ("arcbox.local", true),
-            ("one.dev.arcbox.local", true),
-            ("containers.test", false),
-            ("evilarcbox.local", false),
-            ("arcbox.local.evil", false),
+    fn proxy_availability_controls_managed_routes() {
+        let routes = Routes::new(WebServices::default());
+        for (pin, native, expected) in [
+            (None, BTreeSet::new(), Some(HttpsBackend::Terminate(8080))),
+            (
+                None,
+                BTreeSet::from([8443]),
+                Some(HttpsBackend::Native(8443)),
+            ),
+            (
+                Some(Pin::Port(9443)),
+                BTreeSet::new(),
+                Some(HttpsBackend::Native(9443)),
+            ),
+            (Some(Pin::Off), BTreeSet::from([443]), None),
         ] {
-            let services = WebServices::new(domain.parse().unwrap(), Default::default());
-            let routes = Routes::new(services);
-            for (pin, native, expected) in [
-                (
-                    None,
-                    BTreeSet::new(),
-                    managed.then_some(HttpsBackend::Terminate(8080)),
-                ),
-                (
-                    None,
-                    BTreeSet::from([8443]),
-                    Some(HttpsBackend::Native(8443)),
-                ),
-                (
-                    Some(Pin::Port(9443)),
-                    BTreeSet::new(),
-                    Some(HttpsBackend::Native(9443)),
-                ),
-                (Some(Pin::Off), BTreeSet::from([443]), None),
-            ] {
-                let selected = SelectedRoutes::choose(Some(8080), pin, &native)
-                    .with_managed_https(routes.https);
-                assert_eq!(selected.http, Some(8080), "{domain}");
-                assert_eq!(selected.https, expected, "{domain}");
-            }
+            let selected =
+                SelectedRoutes::choose(Some(8080), pin, &native).with_managed_https(routes.https);
+            assert_eq!(selected.http, Some(8080));
+            assert_eq!(selected.https, expected);
         }
         let unavailable =
             SelectedRoutes::choose(Some(8080), None, &BTreeSet::new()).with_managed_https(false);

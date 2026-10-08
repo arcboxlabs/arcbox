@@ -33,7 +33,14 @@ fn configuration() -> Arc<rustls::ServerConfig> {
     )
 }
 
-async fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, port: u16) {
+async fn publish(
+    services: &WebServices,
+    dns: &ContainerRegistry,
+    owner: &str,
+    port: u16,
+    domain: &str,
+) {
+    let domain = domain.parse().unwrap();
     let inspect = serde_json::json!({
         "Id": owner, "Name": "/web", "State": { "Pid": 1 },
         "NetworkSettings": {
@@ -46,12 +53,12 @@ async fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, p
         .await
         .replace(
             owner.into(),
-            metadata.claims(&services.domain, "container").claims,
+            metadata.claims(&domain, "container").claims,
             Some(Ipv4Addr::LOCALHOST.into()),
         )
         .unwrap();
     services.publish(
-        &super::super::ContainerFacts::from_inspect(&inspect, &services.domain).unwrap(),
+        &super::super::ContainerFacts::from_inspect(&inspect, &domain).unwrap(),
         super::super::SelectedRoutes {
             http: Some(port),
             https: Some(super::super::HttpsBackend::Terminate(port)),
@@ -61,7 +68,7 @@ async fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, p
 
 async fn replace_owner(services: &WebServices, dns: &ContainerRegistry, port: u16) {
     dns.write().await.remove("a");
-    publish(services, dns, "b", port).await;
+    publish(services, dns, "b", port, "arcbox.local").await;
 }
 
 async fn head(stream: &mut (impl AsyncRead + Unpin)) -> String {
@@ -70,6 +77,54 @@ async fn head(stream: &mut (impl AsyncRead + Unpin)) -> String {
         bytes.push(stream.read_u8().await.unwrap());
     }
     String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
+    within(async {
+        let incoming = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = incoming.local_addr().unwrap();
+        let dns = ContainerRegistry::default();
+        let services = WebServices::new(dns.clone());
+        publish(&services, &dns, "a", 3000, "containers.test").await;
+        let observation = arcbox_connect::v1::ReconcileHttpsAccessRequest {
+            observation_id: "foreign".into(),
+            host_addresses: vec![Ipv4Addr::LOCALHOST.to_string()],
+            enabled: true,
+            ..Default::default()
+        };
+        services
+            .reconcile_https_access(observation.clone())
+            .unwrap();
+        let server = async {
+            let client = incoming.accept().await.unwrap().0;
+            relay_to(
+                client,
+                Ipv4Addr::LOCALHOST,
+                &services,
+                async |_| panic!("foreign SNI must not request a certificate"),
+                async |_| panic!("foreign SNI must not connect upstream"),
+            )
+            .await
+        };
+        let client = async {
+            let socket = TcpStream::connect(address).await.unwrap();
+            TlsConnector::from(super::super::probe::configuration())
+                .connect("web.containers.test".try_into().unwrap(), socket)
+                .await
+        };
+        let (server, client) = tokio::join!(server, client);
+        assert!(server.unwrap_err().to_string().contains("no managed route"));
+        assert!(client.is_err());
+        assert_eq!(
+            services
+                .reconcile_https_access(observation)
+                .unwrap()
+                .sequence,
+            0
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -87,8 +142,8 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
             let backend = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let port = backend.local_addr().unwrap().port();
             let dns = ContainerRegistry::default();
-            let services = WebServices::new(Default::default(), dns.clone());
-            publish(&services, &dns, "a", port).await;
+            let services = WebServices::new(dns.clone());
+            publish(&services, &dns, "a", port, "arcbox.local").await;
             let (configured, configuration_started) = oneshot::channel();
             let (configure, configuration_released) = oneshot::channel();
             let (connected, mut connection_started) = oneshot::channel();
@@ -168,7 +223,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
             } else if stage == "reinstalled" {
                 let revision = dns.read().await.get("a").unwrap().revision;
                 services.remove("a");
-                publish(&services, &dns, "a", port).await;
+                publish(&services, &dns, "a", port, "arcbox.local").await;
                 assert_eq!(dns.read().await.get("a").unwrap().revision, revision);
             }
             connect.send(()).unwrap();

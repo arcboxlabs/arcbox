@@ -1,4 +1,4 @@
-//! TLS termination for `https://<name>.arcbox.local`.
+//! TLS termination for currently owned, concrete `.local` names.
 //!
 //! Port 443 of each container with an HTTP port is REDIRECTed (nat
 //! PREROUTING) to [`PROXY_PORT`] in the VM's own namespace. The proxy reads

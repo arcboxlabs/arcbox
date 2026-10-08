@@ -211,7 +211,7 @@ non-obvious invariants and failure signatures.
   Automatic HTTP discovery requires a real HTTP response to a bounded `HEAD /`
   probe with the container domain in `Host`. An exposed or listening TCP port
   alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
-  Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Store canonical claims in `arcbox_dns::registry::Registry`, keyed by complete container ID. Outside the local CA namespace, serve HTTP and native TLS without managed HTTPS routes.
+  Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Store canonical claims in `arcbox_dns::registry::Registry`, keyed by complete container ID. Check the actual SNI name against the `.local` CA namespace before observation and certificate generation. The configured suffix must not disable a custom `.local` claim; foreign names retain HTTP and native TLS only.
   Native HTTPS discovery checks 443 then 8443 and takes precedence over the
   TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
   managed HTTPS routing. Native TLS preserves the application's certificate.

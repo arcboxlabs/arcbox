@@ -826,7 +826,7 @@ mod tests {
                 Some("172.17.0.2".parse().unwrap()),
             )
             .unwrap();
-        let services = WebServices::new(dns.domain().clone(), dns.containers());
+        let services = WebServices::new(dns.containers());
         let facts = ContainerFacts::from_inspect(
             &serde_json::json!({
                 "Id": "a", "Name": "/api", "State": { "Pid": 1 },
