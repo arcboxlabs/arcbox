@@ -3,8 +3,11 @@
 mod common;
 
 use std::process::Command;
+use std::time::Duration;
 
 use arcbox_helper::client::{Client, ClientError};
+use arcbox_helper::{HelperServiceRequest, HelperServiceResponse};
+use futures::{SinkExt, StreamExt};
 
 #[test]
 fn version_flag_reports_the_helper_version_on_stdout() {
@@ -88,4 +91,96 @@ fn helper_version_pins_are_aligned() {
 async fn connection_refused_when_no_server() {
     let err = Client::connect_to("/tmp/arcbox-helper-nonexistent.sock").await;
     assert!(matches!(err, Err(ClientError::Connection(_))));
+}
+
+type VersionTransport = tarpc::serde_transport::Transport<
+    tokio::net::UnixStream,
+    tarpc::ClientMessage<HelperServiceRequest>,
+    tarpc::Response<HelperServiceResponse>,
+    tarpc::tokio_serde::formats::Bincode<
+        tarpc::ClientMessage<HelperServiceRequest>,
+        tarpc::Response<HelperServiceResponse>,
+    >,
+>;
+
+async fn version_request(listener: tokio::net::UnixListener) -> (VersionTransport, u64) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
+    let mut transport = tarpc::serde_transport::new(
+        codec.new_framed(stream),
+        tarpc::tokio_serde::formats::Bincode::default(),
+    );
+    let tarpc::ClientMessage::Request(request) = transport.next().await.unwrap().unwrap() else {
+        panic!("expected version request");
+    };
+    assert!(matches!(request.message, HelperServiceRequest::Version {}));
+    (transport, request.id)
+}
+
+#[tokio::test]
+async fn owned_connect_releases_transport_after_rejection_or_cancellation() {
+    for rejected in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("helper.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let connecting =
+            tokio::spawn(async move { Client::connect_owned_to(path.to_str().unwrap()).await });
+        let (mut transport, request_id) = version_request(listener).await;
+        if rejected {
+            transport
+                .send(tarpc::Response {
+                    request_id,
+                    message: Ok(HelperServiceResponse::Version(
+                        "arcbox-helper broken".into(),
+                    )),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                connecting.await.unwrap(),
+                Err(ClientError::UnrecognizedVersion(_))
+            ));
+        } else {
+            connecting.abort();
+            assert!(connecting.await.is_err());
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(message) = transport.next().await {
+                assert!(matches!(
+                    message.unwrap(),
+                    tarpc::ClientMessage::Cancel { .. }
+                ));
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn owned_dispatch_reports_idle_eof_without_another_rpc() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("helper.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let connecting =
+        tokio::spawn(async move { Client::connect_owned_to(path.to_str().unwrap()).await });
+    let (mut transport, request_id) = version_request(listener).await;
+    transport
+        .send(tarpc::Response {
+            request_id,
+            message: Ok(HelperServiceResponse::Version(format!(
+                "arcbox-helper {}",
+                env!("CARGO_PKG_VERSION")
+            ))),
+        })
+        .await
+        .unwrap();
+    let (client, dispatch) = connecting.await.unwrap().unwrap();
+    drop(transport);
+    tokio::time::timeout(Duration::from_secs(2), dispatch)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(client.version().await.is_err());
 }

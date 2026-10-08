@@ -6,6 +6,7 @@
 
 use crate::HelperServiceClient;
 use crate::error::HelperError;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Errors from helper client operations.
 #[derive(Debug, thiserror::Error)]
@@ -45,10 +46,7 @@ impl Client {
     /// rejected before any mutation when the helper wire version is
     /// incompatible with this client.
     pub async fn connect() -> Result<Self, ClientError> {
-        let inner = crate::connect().await?;
-        let client = Self { inner };
-        client.ensure_compatible().await?;
-        Ok(client)
+        Self::connect_to(&crate::socket_path()).await
     }
 
     /// Connects to the helper daemon at an explicit socket path.
@@ -57,16 +55,33 @@ impl Client {
     /// `ARCBOX_HELPER_SOCKET` env var, making it safe for parallel tests. It
     /// enforces the same wire-version check as [`connect()`](Self::connect).
     pub async fn connect_to(path: &str) -> Result<Self, ClientError> {
+        let (client, dispatch) = Self::connect_owned_to(path).await?;
+        drop(dispatch.detach());
+        Ok(client)
+    }
+
+    /// Connects with dispatcher ownership retained through version verification.
+    /// Drop the client before awaiting the dispatcher during orderly shutdown.
+    pub async fn connect_owned_to(
+        path: &str,
+    ) -> Result<
+        (
+            Self,
+            AbortOnDropHandle<Result<(), tarpc::ChannelError<std::io::Error>>>,
+        ),
+        ClientError,
+    > {
         let transport = tarpc::serde_transport::unix::connect(
             path,
             tarpc::tokio_serde::formats::Bincode::default,
         )
         .await?;
-        let inner =
-            crate::HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn();
-        let client = Self { inner };
+        let tarpc::client::NewClient { client, dispatch } =
+            crate::HelperServiceClient::new(tarpc::client::Config::default(), transport);
+        let dispatch = AbortOnDropHandle::new(tokio::spawn(dispatch));
+        let client = Self { inner: client };
         client.ensure_compatible().await?;
-        Ok(client)
+        Ok((client, dispatch))
     }
 
     /// Connects only long enough to report the installed helper version.

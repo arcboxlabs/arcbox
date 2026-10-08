@@ -32,7 +32,7 @@ arcbox-constants.workspace = true
 arcbox-logging.workspace = true
 arcbox-route = { workspace = true }
 tracing = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 ipnetwork = "0.21.1"
 # Native code-signing peer authentication and CA trust need no ALPN feature.
 security-framework = { version = "3.7", default-features = false }
