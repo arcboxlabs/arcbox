@@ -417,3 +417,9 @@ Exact Linux 6.18.38 source shows that reading a task's syscall snapshot can wait
 A field-timed FIFO repetition completes all 60 probes without a long access. Review also finds that the added SCHED clock reads can take scheduler locks. The next probe retains only MONOTONIC timing around field access and preserves the previous version and its negative result. The [experiment](../experiments/2026-10-08-clickhouse-native-observer.md#procfs-access-can-perturb-the-target) documents these attribution limits. Production code remains unchanged.
 
 The MONOTONIC-only repetition also completes all 60 queries, with a maximum sweep of 14.401 milliseconds. Neither timing case identifies the earlier slow field. Both pass strict analysis and stop their clones. The owned daemon and helper are stopped, seed identities and retained binary hashes are verified, and the native evidence is retained in `clickhouse-native-2026-10-08`. The original incident remains unattributed.
+
+## Kernel event capture replaces periodic proc reads — 2026-10-08
+
+The [kernel-event experiment](../experiments/2026-10-08-clickhouse-kernel-events.md) boots a diagnostic kernel with the baseline accounting configuration and static scheduler, signal, and syscall events. A separate privileged sidecar records an isolated tracefs instance, freezes it on the first failed query, and exports evidence before stopping the application. The application retains its original capabilities. Two preparation failures expose and correct buffer-rounding and inherited identity-read assumptions; neither counts as an application result.
+
+The first valid marker-only control completes 60 queries without failure. Independent validation confirms runtime settings, contention, identities, trace completeness, and cleanup. Event-enabled capture remains to be validated; the original stall and its complete causal chain remain unresolved.

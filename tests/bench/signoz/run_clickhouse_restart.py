@@ -20,6 +20,8 @@ import time
 from urllib.parse import quote
 import uuid
 
+from clickhouse_trace import KernelTrace
+
 
 SECONDS = 300
 
@@ -150,8 +152,6 @@ def container_payload(seed, kind, prefix, network, volume):
     host = {key: copy.deepcopy(seed["HostConfig"][key]) for key in host_keys if seed["HostConfig"].get(key) is not None}
     host.update(NetworkMode=network, RestartPolicy={"Name": "no"}, Mounts=[volume_mount(volume, SEEDS[kind][4])])
     if kind == "ch":
-        # A verified EPERM denied cross-process syscall reads without this diagnostic capability.
-        host["CapAdd"] = ["SYS_PTRACE"]
         host["Mounts"].append(volume_mount(UDF_VOLUME, "/var/lib/clickhouse/user_scripts", True))
     payload.update(Image=seed["Image"], Labels={"arcbox.stall.experiment": prefix, "arcbox.stall.role": kind}, HostConfig=host, NetworkingConfig={"EndpointsConfig": {network: {"Aliases": [SEEDS[kind][0]]}}})
     return payload
@@ -186,19 +186,24 @@ def wait_for_clickhouse(output, name, started):
 def run(args):
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
-    observer_source = args.native_observer or Path(__file__).resolve().with_name("observe-clickhouse.sh")
-    observer_bytes = observer_source.read_bytes()
-    observer = output / "observer"
-    observer.write_bytes(observer_bytes)
-    observer.chmod(observer_source.stat().st_mode & 0o777)
-    observer_command = ["/tmp/stall-observe"] if args.native_observer else ["bash", "/tmp/stall-observe"]
-    observer_arguments = [args.observer_policy] if args.native_observer else []
-    (output / "observer.json").write_text(json.dumps({"path": str(observer_source.resolve()), "sha256": hashlib.sha256(observer_bytes).hexdigest(), "command": observer_command, "policy": args.observer_policy if args.native_observer else "other"}, indent=2) + "\n")
+    if args.kernel_trace is None:
+        observer_source = args.native_observer or Path(__file__).resolve().with_name("observe-clickhouse.sh")
+        observer_bytes = observer_source.read_bytes()
+        observer = output / "observer"
+        observer.write_bytes(observer_bytes)
+        observer.chmod(observer_source.stat().st_mode & 0o777)
+        observer_command = ["/tmp/stall-observe"] if args.native_observer else ["bash", "/tmp/stall-observe"]
+        observer_arguments = [args.observer_policy] if args.native_observer else []
+        (output / "observer.json").write_text(json.dumps({"path": str(observer_source.resolve()), "sha256": hashlib.sha256(observer_bytes).hexdigest(), "command": observer_command, "policy": args.observer_policy if args.native_observer else "other"}, indent=2) + "\n")
     (output / "fixture.json").write_text(json.dumps(FIXTURE, indent=2) + "\n")
     prefix = "stall-warm-" + args.case + "-" + uuid.uuid4().hex[:8]
     names = {kind: prefix + "-" + kind for kind in SEEDS}
     volumes = {kind: name + "-data" for kind, name in names.items()}
-    (output / "resources.json").write_text(json.dumps({"socket": SOCKET, "prefix": prefix, "containers": names, "volumes": volumes, "network": prefix, "case": args.case}, indent=2) + "\n")
+    trace = KernelTrace(sys.modules[__name__], output, prefix, args.kernel_trace) if args.kernel_trace is not None else None
+    resources = {"socket": SOCKET, "prefix": prefix, "containers": names, "volumes": volumes, "network": prefix, "case": args.case}
+    if trace is not None:
+        resources["tracer"] = trace.name
+    (output / "resources.json").write_text(json.dumps(resources, indent=2) + "\n")
     seeds = {}
     for kind, (name, identifier, image, volume, destination) in SEEDS.items():
         seed = api("GET", f"/containers/{name}/json")
@@ -230,6 +235,7 @@ def run(args):
     created = []
     sampler = None
     contention = None
+    guest_pid = None
     cleanup_errors = []
     with ExitStack() as streams:
         try:
@@ -242,6 +248,9 @@ def run(args):
             api("POST", "/networks/create", {"Name": prefix, "Labels": {"arcbox.stall.experiment": prefix}})
             for kind, seed in seeds.items():
                 payload = container_payload(seed, kind, prefix, prefix, volumes[kind])
+                if kind == "ch" and trace is None:
+                    # Cross-process syscall reads require this diagnostic capability.
+                    payload["HostConfig"]["CapAdd"] = ["SYS_PTRACE"]
                 if kind == "ch" and args.native_observer and args.observer_policy == "fifo":
                     payload["HostConfig"]["CapAdd"].append("SYS_NICE")
                 (output / (kind + "-create.json")).write_text(json.dumps(payload, indent=2) + "\n")
@@ -249,9 +258,12 @@ def run(args):
                 created.append(names[kind])
             for kind, path, destination in frozen_configs:
                 cli(output, kind + "-copy-" + path.name, ["cp", str(path), names[kind] + ":" + destination])
-            cli(output, "copy-observer", ["cp", str(observer), names["ch"] + ":/tmp/stall-observe"])
+            if trace is None:
+                cli(output, "copy-observer", ["cp", str(observer), names["ch"] + ":/tmp/stall-observe"])
             api("POST", f"/containers/{names['keeper']}/start")
             wait_for_keeper(output, names["keeper"])
+            if trace is not None:
+                trace.prepare(seeds["ch"]["Image"])
             start_target = None
             if args.case == "startup-contention":
                 scheduled = time.monotonic() + 1
@@ -281,12 +293,20 @@ def run(args):
             libc = cli(output, "libc-hash", ["exec", names["ch"], "sha256sum", "/lib/aarch64-linux-gnu/libc.so.6"])
             if libc["stdout"].split()[0] != LIBC_HASH:
                 raise RuntimeError("The running libc hash does not match the retained disassembly.")
-            cli(output, "identity", ["exec", "--user", "0", names["ch"], "cat", "/proc/1/maps", "/proc/1/status", "/proc/self/status", "/sys/fs/cgroup/cpu.max"])
+            identity_files = ["/proc/1/status", "/proc/self/status", "/sys/fs/cgroup/cpu.max"]
+            if trace is None:
+                identity_files.insert(0, "/proc/1/maps")
+            cli(output, "identity", ["exec", "--user", "0", names["ch"], "cat", *identity_files])
             cli(output, "query-prerequisites", ["exec", names["ch"], "bash", "-e", "-c", "command -v timeout; command -v clickhouse-client"])
-            cli(output, "proc-preflight", ["exec", "--user", "0", names["ch"], *observer_command, "1", *observer_arguments], timeout=10)
+            if trace is None:
+                cli(output, "proc-preflight", ["exec", "--user", "0", names["ch"], *observer_command, "1", *observer_arguments], timeout=10)
+                sampler = subprocess.Popen(DOCKER + ["exec", "--user", "0", names["ch"], *observer_command, "360", *observer_arguments], stdout=streams.enter_context((output / "proc-samples.txt").open("w")), stderr=streams.enter_context((output / "proc-samples.stderr").open("w")))
+            else:
+                guest_pid = api("GET", f"/containers/{names['ch']}/json")["State"]["Pid"]
+                cli(output, "runtime-settings", ["exec", names["ch"], "timeout", "--kill-after=1", "3", "clickhouse-client", "--query", "SELECT name,value FROM system.server_settings WHERE name IN ('global_profiler_real_time_period_ns','global_profiler_cpu_time_period_ns','background_schedule_pool_size') FORMAT JSONEachRow"], timeout=4)
+                trace.identity("before", guest_pid)
             if time.monotonic() - started >= 30:
                 raise RuntimeError("Observation setup missed the 30-second contention boundary.")
-            sampler = subprocess.Popen(DOCKER + ["exec", "--user", "0", names["ch"], *observer_command, "360", *observer_arguments], stdout=streams.enter_context((output / "proc-samples.txt").open("w")), stderr=streams.enter_context((output / "proc-samples.stderr").open("w")))
             if args.case == "contention":
                 contention = start_contention(output, streams, started + 30)
                 event(output, "contention_scheduled", pid=contention.pid, start_seconds=30, end_seconds=90, workers=36)
@@ -294,7 +314,7 @@ def run(args):
             query_number = 0
             while time.monotonic() - started < SECONDS:
                 elapsed = time.monotonic() - started
-                if sampler.poll() is not None:
+                if sampler is not None and sampler.poll() is not None:
                     raise RuntimeError(f"The independent proc observer exited early: {sampler.returncode}.")
                 if contention is not None and contention.poll() not in (None, 0):
                     raise RuntimeError(f"The bounded contention supervisor failed: {contention.returncode}.")
@@ -302,11 +322,19 @@ def run(args):
                     # The guest timeout bounds the client after a host-side Docker timeout.
                     record = cli(output, f"query-{query_number:03}", ["exec", names["ch"], "timeout", "--kill-after=1", "3", "clickhouse-client", "--connect_timeout", "1", "--receive_timeout", "2", "--send_timeout", "2", "--query", "SELECT 1 SETTINGS max_execution_time=1, max_threads=1"], timeout=4, check=False)
                     event(output, "query", number=query_number, since_start_seconds=elapsed, returncode=record.get("returncode"), timeout_seconds=record.get("timeout_seconds"), seconds=record["seconds"])
+                    if trace is not None and record.get("returncode") != 0:
+                        trace.freeze(f"query-{query_number:03}")
                     query_number += 1
                     next_query = started + 5 * (int((time.monotonic() - started) / 5) + 1)
                 time.sleep(0.05)
             event(output, "observation_complete", elapsed_seconds=time.monotonic() - started)
         finally:
+            if trace is not None and trace.created:
+                try:
+                    trace.collect(guest_pid)
+                except Exception as error:
+                    cleanup_errors.append(f"kernel trace: {error}")
+                created.append(trace.name)
             if contention is not None:
                 try:
                     terminate_owned([contention])
@@ -314,6 +342,7 @@ def run(args):
                     cleanup_errors.append(f"contention supervisor: {error}")
             for name in created:
                 try:
+                    event(output, "container_stop_requested", container=name)
                     api("POST", f"/containers/{name}/stop?t=10", timeout=25)
                 except Exception as error:
                     cleanup_errors.append(f"{name} stop: {error}")
@@ -342,7 +371,9 @@ if __name__ == "__main__":
         parser.add_argument("--fixture", type=Path, required=True, help="Verified stopped-seed identities, config hashes, and Docker socket")
         parser.add_argument("--case", choices=("control", "contention", "startup-contention"), required=True)
         parser.add_argument("--output", type=Path, required=True)
-        parser.add_argument("--native-observer", type=Path, help="Static Linux observe_clickhouse binary; adds SYS_NICE for FIFO sampling")
+        observer_mode = parser.add_mutually_exclusive_group()
+        observer_mode.add_argument("--native-observer", type=Path, help="Static Linux observe_clickhouse binary; adds SYS_NICE for FIFO sampling")
+        observer_mode.add_argument("--kernel-trace", choices=("off", "on"), help="Replace proc polling with an isolated tracefs recorder; off records markers only")
         parser.add_argument("--observer-policy", choices=("fifo", "other"), default="fifo", help="Scheduling policy for the native observer")
         args = parser.parse_args()
         FIXTURE = json.loads(args.fixture.read_text())

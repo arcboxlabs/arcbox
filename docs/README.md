@@ -77,6 +77,7 @@ from memory. Every new file is added to the index below.
 ### Experiments
 
 - [2026-10-08 — Does ClickHouse still stall with a low-cost observer?](experiments/2026-10-08-clickhouse-native-observer.md) — [native observer](../tests/bench/signoz/observe_clickhouse.c)
+- [2026-10-08 — Can kernel events retain the ClickHouse stall path?](experiments/2026-10-08-clickhouse-kernel-events.md) — [recorder controller](../tests/bench/signoz/clickhouse_trace.py), [guest helper](../tests/bench/signoz/trace-clickhouse.sh)
 - [2026-10-08 — Can host CPU contention stall real ClickHouse threads?](experiments/2026-10-08-clickhouse-restart-contention.md) — [procfs reader probe](../tests/bench/signoz/probe_status_read.sh), [reader checks](../tests/bench/signoz/analyze_status_read.py)
 - [2026-10-08 — Can a delayed waiter block a condition-variable notifier?](experiments/2026-10-08-condvar-notification-latency.md) — [combined probe](../tests/bench/signoz/cond_scheduler_latency.c), [host driver](../tests/bench/signoz/run_cond_scheduler.py), [evidence checks](../tests/bench/signoz/analyze_cond_scheduler.py)
 - [2026-10-08 — Which task clock charges host suspension?](experiments/2026-10-08-thread-cpu-accounting.md)
