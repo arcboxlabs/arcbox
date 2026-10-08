@@ -44,3 +44,32 @@ macOS persists both members of the generated key pair. Cleanup verifies and remo
 - Native Admin trust authorization, the browser flow, and a signed build containing these changes remain unverified. Rotation orchestration and the Desktop renewal action are still pending.
 
 The failed early cleanup probe left one isolated public key and certificate. An exact-reference cleanup verified the profile label, public-key hash, full certificate SHA-256, absent private key, and absent User/Admin trust before deleting those two items. The empty temporary directory was removed. No production root or trust setting changed.
+
+## Rotation orchestration and renewal
+
+The CLI now exposes `abctl tls rotate`. Prepare and commit RPCs dispatch to one daemon worker with a bounded queue. The worker holds the profile lock through identity mutation, signer activation, and status publication. Shutdown waits for accepted work. The CLI releases its lock before each daemon RPC and holds the lock through native authorization and revocation.
+
+The CLI compares the daemon's exact previous and candidate DER with the recorded pair before authorizing trust. The expected fingerprint pins the currently visible root, including the candidate after an interrupted commit. A retry reuses the recorded pair. Desktop renews through the CLI, checks the resulting certificate validity and trust, and acknowledges the confirmed root. A valid root retains the renewal action so an interrupted commit remains recoverable.
+
+The following checks passed after connecting the complete command path:
+
+- `devenv shell cargo test -p arcbox-local-ca -p arcbox-api -p arcbox-daemon -p arcbox-cli --lib --bins`: 314 passed; 11 native local CA tests excluded.
+- `devenv shell cargo clippy -p arcbox-local-ca -p arcbox-api -p arcbox-daemon -p arcbox-cli --all-targets -- -D warnings` and `devenv shell cargo fmt --all --check`: passed. Cargo reported the existing dependency future-incompatibility notice for `proc-macro-error2 2.0.1`.
+- Four isolated Keychain rotation tests passed without installing trust. The tests cover candidate reuse, interrupted preparation, missing prepared identities, and partially deleted previous identities.
+- Desktop client generation, `make format`, and `make lint`: passed. The focused `LocalHttpsModelTests`, `LocalHttpsAccessModelTests`, and `LocalHttpsAccessTests` run passed 34 tests. The earlier two full-suite window-frame failures remain unresolved; this run does not establish a passing full Desktop suite.
+
+## Canceled native trust validation
+
+The ignored test `keychain::tests::rotation::native_rotation_rejects_old_trust_and_resumes_publication_and_partial_cleanup` installed TLS-server Admin trust for three isolated roots. Revoking the previous root then returned Security status `-60006` (authorization canceled). The original fixture retried revocation while unwinding, received the same cancellation, and aborted. This test did not pass. Production certificates were not changed.
+
+Read-only inspection confirmed the following residual certificates. Each has one login Keychain public key, certificate, and private key, plus Admin trust. None has User trust or a System Keychain certificate copy.
+
+| Temporary profile | Identity | SHA-256 |
+|---|---|---|
+| `.tmpUwX1qT` | Previous root | `794612FA08726BB06AD266567BAB688DC3FC1798A8BFE910C90E53782D2B36AC` |
+| `.tmpUwX1qT` | Candidate | `C9F08EC76F42AA99D6C654E971B5A9F3C5D500512CDE66F922B629886A83DF78` |
+| `.tmp4gk50q` | Independent profile | `6E4522DFBF8CA16757F07B5E892785439195C2ECBF313E9863D72697E8B5735B` |
+
+The revised fixture retains its directory immediately and saves each root's public DER before trust mutation. Its destructor only reports recovery paths and fingerprints. Explicit success cleanup verifies that every retained root is untrusted before deleting identities. A filesystem regression confirms that a panic preserves the journal and public DER. The revised native test has not been retried.
+
+An exact-reference cleanup script passed Swift type checking and read-only inspection. Applying cleanup awaits renewed user authorization because revocation was canceled. The script verifies full fingerprints, key labels and public-key hashes, journal bytes, and a file whitelist. Cancellation stops immediately. Identity deletion starts only after all three roots have no User or Admin trust.

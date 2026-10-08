@@ -43,6 +43,13 @@ abctl daemon stop               # Stop daemon
 abctl info                      # System info
 abctl version                   # Version info
 
+# Local HTTPS trust (macOS login session)
+abctl tls status --json          # Inspect the profile's certificate and native trust
+abctl tls trust                  # Authorize HTTPS through the macOS prompt
+abctl tls rotate                 # Replace the CA and migrate trust through the running daemon
+abctl tls repair                 # Restore only the current public certificate file
+abctl tls untrust                # Revoke trust while containers keep running
+
 # Docker storage checks and recovery
 abctl disk check                # Stop the System VM, preserve disks, check offline, leave stopped
 abctl disk recover              # Preserve and check disks, then restart and verify writes
@@ -60,6 +67,8 @@ kubectl get nodes
 # Run containers through Docker CLI
 docker run hello-world
 ```
+
+Run TLS commands as the logged-in user. `tls rotate` requires a running daemon and resumes any pending rotation. The command authorizes the replacement before revoking the old CA, then asks the daemon to publish the replacement. Cancelling authorization before old-CA revocation preserves the original public certificate. `tls trust`, `tls repair`, and `tls rotate` accept `--expected-fingerprint` to pin the current certificate shown by `tls status`.
 
 ## Output formats
 
@@ -92,6 +101,7 @@ reclaimable fields to `null`, reports the query error, and exits nonzero.
 - `0`: command succeeded.
 - `1`: an `abctl` operation or daemon connection failed.
 - `2`: command-line arguments were invalid.
+- `130`: native authorization was cancelled during a TLS command.
 - Remote commands (`machine exec`, `sandbox run` / `exec`, and `claude`) propagate the
   command's exit status; sandbox signal exits use the shell convention `128 + signal`.
 

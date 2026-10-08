@@ -5,6 +5,7 @@
 //! The daemon owns the private key. This process publishes public bytes after
 //! revoking a previous root. Explicit commands also work for development profiles.
 //! Repair restores the current public root without creating a key or changing trust.
+//! Rotation authorizes the replacement before revoking the old root and committing in the daemon.
 //! A supplied fingerprint pins the public certificate before any write or trust change.
 //! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
@@ -16,6 +17,8 @@ use arcbox_constants::paths::{HostLayout, guest};
 use arcbox_helper::client::Client;
 use arcbox_local_ca::{KeychainAuthority, PublicAuthority, lock_profile};
 use clap::Subcommand;
+
+mod rotation;
 
 /// Local CA commands.
 #[derive(Debug, Subcommand)]
@@ -29,6 +32,12 @@ pub enum TlsCommands {
     /// Restore the current Keychain CA's public file without changing trust
     Repair {
         /// Restore only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
+    /// Replace the profile's CA and migrate system HTTPS trust
+    Rotate {
+        /// Replace only the certificate with this SHA-256 fingerprint
         #[arg(long)]
         expected_fingerprint: Option<String>,
     },
@@ -73,11 +82,12 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
         );
         return Ok(());
     }
+    if matches!(cmd, TlsCommands::Rotate { .. }) {
+        return rotation::execute(&tls_dir, &cmd).await;
+    }
     let _operation = lock_profile(&tls_dir)?;
 
-    let der = KeychainAuthority::existing_certificate(&tls_dir)?
-        .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
-    let authority = PublicAuthority::try_from(der)?;
+    let authority = current_authority(&tls_dir)?;
     check_fingerprint(&cmd, &authority.fingerprint_sha256())?;
     if matches!(cmd, TlsCommands::Repair { .. }) {
         authority.repair_publication(&tls_dir)?;
@@ -88,27 +98,14 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
         println!("CA SHA-256: {}", authority.fingerprint_sha256());
         return Ok(());
     }
-    ensure!(
-        authority
-            .validity()
-            .is_valid_at(std::time::SystemTime::now().into()),
-        "the local CA is outside its validity period; rotate the CA before authorizing HTTPS"
-    );
+    require_valid(&authority)?;
     let client = Client::connect().await?;
     if let Some(previous) = published_authority(&tls_dir)?
         && previous.der() != authority.der()
     {
         revoke(&client, &previous).await?;
     }
-    client.ca_install(authority.der()).await?;
-    arcbox_local_ca::remove_user_trust_der(authority.der())
-        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
-    authority
-        .trust_admin()
-        .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
-    let legacy_user_trust = authority.has_user_trust()?;
-    let trusted = client.ca_status(authority.der()).await? && !legacy_user_trust;
-    ensure!(trusted, "system HTTPS trust was not installed");
+    authorize(&client, &authority).await?;
     ensure!(
         authority.publish(&tls_dir)? == arcbox_local_ca::Publication::Published,
         "the previous local CA still has trust; revoke it before publishing this CA"
@@ -126,6 +123,9 @@ fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
     }
     | TlsCommands::Repair {
         expected_fingerprint: Some(expected),
+    }
+    | TlsCommands::Rotate {
+        expected_fingerprint: Some(expected),
     } = cmd
     {
         ensure!(
@@ -133,6 +133,36 @@ fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
             "the local CA changed since HTTPS was requested; refresh its status and try again"
         );
     }
+    Ok(())
+}
+
+fn current_authority(tls_dir: &Path) -> Result<PublicAuthority> {
+    let der = KeychainAuthority::existing_certificate(tls_dir)?
+        .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
+    Ok(PublicAuthority::try_from(der)?)
+}
+
+fn require_valid(authority: &PublicAuthority) -> Result<()> {
+    ensure!(
+        authority
+            .validity()
+            .is_valid_at(std::time::SystemTime::now().into()),
+        "the local CA is outside its validity period; rotate the CA before authorizing HTTPS"
+    );
+    Ok(())
+}
+
+async fn authorize(client: &Client, authority: &PublicAuthority) -> Result<()> {
+    client.ca_install(authority.der()).await?;
+    arcbox_local_ca::remove_user_trust_der(authority.der())
+        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    authority
+        .trust_admin()
+        .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
+    let trusted = authority.admin_trusted()?
+        && !authority.has_user_trust()?
+        && client.ca_status(authority.der()).await?;
+    ensure!(trusted, "system HTTPS trust was not installed");
     Ok(())
 }
 
@@ -187,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trust_and_repair_reject_stale_or_partial_fingerprints() {
+    fn trust_repair_and_rotate_reject_stale_or_partial_fingerprints() {
         let current = "AB:CD:".repeat(10) + "EF:01";
         for expected in [
             "",
@@ -200,6 +230,9 @@ mod tests {
                     expected_fingerprint: Some(expected.into()),
                 },
                 TlsCommands::Repair {
+                    expected_fingerprint: Some(expected.into()),
+                },
+                TlsCommands::Rotate {
                     expected_fingerprint: Some(expected.into()),
                 },
             ] {
