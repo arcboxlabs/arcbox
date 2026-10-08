@@ -1,13 +1,33 @@
 //! Public URLs derived from the guest's installed web routes.
 
 use arcbox_connect::v1::{
-    ContainerWebService, WebService, container_web_service::HttpsBackend, web_service::HttpsMode,
+    ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
+    container_web_service::HttpsBackend, web_service::HttpsMode,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::Runtime;
 use crate::error::{CoreError, Result};
 
 impl Runtime {
+    /// Renews the guest's leased observation of managed HTTPS access from the Mac.
+    /// The caller must cancel through the token and await completion, including connection setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guest cannot be reached or rejects the observation.
+    pub async fn reconcile_https_access(
+        &self,
+        request: ReconcileHttpsAccessRequest,
+        cancelled: &CancellationToken,
+    ) -> Result<ReconcileHttpsAccessResponse> {
+        self.connect_system_agent()
+            .await?
+            .reconcile_https_access(request, cancelled)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Lists container web services with their current DNS names and installed routes.
     ///
     /// # Errors

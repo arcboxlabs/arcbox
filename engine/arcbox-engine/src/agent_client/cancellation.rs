@@ -75,7 +75,7 @@ impl AgentClient {
         .await
     }
 
-    async fn cancellable<T: Send + 'static, F: Future<Output = Result<T>>>(
+    pub(super) async fn cancellable<T: Send + 'static, F: Future<Output = Result<T>>>(
         self,
         cancelled: &CancellationToken,
         blocking: impl FnOnce(Self) -> Result<T> + Send + 'static,
@@ -111,7 +111,7 @@ impl AgentClient {
 }
 
 fn cancelled_error() -> EngineError {
-    EngineError::Machine("storage recovery cancelled during daemon shutdown".into())
+    EngineError::Machine("agent RPC cancelled".into())
 }
 
 #[cfg(test)]
