@@ -7,6 +7,7 @@ use crate::api::AppState;
 use crate::error::{DockerError, Result};
 use crate::port_bindings::parse_port_bindings;
 use crate::routing::{query_param, route_container_create};
+use arcbox_dns::container::ContainerMetadata;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::{Request, Uri};
@@ -419,51 +420,13 @@ async fn setup_port_forwarding_from_inspect(
 ///
 /// For plain containers, returns `["container_name"]`.
 ///
-/// Falls back through `/NetworkSettings/IPAddress` → per-network IPs.
+/// Uses the first valid IPv4 address in lexicographic network-name order.
+/// Requires a nonempty inspect ID and name; legacy top-level addresses are ignored.
 pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(Vec<String>, IpAddr)> {
-    let v: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
-    let name = v.get("Name")?.as_str()?.trim_start_matches('/').to_string();
-
-    if name.is_empty() {
-        return None;
-    }
-
-    // Primary: top-level IPAddress.
-    let ip_str = v
-        .pointer("/NetworkSettings/IPAddress")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        // Fallback: first non-empty IP from Networks map.
-        .or_else(|| {
-            v.pointer("/NetworkSettings/Networks")?
-                .as_object()?
-                .values()
-                .find_map(|net| net.get("IPAddress")?.as_str().filter(|s| !s.is_empty()))
-        })?;
-
-    // Build DNS aliases from compose labels when available.
-    let aliases = match v.pointer("/Config/Labels").and_then(|l| l.as_object()) {
-        Some(labels) => {
-            let project = labels
-                .get("com.docker.compose.project")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let service = labels
-                .get("com.docker.compose.service")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            match (project, service) {
-                // Compose: service-level hierarchical + flat container name.
-                (Some(proj), Some(svc)) => {
-                    vec![format!("{svc}.{proj}"), name]
-                }
-                _ => vec![name],
-            }
-        }
-        None => vec![name],
-    };
-
-    Some((aliases, ip_str.parse().ok()?))
+    let inspect: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
+    let container = ContainerMetadata::from_inspect(&inspect)?;
+    let ip = container.primary_ipv4()?;
+    Some((container.default_aliases(), ip.into()))
 }
 
 /// Rename a container and update its DNS entry.

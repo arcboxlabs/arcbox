@@ -40,6 +40,7 @@ tar = "0.4.46"
 base64 = "0.22.1"
 arcbox-local-ca.workspace = true
 percent-encoding = "2.3.2"
+arcbox-dns.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

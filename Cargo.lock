@@ -640,6 +640,7 @@ version = "0.8.2"
 dependencies = [
  "arcbox-connect",
  "arcbox-core",
+ "arcbox-dns",
  "arcbox-error",
  "arcbox-local-ca",
  "arcbox-transport",

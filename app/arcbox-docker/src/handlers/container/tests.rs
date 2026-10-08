@@ -126,8 +126,7 @@ fn test_extract_container_dns_info_plain() {
         "Id": "abc123",
         "Name": "/my-nginx",
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2",
-            "Networks": {}
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
@@ -148,8 +147,7 @@ fn test_extract_container_dns_info_compose() {
             }
         },
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2",
-            "Networks": {}
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
@@ -159,12 +157,12 @@ fn test_extract_container_dns_info_compose() {
 }
 
 #[test]
-fn test_extract_container_dns_info_network_fallback() {
+fn test_extract_container_dns_info_ignores_stale_top_level_address() {
     let json = serde_json::json!({
         "Id": "abc123",
         "Name": "/web-app",
         "NetworkSettings": {
-            "IPAddress": "",
+            "IPAddress": "192.0.2.99",
             "Networks": {
                 "bridge": {
                     "IPAddress": "172.18.0.3"
@@ -176,6 +174,48 @@ fn test_extract_container_dns_info_network_fallback() {
     let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
     assert_eq!(aliases, vec!["web-app"]);
     assert_eq!(ip, "172.18.0.3".parse::<IpAddr>().unwrap());
+}
+
+#[test]
+fn test_extract_container_dns_info_rejects_top_level_only_address() {
+    let json = serde_json::json!({
+        "Id": "abc123",
+        "Name": "/web-app",
+        "NetworkSettings": { "IPAddress": "172.17.0.2" }
+    });
+    let bytes = serde_json::to_vec(&json).unwrap();
+    assert!(extract_container_dns_info(&bytes).is_none());
+}
+
+#[test]
+fn test_extract_container_dns_info_selects_networks_in_name_order() {
+    let mut networks = [
+        ("z-bridge", "172.17.0.2"),
+        ("a-invalid", "invalid"),
+        ("b-ipv6", "2001:db8::1"),
+        ("m-app", "172.18.0.3"),
+    ];
+    for _ in 0..2 {
+        let network_map: serde_json::Map<_, _> = networks
+            .iter()
+            .map(|(name, address)| {
+                (
+                    (*name).to_owned(),
+                    serde_json::json!({ "IPAddress": address }),
+                )
+            })
+            .collect();
+        let json = serde_json::json!({
+            "Id": "abc123",
+            "Name": "/web-app",
+            "NetworkSettings": { "Networks": network_map }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
+        assert_eq!(aliases, ["web-app"]);
+        assert_eq!(ip, "172.18.0.3".parse::<IpAddr>().unwrap());
+        networks.reverse();
+    }
 }
 
 #[test]
@@ -202,7 +242,7 @@ fn test_extract_container_dns_info_no_name() {
     let json = serde_json::json!({
         "Id": "abc123",
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2"
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();

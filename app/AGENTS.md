@@ -525,6 +525,8 @@ above). When editing either side, keep in lockstep:
   restart through one pool.
 - A malformed `/containers/json` response must fail the query, including a missing or empty container ID.
   Only a valid empty array permits reconciliation to remove every registered container.
+- Use `arcbox_dns::container::ContainerMetadata` for Docker inspect identity, default aliases, and IPv4 selection.
+  The primary address is the first valid IPv4 address in network-name order; ignore the deprecated top-level `NetworkSettings.IPAddress`.
 
 ## Host port forwarding & image pull (`arcbox-docker`)
 

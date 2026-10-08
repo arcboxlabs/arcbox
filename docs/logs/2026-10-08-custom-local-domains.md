@@ -53,3 +53,9 @@ Six metadata regressions passed within the DNS crate's 39 passing tests. Strict 
 The guest now confirms a successful Docker event subscription and complete response headers before listing running containers. It retains the reader and consumes events buffered during that listing. Subscription or listing errors propagate to the existing reconnect loop. The guest GET helper rejects unsuccessful HTTP status codes, including HTTP 500 with an otherwise valid empty JSON array.
 
 Five host-executed socket and event tests passed. Strict all-target Clippy passed for the Linux musl guest target. The socket tests exercise the production ordering function without a VM, iptables, or scheduler-dependent worker cancellation. They verify that an incomplete subscription does not start the listing, buffered events survive the listing, and failed listings return while the event stream stays open. Removing owners that disappeared during a disconnected interval still requires the full-ID registry work. VM execution remains unverified.
+
+## Host metadata adoption
+
+All host Docker registration paths now use `ContainerMetadata` through the existing inspect adapter. Start, restart, rename, network changes, recovery, and reconciliation share the same alias and primary-address rules. The adapter no longer reads the deprecated top-level address, including when that field disagrees with the current network addresses.
+
+All 133 Docker library tests and seven API mock tests passed. Strict all-target Clippy, workspace formatting, and the layer check passed; the layer check covers 65 members and 190 edges with two existing exceptions. Regression coverage rejects a top-level-only address and verifies stable selection with multiple networks and invalid or IPv6-only entries. The dependency change adds only the existing workspace DNS crate. Full-ID replacement and production claim selection remain unfinished.
