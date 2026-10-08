@@ -117,6 +117,10 @@ port labels describe configured routes and do not guarantee application health.
 The HTTPS proxy accepts a TLS SNI name only when guest DNS currently resolves
 that name to the container address the client dialled. Unknown names and names
 owned by a different container fail before the agent requests a certificate.
+
+Leaf certificates renew after three quarters of their actual remaining validity.
+Concurrent requests for the same domain share one signing operation. The cache
+holds up to 256 domains and evicts idle entries without interrupting TLS sessions.
 The agent tries port 80, then exposed listeners, then other listeners in
 ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
 to a port number to override discovery, or `off` to disable managed HTTP.

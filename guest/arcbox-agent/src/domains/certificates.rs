@@ -1,20 +1,20 @@
 //! Leaf keys stay here; the host returns certificates over a parked vsock.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+mod cache;
+
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use arcbox_local_ca::CertificateRequest;
+use arcbox_local_ca::{CertificateRequest, CertificateValidity};
 use tokio_rustls::rustls::ServerConfig;
 
-const RENEW_AFTER: Duration = Duration::from_secs(23 * 24 * 60 * 60);
-const MAX_CACHED: usize = 256;
+use self::cache::{Cache, Cached};
 
 pub(super) struct Certificates {
     #[cfg(target_os = "linux")]
     listener: tokio::sync::Mutex<tokio_vsock::VsockListener>,
-    cache: Mutex<HashMap<String, (SystemTime, Arc<ServerConfig>)>>,
+    cache: Cache,
 }
 
 impl Certificates {
@@ -27,35 +27,24 @@ impl Certificates {
         Ok(Self {
             #[cfg(target_os = "linux")]
             listener: tokio::sync::Mutex::new(listener),
-            cache: Mutex::default(),
+            cache: Cache::default(),
         })
     }
 
     pub(super) async fn configuration(&self, name: &str) -> Result<Arc<ServerConfig>> {
         let name = name.to_ascii_lowercase();
-        let now = SystemTime::now();
-        if let Some((created, config)) = self
-            .cache
-            .lock()
-            .expect("certificate cache poisoned")
-            .get(&name)
-        {
-            if now
-                .duration_since(*created)
-                .is_ok_and(|age| age < RENEW_AFTER)
-            {
-                return Ok(Arc::clone(config));
-            }
-        }
-        let request = CertificateRequest::new(&name)?;
+        self.cache.configuration(&name, self.issue(&name)).await
+    }
+
+    async fn issue(&self, name: &str) -> Result<Cached> {
+        let request = CertificateRequest::new(name)?;
         let certificate = self.sign(request.der()).await?;
-        let config = Arc::new(request.complete(certificate)?);
-        let mut cache = self.cache.lock().expect("certificate cache poisoned");
-        if cache.len() >= MAX_CACHED {
-            cache.clear();
-        }
-        cache.insert(name, (now, Arc::clone(&config)));
-        Ok(config)
+        let validity = CertificateValidity::from_der(&certificate)?;
+        Cached::new(
+            Arc::new(request.complete(certificate)?),
+            validity,
+            SystemTime::now(),
+        )
     }
 
     #[cfg(target_os = "linux")]

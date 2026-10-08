@@ -226,6 +226,8 @@ non-obvious invariants and failure signatures.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a
   certificate. A name must resolve to the connection's original destination IP.
+  `domains/certificates/cache.rs` bounds leaf reuse by the certificate's actual
+  validity and serializes signing per name. Never evict an active signing slot.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.
