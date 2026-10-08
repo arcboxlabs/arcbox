@@ -22,6 +22,8 @@ use crate::rpc::{
     write_response,
 };
 
+#[cfg(test)]
+mod instance_authority_tests;
 mod readiness;
 
 use super::disk::handle_disk_trim;
@@ -46,7 +48,7 @@ enum RequestResult {
 pub(super) async fn handle_connection<S>(
     mut stream: S,
     guest: Guest,
-    web_services: &crate::domains::WebServices,
+    services: &crate::agent::Services,
     peer_cid: u32,
 ) -> Result<()>
 where
@@ -156,6 +158,21 @@ where
 
         // Parse and handle the request.
         let result = match parse_request(msg_type, &payload) {
+            Ok(RpcRequest::OpenInstanceAuthority(_)) => {
+                if guest == Guest::SystemVm
+                    && peer_cid == tokio_vsock::VMADDR_CID_HOST
+                    && let Some(authority) = &services.authority
+                {
+                    return authority.serve(&mut stream, &trace_id).await;
+                }
+                RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "instance authority requires the host and System VM services",
+                )))
+            }
+            Ok(RpcRequest::ReplaceInstanceAuthority(_)) => {
+                anyhow::bail!("instance replacement requires an open authority connection");
+            }
             Ok(RpcRequest::WatchReadiness(req)) => {
                 readiness::watch(&mut stream, req, &trace_id, guest).await?;
                 continue;
@@ -189,7 +206,7 @@ where
                 }
                 return Ok(());
             }
-            Ok(request) => handle_request(request, guest, web_services).await,
+            Ok(request) => handle_request(request, guest, &services.web).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
                 RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
@@ -228,6 +245,9 @@ async fn handle_request(
     web_services: &crate::domains::WebServices,
 ) -> RequestResult {
     match request {
+        RpcRequest::OpenInstanceAuthority(_) | RpcRequest::ReplaceInstanceAuthority(_) => {
+            unreachable!("instance authority owns the connection")
+        }
         RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
         RpcRequest::ReconcileHttpsAccess(request) => {
@@ -567,7 +587,7 @@ mod recovery_tests {
             handle_connection(
                 server,
                 Guest::StorageRecovery,
-                &crate::domains::WebServices::default(),
+                &crate::agent::Services::default(),
                 tokio_vsock::VMADDR_CID_HOST,
             )
             .await
@@ -600,7 +620,7 @@ mod recovery_tests {
             handle_connection(
                 server,
                 Guest::StorageRecovery,
-                &crate::domains::WebServices::default(),
+                &crate::agent::Services::default(),
                 tokio_vsock::VMADDR_CID_HOST,
             )
             .await
@@ -668,7 +688,7 @@ mod storage_check_tests {
                 handle_connection(
                     server,
                     guest,
-                    &crate::domains::WebServices::default(),
+                    &crate::agent::Services::default(),
                     tokio_vsock::VMADDR_CID_HOST,
                 )
                 .await
@@ -715,7 +735,13 @@ mod tests {
         ] {
             let (mut client, server) = tokio::io::duplex(4096);
             let task = tokio::spawn(async move {
-                handle_connection(server, Guest::SystemVm, &WebServices::default(), cid).await
+                handle_connection(
+                    server,
+                    Guest::SystemVm,
+                    &crate::agent::Services::default(),
+                    cid,
+                )
+                .await
             });
             let request = ReconcileHttpsAccessRequest {
                 observation_id: "wire-test".into(),
@@ -795,6 +821,7 @@ mod tests {
             );
         }
         let (mut client, server) = tokio::io::duplex(4096);
+        let services = crate::agent::Services::system(services, dns.containers());
         let task = tokio::spawn(async move {
             handle_connection(
                 server,

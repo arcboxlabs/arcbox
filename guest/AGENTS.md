@@ -231,6 +231,7 @@ non-obvious invariants and failure signatures.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
   Construct guest DNS with the shared builtin reservations. Forward unresolved exact system/index names to the existing gateway; keep other reservations local. Descendants remain independent.
   Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before sandbox fallback. Preserve internal resource lookup when no instance root matches.
+  System VM `agent::Services` shares that Registry with the exclusive host authority connection. Its unique session guard revokes known roots synchronously before releasing the connection slot. Every later source revision creates a lifetime barrier, including identical root snapshots.
   Keep ContainerRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
   Keep readiness streaming in `agent/linux/rpc/readiness.rs`; the dispatcher owns connection routing and preserves the recovery guest restrictions.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.

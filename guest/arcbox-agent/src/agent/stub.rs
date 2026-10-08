@@ -22,11 +22,7 @@ impl Agent {
     ///
     /// On non-Linux platforms (e.g., macOS), vsock is not available.
     /// This stub allows development and testing on the host.
-    pub async fn run(
-        &self,
-        _guest: Guest,
-        _web_services: crate::domains::WebServices,
-    ) -> Result<()> {
+    pub async fn run(&self, _guest: Guest, _services: super::Services) -> Result<()> {
         tracing::warn!("Agent is running in stub mode (non-Linux platform)");
         tracing::info!("Agent would listen on vsock port {}", AGENT_PORT);
 

@@ -15,15 +15,17 @@ use arcbox_connect::v1::{
     AgentPingRequest as PingRequest, AgentPingResponse as PingResponse, ContainerFsPathsRequest,
     ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, Empty, EnsureMachineExportRequest,
     EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
-    ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
-    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
-    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
-    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, ListContainerWebServicesRequest, ListContainerWebServicesResponse,
-    MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
-    PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
+    ImageFsPathsRequest, ImageFsPathsResponse, InstanceAuthorityAck, KubernetesDeleteRequest,
+    KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, ListContainerWebServicesRequest,
+    ListContainerWebServicesResponse, MemoryPressureEvent, MmapReadFileRequest,
+    MmapReadFileResponse, OpenInstanceAuthorityRequest, OpenInstanceAuthorityResponse,
+    PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, ReplaceInstanceAuthorityRequest, RuntimeEnsureRequest,
+    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
+    ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
     WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
     WatchStorageHealthRequest,
 };
@@ -78,6 +80,8 @@ pub enum RpcRequest {
     GetSystemInfo,
     ListContainerWebServices(ListContainerWebServicesRequest),
     ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
+    OpenInstanceAuthority(OpenInstanceAuthorityRequest),
+    ReplaceInstanceAuthority(ReplaceInstanceAuthorityRequest),
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
     StartKubernetes(KubernetesStartRequest),
@@ -109,6 +113,8 @@ pub enum RpcResponse {
     SystemInfo(SystemInfo),
     ListContainerWebServices(ListContainerWebServicesResponse),
     ReconcileHttpsAccess(ReconcileHttpsAccessResponse),
+    OpenInstanceAuthority(OpenInstanceAuthorityResponse),
+    InstanceAuthorityAck(InstanceAuthorityAck),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
     KubernetesStart(KubernetesStartResponse),
@@ -143,6 +149,8 @@ impl RpcResponse {
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
             Self::ListContainerWebServices(_) => MessageType::ListContainerWebServicesResponse,
             Self::ReconcileHttpsAccess(_) => MessageType::ReconcileHttpsAccessResponse,
+            Self::OpenInstanceAuthority(_) => MessageType::OpenInstanceAuthorityResponse,
+            Self::InstanceAuthorityAck(_) => MessageType::InstanceAuthorityAck,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
             Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
@@ -176,6 +184,8 @@ impl RpcResponse {
             Self::SystemInfo(msg) => msg.encode_to_vec(),
             Self::ListContainerWebServices(msg) => msg.encode_to_vec(),
             Self::ReconcileHttpsAccess(msg) => msg.encode_to_vec(),
+            Self::OpenInstanceAuthority(msg) => msg.encode_to_vec(),
+            Self::InstanceAuthorityAck(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesStart(msg) => msg.encode_to_vec(),
@@ -289,6 +299,12 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
 /// Parses an RPC request from message type and payload.
 pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest> {
     match msg_type {
+        MessageType::OpenInstanceAuthorityRequest => Ok(RpcRequest::OpenInstanceAuthority(
+            OpenInstanceAuthorityRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::ReplaceInstanceAuthorityRequest => Ok(RpcRequest::ReplaceInstanceAuthority(
+            ReplaceInstanceAuthorityRequest::decode_from_slice(payload)?,
+        )),
         MessageType::PingRequest => {
             let req = PingRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::Ping(req))

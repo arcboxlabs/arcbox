@@ -12,6 +12,7 @@ use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
 mod exec_error;
+mod instance_authority;
 #[cfg(any(target_os = "linux", test))]
 mod login_session;
 #[cfg(any(target_os = "linux", test))]
@@ -75,10 +76,30 @@ impl Guest {
     }
 }
 
+/// Runtime services shared across agent connections; only the System VM owns DNS authority.
+#[derive(Clone, Default)]
+pub struct Services {
+    web: crate::domains::WebServices,
+    authority: Option<instance_authority::Receiver>,
+}
+
+impl Services {
+    /// Connects System VM services to the DNS registry used by container routing.
+    pub fn system(
+        web: crate::domains::WebServices,
+        registry: crate::dns_server::ContainerRegistry,
+    ) -> Self {
+        Self {
+            web,
+            authority: Some(instance_authority::Receiver::new(registry)),
+        }
+    }
+}
+
 /// Runs the agent for `guest`.
-pub async fn run(guest: Guest, web_services: crate::domains::WebServices) -> Result<()> {
+pub async fn run(guest: Guest, services: Services) -> Result<()> {
     let agent = Agent::new();
-    agent.run(guest, web_services).await
+    agent.run(guest, services).await
 }
 
 #[cfg(test)]

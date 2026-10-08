@@ -300,7 +300,7 @@ mod tests {
             super::super::rpc::handle_connection(
                 server,
                 crate::agent::Guest::SystemVm,
-                &crate::domains::WebServices::default(),
+                &crate::agent::Services::default(),
                 tokio_vsock::VMADDR_CID_HOST,
             )
             .await

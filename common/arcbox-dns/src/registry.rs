@@ -146,6 +146,14 @@ impl Registry {
         true
     }
 
+    /// Revokes known roots and starts a new authority lifetime, even without active roots.
+    pub fn invalidate_instance_authorities(&mut self) {
+        for instance in &mut self.instances {
+            instance.target = InstanceTarget::Unavailable;
+        }
+        self.authority_revision = self.advance();
+    }
+
     /// Returns the owner's complete registration, including an unavailable resource.
     #[must_use]
     pub fn get(&self, owner: &str) -> Option<&Registration> {
