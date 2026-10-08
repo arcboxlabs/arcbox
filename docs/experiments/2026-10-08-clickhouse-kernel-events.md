@@ -53,3 +53,20 @@ Both failures preserve their command results, partial traces, final container st
 `events-off-03` completes 300 seconds with 60 successful queries and no failure. Runtime settings report both profiler periods as 10000000000 ns and the background pool as 512. All 36 host workers terminate; contention starts 1.080 ms after its target and finishes 6.356 ms after the scheduled end. The marker-only guest window spans 926.408403–1224.934759. All 18 buffers have zero overrun, commit-overrun, dropped events, and read events; their counters remain stable during export. Both identity snapshots contain 713 threads. Independent offline validation passes, and all three containers stop after export.
 
 This control is a negative application result. It does not rule out intermittent stalls or establish the cost of enabling events. The events-on arm still requires a completed, validated capture.
+
+## First completed events-on capture
+
+`events-on-01` also completes all 60 queries. Its 18 CPU buffers retain 6,732,869 events, including all 15 selected event kinds and five control markers. Every overrun, commit-overrun, dropped-event, and read-event counter is zero. The guest analysis window spans 1404.267918–1702.637915, or 298.369997 seconds. Both identity snapshots again contain 713 threads, and all three containers stop after export. Host contention starts 4.650 ms after its target and finishes 13.041 ms after its scheduled end.
+
+| Case | Query successes / failures | Median host command time | Maximum host command time |
+|---|---:|---:|---:|
+| events-off-03 | 60 / 0 | 52.200 ms | 107.355 ms |
+| events-on-01 | 60 / 0 | 57.651 ms | 190.722 ms |
+
+These command times include Docker exec and client startup. Sequential single cases cannot establish tracing overhead. Neither case logs the earlier lock-delay or Keeper-expiry warnings; both log a merge cancellation during shutdown. No application stall has been attributed by this pair.
+
+The [offline validator](../../tests/bench/signoz/validate_clickhouse_trace.py) checks ownership, helper hash, kernel configuration, runtime settings, identities, contention, query results, stop ordering, trace configuration, per-CPU counters, and retained window bounds. Its first on-case parse rejected Linux's `sys_futex(...)` and `sys_futex -> ...` display forms. The corrected parser normalizes those documented enter/exit forms to their configured event names and retains strict rejection of unknown events. The first rejection is preserved separately; it was a parser defect, not evidence of lost events. Both completed captures pass the corrected validator.
+
+```sh
+python3 tests/bench/signoz/validate_clickhouse_trace.py /absolute/completed-case on 2ba51fc323186f9a6c2cd10de093ff46677efba2bd461e8ccfd6e55b8ea3b236
+```
