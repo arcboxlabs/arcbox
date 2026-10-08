@@ -5,6 +5,7 @@ use arcbox_connect::v1::{
     container_web_service::HttpsBackend, web_service::HttpsMode,
 };
 use arcbox_constants::dns::Domain;
+use arcbox_dns::registry::Lookup;
 use tokio_util::sync::CancellationToken;
 
 use super::Runtime;
@@ -12,31 +13,36 @@ use crate::error::{CoreError, Result};
 
 impl Runtime {
     /// Authorizes a local FQDN for signing and returns its container DNS registration revision.
-    /// A new registration changes the revision even when the owner and address are unchanged.
+    /// Identical registrations preserve the revision; removal and effective changes invalidate it.
     pub async fn https_signing_revision(&self, fqdn: &str) -> Option<u64> {
-        let domain = self.network_manager.dns_domain()?;
-        let hostname = fqdn.strip_suffix(&format!(".{domain}"))?;
-        let entries = self.dns_entries.read().await;
-        let (owner, entry) = entries
-            .iter()
-            .filter(|(_, entry)| {
-                entry
-                    .hostnames
-                    .iter()
-                    .any(|name| name == hostname || name == fqdn)
-            })
-            .max_by_key(|(_, entry)| entry.revision)?;
-        if !Self::is_container_dns_owner(owner) {
-            return None;
-        }
-        (self
-            .network_manager
-            .local_hosts_table()
+        let name = fqdn.parse::<Domain>().ok()?;
+        let registry = self
+            .dns_registry
             .read()
-            .expect("local DNS hosts lock poisoned")
-            .get(fqdn)
-            == Some(&entry.ip))
-        .then_some(entry.revision)
+            .expect("DNS registry lock poisoned");
+        match registry.resolve(&name) {
+            Lookup::Matched {
+                claim, revision, ..
+            } if Self::is_container_dns_owner(claim.owner()) => Some(revision),
+            _ => None,
+        }
+    }
+
+    /// Returns the selected container address for a current, conflict-free DNS name.
+    pub fn container_dns_address(&self, fqdn: &str) -> Option<std::net::IpAddr> {
+        let name = fqdn.parse::<Domain>().ok()?;
+        let registry = self
+            .dns_registry
+            .read()
+            .expect("DNS registry lock poisoned");
+        match registry.resolve(&name) {
+            Lookup::Matched { claim, address, .. }
+                if Self::is_container_dns_owner(claim.owner()) =>
+            {
+                Some(address)
+            }
+            _ => None,
+        }
     }
 
     /// Renews the guest's leased observation of managed HTTPS access from the Mac.
@@ -150,7 +156,7 @@ mod tests {
         let ip = "10.0.2.3".parse().unwrap();
         let aliases = [
             "web".into(),
-            "web.demo".into(),
+            "web.demo.arcbox.local".into(),
             "absolute.arcbox.local".into(),
         ];
         runtime.register_dns("first", &aliases, ip).await;
@@ -165,22 +171,21 @@ mod tests {
 
         runtime.register_dns("first", &aliases, ip).await;
         let renewed = runtime.https_signing_revision(name).await.unwrap();
-        assert_ne!(renewed, first);
+        assert_eq!(renewed, first);
         runtime.register_dns("second", &["web".into()], ip).await;
-        let second = runtime.https_signing_revision(name).await.unwrap();
-        assert_ne!(second, renewed);
+        assert_eq!(runtime.https_signing_revision(name).await, None);
+        runtime.deregister_dns_by_id("second").await;
         for owner in ["sandbox:other", "machine:other", "system:host"] {
             runtime.register_dns(owner, &["web".into()], ip).await;
             assert_eq!(runtime.https_signing_revision(name).await, None, "{owner}");
             runtime.deregister_dns_by_id(owner).await;
-            assert_eq!(runtime.https_signing_revision(name).await, Some(second));
+            assert_eq!(runtime.https_signing_revision(name).await, Some(first));
         }
-        runtime.deregister_dns_by_id("second").await;
         assert_eq!(runtime.https_signing_revision(name).await, Some(renewed));
         runtime
             .network_manager()
             .register_dns("web", "10.0.2.4".parse().unwrap());
-        assert_eq!(runtime.https_signing_revision(name).await, None);
+        assert_eq!(runtime.https_signing_revision(name).await, Some(first));
         runtime.deregister_dns_by_id("first").await;
         assert_eq!(runtime.https_signing_revision(name).await, None);
     }
@@ -281,7 +286,7 @@ mod tests {
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
             .await;
         let renewed = runtime.https_signing_revision(name).await.unwrap();
-        assert_ne!(renewed, first);
+        assert_eq!(renewed, first);
         runtime.deregister_dns_by_id("container").await;
         assert_eq!(runtime.https_signing_revision(name).await, None);
     }

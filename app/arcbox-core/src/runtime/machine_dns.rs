@@ -13,8 +13,7 @@
 //!
 //! `MachineManager::create` refuses a name whose hostname another machine
 //! already has, so two running machines sharing a label can only be ones
-//! created before that rule; the table then answers for the one that
-//! started last, and the registration says so.
+//! created before that rule; their conflicting claims withdraw the shared name.
 
 use std::net::IpAddr;
 
@@ -42,8 +41,7 @@ impl Runtime {
                 machine,
                 hostname,
                 other_machine = other,
-                "two machines share one hostname; the name now answers for the one that \
-                 started last — rename one of them"
+                "two machines share one hostname; rename one to resolve the DNS conflict"
             );
         }
         self.register_dns(&Self::machine_dns_owner(machine), &[hostname], ip)
@@ -58,16 +56,19 @@ impl Runtime {
         hostname: &str,
     ) -> Option<String> {
         let own = Self::machine_dns_owner(machine);
-        self.dns_entries
+        let registry = self
+            .dns_registry
             .read()
-            .await
-            .iter()
-            .filter(|(owner, _)| **owner != own)
-            .find(|(owner, entry)| {
+            .expect("DNS registry lock poisoned");
+        registry.owners()
+            .filter(|owner| *owner != own)
+            .find(|owner| {
                 owner.starts_with(MACHINE_DNS_OWNER_PREFIX)
-                    && entry.hostnames.iter().any(|name| name == hostname)
+                    && registry.get(owner).expect("registry owners are registered").claims.iter().any(|claim| {
+                        matches!(claim.pattern(), arcbox_dns::NamePattern::Exact(name) if name.as_str() == hostname)
+                    })
             })
-            .and_then(|(owner, _)| owner.strip_prefix(MACHINE_DNS_OWNER_PREFIX))
+            .and_then(|owner| owner.strip_prefix(MACHINE_DNS_OWNER_PREFIX))
             .map(str::to_owned)
     }
 
@@ -79,10 +80,10 @@ impl Runtime {
 
     /// The machines whose names are currently published.
     pub async fn registered_machine_dns_names(&self) -> Vec<String> {
-        self.dns_entries
+        self.dns_registry
             .read()
-            .await
-            .keys()
+            .expect("DNS registry lock poisoned")
+            .owners()
             .filter_map(|owner| owner.strip_prefix(MACHINE_DNS_OWNER_PREFIX))
             .map(str::to_owned)
             .collect()

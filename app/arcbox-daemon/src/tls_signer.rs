@@ -162,8 +162,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_dns_ownership_discards_the_in_flight_signature() {
-        for replacement in [None, Some("replacement"), Some("container")] {
+    async fn signing_requires_an_unchanged_effective_dns_registration() {
+        for (owner, address, removed) in [
+            (None, "10.0.2.3", true),
+            (Some("replacement"), "10.0.2.3", false),
+            (Some("container"), "10.0.2.4", false),
+            (Some("container"), "10.0.2.3", true),
+            (Some("container"), "10.0.2.3", false),
+        ] {
             let (runtime, _directory) = runtime().await;
             let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
             let (host, guest) = tokio::io::duplex(1024);
@@ -182,22 +188,28 @@ mod tests {
             let request = CertificateRequest::new("web.arcbox.local").unwrap();
             guest.send(request.der().to_vec().into()).await.unwrap();
             signing.await.unwrap();
-            if let Some(owner) = replacement {
-                runtime
-                    .register_dns(owner, &["web".into()], "10.0.2.3".parse().unwrap())
-                    .await;
-            } else {
+            if removed {
                 runtime.deregister_dns_by_id("container").await;
             }
+            if let Some(owner) = owner {
+                runtime
+                    .register_dns(owner, &["web".into()], address.parse().unwrap())
+                    .await;
+            }
             finish.send(()).unwrap();
-            assert!(
-                task.await
-                    .unwrap()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("DNS ownership changed during signing")
-            );
-            assert!(guest.next().await.is_none());
+            let result = task.await.unwrap();
+            if owner == Some("container") && address == "10.0.2.3" && !removed {
+                result.unwrap();
+                assert_eq!(&guest.next().await.unwrap().unwrap()[..], &[1]);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("DNS ownership changed during signing")
+                );
+                assert!(guest.next().await.is_none());
+            }
         }
     }
 

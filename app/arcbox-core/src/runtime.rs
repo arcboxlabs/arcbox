@@ -35,7 +35,7 @@ use arcbox_connect::v1::{
     ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
-use arcbox_dns::container::ContainerMetadata;
+use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
 use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
@@ -47,8 +47,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(not(target_os = "macos"))]
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as TokioRwLock};
@@ -143,12 +142,6 @@ type InboundRulesMap =
 #[cfg(target_os = "macos")]
 type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerManager>>>;
 
-struct DnsRegistration {
-    hostnames: Vec<String>,
-    ip: IpAddr,
-    revision: u64,
-}
-
 struct KubernetesHostEndpoint {
     port: u16,
     context_name: String,
@@ -213,9 +206,8 @@ pub struct Runtime {
     /// Generation fence for cleanup racing RPC-created host state.
     /// ponytail: keep one fence until unrelated cleanup retries are measurable.
     sandbox_host_state: TokioMutex<u64>,
-    /// Tracks DNS owner → registered hostnames and IP.
-    dns_entries: Arc<TokioRwLock<HashMap<String, DnsRegistration>>>,
-    dns_revision: AtomicU64,
+    /// Authoritative resource claims, addresses, and revisions shared with DNS consumers.
+    dns_registry: Arc<RwLock<Registry>>,
     /// Maps a container's unique name to its canonical ID, so teardown can
     /// resolve the name/short-ID a client used without a guest inspect
     /// round-trip. Populated at registration, updated on rename, cleared with
@@ -380,8 +372,7 @@ impl Runtime {
             kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
-            dns_entries: Arc::new(TokioRwLock::new(HashMap::new())),
-            dns_revision: AtomicU64::new(0),
+            dns_registry: Arc::default(),
             container_aliases: Arc::new(TokioRwLock::new(HashMap::new())),
             stats_hub,
             machine_stats_hubs: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -1795,12 +1786,12 @@ impl Runtime {
         }
 
         let dns_owners: Vec<_> = self
-            .dns_entries
+            .dns_registry
             .read()
-            .await
-            .keys()
+            .expect("DNS registry lock poisoned")
+            .owners()
             .filter(|owner| owner.starts_with("sandbox:"))
-            .cloned()
+            .map(str::to_owned)
             .collect();
         for owner in dns_owners {
             self.deregister_dns_by_id(&owner).await;
@@ -1872,68 +1863,57 @@ impl Runtime {
             && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
     }
 
-    /// Registers a container's name and DNS aliases from one validated inspect snapshot.
+    /// Replaces a container's claims from one validated inspect, including address loss.
     pub async fn register_container_dns(&self, container: &ContainerMetadata) {
         self.register_container_alias(&container.name, &container.id)
             .await;
-        if let Some(ip) = container.primary_ipv4() {
-            self.register_dns(&container.id, &container.default_aliases(), ip.into())
-                .await;
+        let claims = container.claims(&self.config.network.dns_domain, "container");
+        for warning in claims.warnings {
+            tracing::warn!(container_id = %container.id, %warning, "container DNS claim rejected");
         }
+        self.replace_dns_registration(
+            &container.id,
+            claims.claims,
+            container.primary_ipv4().map(IpAddr::V4),
+        );
     }
 
-    /// Registers DNS entries for a container.
-    ///
-    /// Maps each hostname in `hostnames` to `ip` so the host can reach the
-    /// container by name. Also tracks the `container_id → hostnames` mapping
-    /// for cleanup.
+    /// Registers exact resource names; bare labels also receive the configured domain suffix.
+    /// Invalid names are reported individually without discarding other valid claims.
     pub async fn register_dns(&self, container_id: &str, hostnames: &[String], ip: IpAddr) {
-        let hostnames: Vec<_> = hostnames
-            .iter()
-            .map(|hostname| hostname.to_ascii_lowercase())
-            .collect();
-        let mut entries = self.dns_entries.write().await;
-        let previous = entries.insert(
-            container_id.to_string(),
-            DnsRegistration {
-                hostnames: hostnames.clone(),
-                ip,
-                revision: self.dns_revision.fetch_add(1, Ordering::Relaxed),
-            },
-        );
-        if let Some(previous) = previous {
-            for hostname in previous
-                .hostnames
-                .iter()
-                .filter(|hostname| !hostnames.contains(hostname))
-            {
-                self.restore_dns_hostname(&entries, hostname);
+        let authority = container_id
+            .split_once(':')
+            .map_or("container", |(kind, _)| kind);
+        let mut claims = Vec::new();
+        for hostname in hostnames {
+            let hostname = hostname.to_ascii_lowercase();
+            let qualified = (!hostname.contains('.'))
+                .then(|| format!("{hostname}.{}", self.config.network.dns_domain));
+            for name in std::iter::once(hostname).chain(qualified) {
+                match name.parse() {
+                    Ok(name) => claims.push(Claim::exclusive(
+                        NamePattern::Exact(name),
+                        container_id.into(),
+                        authority.into(),
+                    )),
+                    Err(error) => {
+                        tracing::warn!(container_id, %name, %error, "resource DNS claim rejected");
+                    }
+                }
             }
         }
-        // Ownership is authoritative before the synchronous DNS mutation, so
-        // cancellation can never leave an unenumerable hostname.
-        for hostname in &hostnames {
-            self.network_manager.register_dns(hostname, ip);
-        }
-        drop(entries);
-        tracing::info!(
-            container_id,
-            ?hostnames,
-            %ip,
-            "DNS entries registered",
-        );
+        self.replace_dns_registration(container_id, claims, Some(ip));
     }
 
-    fn restore_dns_hostname(&self, entries: &HashMap<String, DnsRegistration>, hostname: &str) {
-        if let Some(owner) = entries
-            .values()
-            .filter(|entry| entry.hostnames.iter().any(|name| name == hostname))
-            .max_by_key(|entry| entry.revision)
-        {
-            self.network_manager.register_dns(hostname, owner.ip);
-        } else {
-            self.network_manager.deregister_dns(hostname);
-        }
+    fn replace_dns_registration(&self, owner: &str, claims: Vec<Claim>, address: Option<IpAddr>) {
+        let mut registry = self
+            .dns_registry
+            .write()
+            .expect("DNS registry lock poisoned");
+        registry
+            .replace(owner.into(), claims, address)
+            .expect("runtime claims retain their registration owner");
+        self.network_manager.replace_dns_projection(&registry);
     }
 
     /// Maps canonical container ID → display name, inverting the registered
@@ -1978,20 +1958,13 @@ impl Runtime {
             .write()
             .await
             .retain(|_, id| id != container_id);
-        let mut entries = self.dns_entries.write().await;
-        let Some(registration) = entries.remove(container_id) else {
-            return;
-        };
-
-        for hostname in &registration.hostnames {
-            self.restore_dns_hostname(&entries, hostname);
+        let mut registry = self
+            .dns_registry
+            .write()
+            .expect("DNS registry lock poisoned");
+        if registry.remove(container_id) {
+            self.network_manager.replace_dns_projection(&registry);
         }
-        drop(entries);
-        tracing::info!(
-            container_id,
-            hostnames = ?registration.hostnames,
-            "DNS entries deregistered"
-        );
     }
 
     /// Returns the set of container IDs that currently hold host-side
@@ -2005,12 +1978,12 @@ impl Runtime {
     /// otherwise every ephemeral `--rm` run would leak one alias forever.
     pub async fn registered_container_ids(&self) -> std::collections::HashSet<String> {
         let mut ids: std::collections::HashSet<String> = self
-            .dns_entries
+            .dns_registry
             .read()
-            .await
-            .keys()
+            .expect("DNS registry lock poisoned")
+            .owners()
             .filter(|owner| Self::is_container_dns_owner(owner))
-            .cloned()
+            .map(str::to_owned)
             .collect();
         ids.extend(self.container_aliases.read().await.values().cloned());
         ids.extend(self.listener_owner_keys(Self::is_container_owner).await);
