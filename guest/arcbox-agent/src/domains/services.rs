@@ -73,6 +73,7 @@ impl TlsRoute {
             claim,
             address,
             revision,
+            ..
         } = dns.resolve(&name)
         else {
             return None;
@@ -351,6 +352,32 @@ mod tests {
             snapshot[0].https_backend,
             Some(HttpsBackend::NativeHttpsPort(8443))
         );
+    }
+
+    #[tokio::test]
+    async fn instance_reacquisition_invalidates_a_pinned_tls_route() {
+        use arcbox_dns::registry::{InstanceAuthority, InstanceTarget};
+        let ip = Ipv4Addr::new(172, 17, 0, 2);
+        let services = WebServices::default();
+        register(&services, "a", &["web"], ip, "arcbox.local").await;
+        let route = services.tls_route("web.arcbox.local", ip).await.unwrap();
+        for target in [InstanceTarget::Unavailable, InstanceTarget::Current] {
+            services
+                .dns
+                .write()
+                .await
+                .replace_instance_authorities(vec![InstanceAuthority {
+                    root: "arcbox.local".parse().unwrap(),
+                    target,
+                }]);
+            assert!(
+                services
+                    .verify_tls_route("web.arcbox.local", ip, &route)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(services.tls_route("web.arcbox.local", ip).await.is_some());
     }
 
     #[tokio::test(start_paused = true)]

@@ -152,6 +152,7 @@ distribution".
   Replace the complete owner registration; identical replacements preserve the revision and epoch.
   Retain owners without addresses, but exclude their claims from selection.
   Effective replacement or removal advances the epoch; removal and reinsertion must not reuse a revision.
+  Resolve the longest instance root before resource claims. Keep helper transport epochs outside the Registry. Effective instance changes advance the shared epoch and invalidate resolution revisions; identical snapshots do not.
 - `container::ContainerMetadata` reads Docker identity, aliases, and addresses from one inspect snapshot.
   Choose the primary IPv4 address by network name, independent of JSON map order.
   Use `NetworkSettings.Networks`; the deprecated top-level address is not authoritative.

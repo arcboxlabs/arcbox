@@ -21,7 +21,7 @@ pub use arcbox_dns::DnsRecordType;
 use arcbox_dns::LocalHostsTable;
 use arcbox_dns::{
     NamePattern,
-    registry::{Lookup, Registry},
+    registry::{InstanceTarget, Lookup, Registry},
 };
 
 use crate::error::{NetError, Result};
@@ -303,7 +303,10 @@ impl DnsForwarder {
                 return self.build_local_response(query, address).ok();
             }
             Lookup::Conflict => return arcbox_dns::build_servfail(data).ok(),
-            Lookup::Reserved(_) => {
+            Lookup::Instance { authority, .. } if authority.target != InstanceTarget::Current => {
+                return arcbox_dns::build_servfail(data).ok();
+            }
+            Lookup::Reserved(_) | Lookup::Instance { .. } => {
                 return if local_nodata {
                     Some(Self::build_nodata_response(query))
                 } else {
@@ -1157,5 +1160,57 @@ mod tests {
             forwarder.try_resolve_locally_or_nodata(&query).is_none(),
             "old default domain should not be handled after domain change"
         );
+    }
+
+    #[test]
+    fn instance_authority_precedes_local_records_and_external_forwarding() {
+        use arcbox_dns::registry::InstanceAuthority;
+        let forwarder = DnsForwarder::new(DnsConfig::default());
+        let claims = arcbox_dns::claims::Claim::generated(
+            "known.custom.local".parse().unwrap(),
+            "known".into(),
+            "test".into(),
+        );
+        forwarder
+            .registry
+            .write()
+            .unwrap()
+            .replace("known".into(), claims.into(), Some([10, 0, 2, 3].into()))
+            .unwrap();
+        for target in [
+            InstanceTarget::Current,
+            InstanceTarget::Other { port: 5354 },
+            InstanceTarget::Unavailable,
+        ] {
+            forwarder
+                .registry
+                .write()
+                .unwrap()
+                .replace_instance_authorities(vec![InstanceAuthority {
+                    root: "custom.local".parse().unwrap(),
+                    target,
+                }]);
+            for qtype in [1, 28, 64, 65, 65_280] {
+                let query = build_test_query_type("missing.custom.local", qtype);
+                for nodata in [false, true] {
+                    let query_parsed = DnsQuery::parse(&query).unwrap();
+                    let response = forwarder
+                        .local_response(&query, &query_parsed, nodata)
+                        .unwrap();
+                    let expected = if target != InstanceTarget::Current {
+                        2
+                    } else if nodata {
+                        0
+                    } else {
+                        3
+                    };
+                    assert_eq!(response[3] & 15, expected);
+                }
+            }
+            assert_eq!(
+                forwarder.resolve_local("known.custom.local").is_some(),
+                target == InstanceTarget::Current
+            );
+        }
     }
 }

@@ -181,3 +181,9 @@ The connection finalizer now reports request task failures after draining tasks 
 Docker lifecycle operations now capture the ready physical VM before canonical inspect and validate that identity after taking the full-ID lifecycle lock. A synchronous activity lease records admission and completion, including cancellation. Guest I/O does not hold the global host commit lock. Offline tests use an explicit non-default identity fixture; skipping readiness alone does not bypass Engine liveness.
 
 Two Core admission tests, nine Docker CA/lifecycle tests, and thirteen mock API handler tests passed. The held-stop regression proves another canonical container can complete guest work and host alias publication. Strict all-target Core/Docker Clippy, scoped formatting, and diff checks passed. Guarded final publication, snapshot ordering, and installed VM validation remain pending.
+
+## Select instance authority before resource ownership
+
+The shared Registry now resolves the longest inclusive instance root before resource claims. Current roots retain ordinary resource matching, including a current grandchild beneath a foreign child. Unavailable roots return SERVFAIL before sandbox or public fallback. Effective authority changes invalidate pinned DNS/TLS revisions; identical projections preserve them. Host Other results currently terminate with SERVFAIL until explicit loopback forwarding lands. Guest Other results use the existing host gateway.
+
+Common DNS passed 52 tests, net 115, Core web services 10, Linux guest DNS 6, and Linux guest service/TLS routes 7. Host and guest strict Clippy, formatting, and diff checks passed. The guest binaries ran in the existing networkless Colima environment. Daemon delivery, guest authority transport, mDNS grant consumption, and installed ArcBox validation remain pending.

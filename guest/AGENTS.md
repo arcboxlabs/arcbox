@@ -230,6 +230,7 @@ non-obvious invariants and failure signatures.
   Validate every inspect response before applying a reconnect snapshot. Await route-task acknowledgement before publishing snapshot or event DNS changes; an active scan may finish before consuming the update. Retain unavailable owners until rule and mirror cleanup succeeds.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
   Construct guest DNS with the shared builtin reservations. Forward unresolved exact system/index names to the existing gateway; keep other reservations local. Descendants remain independent.
+  Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before sandbox fallback. Preserve internal resource lookup when no instance root matches.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
   snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.
@@ -237,7 +238,7 @@ non-obvious invariants and failure signatures.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a
   certificate. The selected owner must have an installed managed route at the connection's original destination IP.
-  Pin the owner, registration revision, and installed route identity across authorization, certificate configuration, TLS handshake, and upstream connection. Remove a failed upstream route only while its pinned identity still matches. Identical route publication preserves identity; removal and reinstallation replace it.
+  Pin the owner, DNS resolution revision, and installed route identity across authorization, certificate configuration, TLS handshake, and upstream connection. Remove a failed upstream route only while its pinned identity still matches. Identical route publication preserves identity; removal and reinstallation replace it.
   `domains/certificates/cache.rs` bounds leaf reuse by the certificate's actual
   validity and serializes signing per name. Never evict an active signing slot.
   Read `/arcbox/tls/ca.pem` before cache reuse. Bind each leaf to its verified

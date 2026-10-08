@@ -13,8 +13,8 @@ use super::Runtime;
 use crate::error::{CoreError, Result};
 
 impl Runtime {
-    /// Authorizes a local FQDN for signing and returns its container DNS registration revision.
-    /// Identical registrations preserve the revision; removal and effective changes invalidate it.
+    /// Authorizes a local FQDN for signing and returns its DNS resolution revision.
+    /// Effective resource or instance changes invalidate the revision across asynchronous work.
     pub async fn https_signing_revision(&self, fqdn: &str) -> Option<u64> {
         let name = fqdn.parse::<Domain>().ok()?;
         let registry = self

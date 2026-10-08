@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use arcbox_constants::dns::Domain;
 use arcbox_dns::claims::Boundary;
-use arcbox_dns::registry::{Lookup, Registry};
+use arcbox_dns::registry::{InstanceTarget, Lookup, Registry};
 use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType, NamePattern};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
@@ -169,9 +169,10 @@ impl GuestDnsServer {
 
         // Known names have IPv4 data only; other record types receive NODATA.
         let is_a_query = query.qtype == DnsRecordType::A;
+        let mut owned_instance = false;
+        let registry = self.containers.read().await;
 
         if let Ok(name) = name_lower.parse::<Domain>() {
-            let registry = self.containers.read().await;
             let relative = format!("{name}.{}", self.domain).parse::<Domain>().ok();
             let mut lookup = registry.resolve(&name);
             // Only exact aliases support short names; wildcards must not capture external DNS.
@@ -201,6 +202,13 @@ impl GuestDnsServer {
                 }
                 Lookup::Matched { .. } => return Ok(Some(arcbox_dns::build_nodata(data)?)),
                 Lookup::Conflict => return Ok(Some(arcbox_dns::build_servfail(data)?)),
+                Lookup::Instance { authority, .. } => match authority.target {
+                    InstanceTarget::Current => owned_instance = true,
+                    InstanceTarget::Other { .. } => return Ok(None),
+                    InstanceTarget::Unavailable => {
+                        return Ok(Some(arcbox_dns::build_servfail(data)?));
+                    }
+                },
                 // The host publishes these exact names from its current Registry.
                 Lookup::Reserved(Boundary::ReservedName { authority, .. })
                     if matches!(authority.as_str(), "system" | "index") =>
@@ -242,7 +250,7 @@ impl GuestDnsServer {
 
         // 4. Authoritative NXDOMAIN for unresolved local-domain queries.
         // NXDOMAIN (not NODATA) because the name genuinely doesn't exist.
-        if name_lower == self.domain.as_str() || name_lower.ends_with(&suffix) {
+        if owned_instance || name_lower == self.domain.as_str() || name_lower.ends_with(&suffix) {
             return Ok(Some(arcbox_dns::build_nxdomain(data)?));
         }
 
@@ -423,6 +431,45 @@ mod tests {
     fn server_rejects_a_suffix_that_replaces_a_host_alias() {
         for name in ["host", "host.docker.internal", "gateway.docker.internal"] {
             assert!(GuestDnsServer::new(name.parse().unwrap(), CancellationToken::new()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_roots_gate_sandbox_fallback_and_every_query_type() {
+        use arcbox_dns::registry::InstanceAuthority;
+        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
+        server.sandboxes = Arc::default();
+        server.register_sandbox("sandbox.custom.local", Ipv4Addr::new(10, 0, 3, 2));
+        for target in [
+            InstanceTarget::Current,
+            InstanceTarget::Other { port: 5354 },
+            InstanceTarget::Unavailable,
+        ] {
+            server
+                .containers
+                .write()
+                .await
+                .replace_instance_authorities(vec![InstanceAuthority {
+                    root: "custom.local".parse().unwrap(),
+                    target,
+                }]);
+            for name in ["sandbox.custom.local", "missing.custom.local"] {
+                for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
+                    let response = local_query(&server, name, qtype).await;
+                    if matches!(target, InstanceTarget::Other { .. }) {
+                        assert!(response.is_none());
+                    } else {
+                        let code = if target == InstanceTarget::Unavailable {
+                            2
+                        } else if name.starts_with("missing.") {
+                            3
+                        } else {
+                            0
+                        };
+                        assert_eq!(response.unwrap()[3] & 15, code);
+                    }
+                }
+            }
         }
     }
 

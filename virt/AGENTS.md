@@ -102,6 +102,7 @@ files above.
 - Subscribe to `NetworkManager::subscribe_dns_registry` for complete ownership changes, including wildcards and unavailable resources. Read the full Registry snapshot after subscribing. Drop watch borrows before acquiring the Registry lock.
 - Pass `NetworkManager::shared_dns()` through `HostNetwork` to both VMM datapaths. Resolve every query from that shared Registry and use its configured relative-name suffix. Concrete projections must never override conflicts or delegated names.
 - Configure DNS through `NetConfig::dns` before constructing NetworkManager. The forwarder configuration is immutable; do not add an outer forwarder lock.
+- Resolve instance ownership before local records or upstream cache lookup. Current empty roots receive a local negative answer. Unavailable roots terminate with SERVFAIL.
 
 ## vmnet relay (bridge NIC, `arcbox-vmnet`)
 

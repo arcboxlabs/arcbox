@@ -1,4 +1,4 @@
-//! Current resource claims, addresses, and revisions in one caller-locked snapshot.
+//! Instance authority, resource claims, addresses, and revisions in one caller-locked snapshot.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -6,6 +6,29 @@ use std::net::IpAddr;
 use arcbox_constants::dns::Domain;
 
 use crate::claims::{self, Boundary, Claim, Resolution};
+
+/// A validated namespace from the complete instance authority snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceAuthority {
+    /// Inclusive namespace root; snapshot roots are unique and canonically sorted.
+    pub root: Domain,
+    /// The current route for this namespace.
+    pub target: InstanceTarget,
+}
+
+/// Effective instance state, independent of helper transport revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceTarget {
+    /// The current connection actively owns the namespace.
+    Current,
+    /// Another connection serves DNS on the host loopback interface.
+    Other {
+        /// Validated, nonzero host DNS port.
+        port: u16,
+    },
+    /// The namespace remains reserved without an available DNS server.
+    Unavailable,
+}
 
 /// One resource remains registered even when its last network disappears.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +50,16 @@ pub enum Lookup<'a> {
         claim: &'a Claim,
         /// The owner's current network address.
         address: IpAddr,
-        /// The owner's registration revision for checks after asynchronous work.
+        /// Resource and instance revision for checks after asynchronous work.
+        revision: u64,
+        /// The selected instance actively permits host publication of this name.
+        publishable: bool,
+    },
+    /// Instance routing terminates lookup, including an owned namespace without a resource.
+    Instance {
+        /// The most specific matching instance namespace.
+        authority: &'a InstanceAuthority,
+        /// The instance snapshot revision for checks after forwarding.
         revision: u64,
     },
     /// Equally specific claims or boundaries have incompatible identities.
@@ -50,6 +82,8 @@ pub struct OwnerMismatch;
 pub struct Registry {
     entries: HashMap<String, Registration>,
     boundaries: Vec<Boundary>,
+    instances: Vec<InstanceAuthority>,
+    authority_revision: u64,
     epoch: u64,
 }
 
@@ -99,6 +133,17 @@ impl Registry {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Replaces validated, canonically sorted instance roots without changing resource claims.
+    /// Equivalent effective snapshots preserve every revision.
+    pub fn replace_instance_authorities(&mut self, instances: Vec<InstanceAuthority>) -> bool {
+        if self.instances == instances {
+            return false;
+        }
+        self.authority_revision = self.advance();
+        self.instances = instances;
+        true
     }
 
     /// Returns the owner's complete registration, including an unavailable resource.
@@ -155,6 +200,25 @@ impl Registry {
     /// Resolves ownership, address, and revision from the same current registration.
     #[must_use]
     pub fn resolve(&self, name: &Domain) -> Lookup<'_> {
+        let instance = self
+            .instances
+            .iter()
+            .filter(|instance| {
+                name == &instance.root
+                    || name
+                        .as_str()
+                        .strip_suffix(instance.root.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
+            .max_by_key(|instance| instance.root.as_str().len());
+        if let Some(authority) = instance
+            && authority.target != InstanceTarget::Current
+        {
+            return Lookup::Instance {
+                authority,
+                revision: self.authority_revision,
+            };
+        }
         let claims = self
             .entries
             .values()
@@ -166,13 +230,19 @@ impl Registry {
                 Lookup::Matched {
                     claim,
                     address: entry.address.expect("selected claims have an address"),
-                    revision: entry.revision,
+                    revision: entry.revision.max(self.authority_revision),
+                    publishable: instance.is_some(),
                 }
             }
             Resolution::Conflict => Lookup::Conflict,
             Resolution::Reserved(boundary) => Lookup::Reserved(boundary),
             Resolution::Delegated(boundary) => Lookup::Delegated(boundary),
-            Resolution::Unmatched => Lookup::Unmatched,
+            Resolution::Unmatched => {
+                instance.map_or(Lookup::Unmatched, |authority| Lookup::Instance {
+                    authority,
+                    revision: self.authority_revision,
+                })
+            }
         }
     }
 
