@@ -3,17 +3,18 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
-use arcbox_api::SetupState;
 use arcbox_connect::v1::{LocalHttpsStatus, local_https_status::TrustState};
 use arcbox_constants::paths::guest::{TLS, TLS_CA_CERT};
 use arcbox_core::local_https::Status;
 use arcbox_local_ca::{KeychainAuthority, PublicAuthority, Publication};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::context::DaemonContext;
 
 const STATUS_INTERVAL: Duration = Duration::from_secs(5);
+
+mod rotation;
 
 /// Keeps CA failures visible without preventing ordinary container startup.
 pub fn prepare(ctx: &DaemonContext) {
@@ -21,12 +22,31 @@ pub fn prepare(ctx: &DaemonContext) {
     let state = Arc::clone(&ctx.setup_state);
     let authority = ctx.local_ca.clone();
     let shutdown = ctx.shutdown.clone();
+    let commands = state
+        .local_ca
+        .register()
+        .expect("TLS worker is registered once during runtime initialization");
     state.set_local_https(LocalHttpsStatus {
         message: "Preparing the local HTTPS certificate.".into(),
         ..Default::default()
     });
     tokio::spawn(async move {
-        monitor(&state, &shutdown, || refresh(&dir, &authority)).await;
+        monitor(&shutdown, commands, |command| {
+            let dir = dir.clone();
+            let authority = authority.clone();
+            let state = Arc::clone(&state);
+            async move {
+                if let Some(command) = command {
+                    rotation::execute(&dir, &authority, &state, command).await;
+                } else {
+                    let status = refresh(&dir, &authority).await;
+                    if *state.current().local_https != status {
+                        state.set_local_https(status);
+                    }
+                }
+            }
+        })
+        .await;
     });
 }
 
@@ -50,12 +70,7 @@ async fn refresh(
                 Ok((Arc::new(authority), publication))
             })();
             let result = reconcile(&mut active, prepared, |authority| {
-                let public = PublicAuthority::from_pem(authority.certificate_pem().as_bytes())?;
-                match std::fs::read(dir.join(TLS_CA_CERT)) {
-                    Ok(pem) => Ok(PublicAuthority::from_pem(&pem)?.der() == public.der()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                    Err(error) => Err(error.into()),
-                }
+                is_published(&dir, authority)
             });
             (active, result, Some(operation))
         }
@@ -82,6 +97,15 @@ async fn refresh(
         return failed(format!("{error:#}"));
     }
     inspect(dir).await
+}
+
+fn is_published(dir: &Path, authority: &KeychainAuthority) -> Result<bool> {
+    let public = PublicAuthority::from_pem(authority.certificate_pem().as_bytes())?;
+    match std::fs::read(dir.join(TLS_CA_CERT)) {
+        Ok(pem) => Ok(PublicAuthority::from_pem(&pem)?.der() == public.der()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn reconcile<A>(
@@ -121,34 +145,28 @@ async fn inspect(dir: &Path) -> LocalHttpsStatus {
     }
 }
 
-async fn monitor<F: Future<Output = LocalHttpsStatus>>(
-    state: &SetupState,
+async fn monitor<C, F: Future<Output = ()>>(
     shutdown: &CancellationToken,
-    mut inspect: impl FnMut() -> F,
+    mut commands: mpsc::Receiver<C>,
+    mut apply: impl FnMut(Option<C>) -> F,
 ) {
     let mut interval = tokio::time::interval(STATUS_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut previous = None;
     loop {
-        tokio::select! {
+        let command = tokio::select! {
             () = shutdown.cancelled() => return,
-            _ = interval.tick() => {}
-        }
-        let status = tokio::select! {
-            () = shutdown.cancelled() => return,
-            status = inspect() => status,
+            Some(command) = commands.recv() => Some(command),
+            _ = interval.tick() => None,
         };
-        if previous.as_ref() != Some(&status) {
-            state.set_local_https(status.clone());
-            previous = Some(status);
-        }
+        // Finish accepted work before shutdown so blocking mutations retain their lock and result.
+        apply(command).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arcbox_api::SetupPhase;
+    use arcbox_api::{SetupPhase, SetupState};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -244,12 +262,13 @@ mod tests {
         state.set_vm_running(true);
         let shutdown = CancellationToken::new();
         let inspections = Arc::new(AtomicUsize::new(0));
+        let (_sender, commands) = mpsc::channel::<()>(1);
         let task = tokio::spawn({
             let state = Arc::clone(&state);
             let shutdown = shutdown.clone();
             let inspections = Arc::clone(&inspections);
             async move {
-                monitor(&state, &shutdown, || {
+                monitor(&shutdown, commands, |_| {
                     let status = match inspections.fetch_add(1, Ordering::SeqCst) {
                         0 => failed("Keychain locked".into()),
                         1 => LocalHttpsStatus {
@@ -262,7 +281,8 @@ mod tests {
                             ..Default::default()
                         },
                     };
-                    std::future::ready(status)
+                    state.set_local_https(status);
+                    std::future::ready(())
                 })
                 .await;
             }
@@ -286,5 +306,35 @@ mod tests {
         tokio::time::advance(STATUS_INTERVAL).await;
         assert_eq!(inspections.load(Ordering::SeqCst), stopped_at);
         assert_eq!(state.current().phase, SetupPhase::Ready);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_an_accepted_mutation() {
+        let shutdown = CancellationToken::new();
+        let (sender, commands) = mpsc::channel(1);
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        sender.send((started, finished, reply)).await.unwrap();
+        let task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                monitor(&shutdown, commands, |command| async move {
+                    if let Some((started, finished, reply)) = command {
+                        started.send(()).unwrap();
+                        finished.await.unwrap();
+                        reply.send(()).unwrap();
+                    }
+                })
+                .await;
+            }
+        });
+        entered.await.unwrap();
+        shutdown.cancel();
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        finish.send(()).unwrap();
+        response.await.unwrap();
+        task.await.unwrap();
     }
 }
