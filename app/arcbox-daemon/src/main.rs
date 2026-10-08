@@ -31,6 +31,7 @@ mod startup;
 mod storage_health;
 #[cfg(target_os = "macos")]
 mod tls_signer;
+mod web_index;
 
 use std::sync::Arc;
 

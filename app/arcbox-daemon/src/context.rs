@@ -59,6 +59,7 @@ pub struct StartupHandles {
     pub container_network_lease: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
 }
 
 impl StartupHandles {
@@ -72,6 +73,7 @@ impl StartupHandles {
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
             resolver_service: BackgroundTask::default(),
             guest_trust_service: BackgroundTask::default(),
+            web_index_service: BackgroundTask::default(),
         }
     }
 }
@@ -98,6 +100,7 @@ pub struct EarlyContext {
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
@@ -145,6 +148,7 @@ pub struct DaemonContext {
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].
