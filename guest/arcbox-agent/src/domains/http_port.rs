@@ -15,7 +15,7 @@ pub const HTTPS_PORT: u16 = 443;
 /// What [`LABEL`] asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pin {
-    /// The container's domain serves no HTTP port.
+    /// The domain has no managed route for this protocol.
     Off,
     /// The container's domain serves this port.
     Port(u16),
@@ -31,9 +31,7 @@ impl FromStr for Pin {
         }
         match value.parse::<u16>() {
             Ok(port) if port != 0 => Ok(Self::Port(port)),
-            _ => Err(format!(
-                "{LABEL}={value:?} is neither a port number nor \"off\""
-            )),
+            _ => Err(format!("{value:?} is neither a port number nor \"off\"")),
         }
     }
 }

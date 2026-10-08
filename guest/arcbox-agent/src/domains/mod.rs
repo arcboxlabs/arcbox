@@ -26,9 +26,10 @@
 //! closes.
 //!
 //! With the host's Keychain CA signing leaf CSRs, `https://` works the
-//! same way: port 443 of each container with an HTTP port (unless it
-//! listens on 443 itself) is redirected to a proxy in the agent that
-//! terminates TLS and relays to that HTTP port ([`https`]).
+//! same way: port 443 reaches the application's native HTTPS on 443 or
+//! 8443, or a proxy that terminates TLS and relays to a verified HTTP port
+//! ([`https`]). `dev.arcbox.https-port` selects a native TLS port or `off`.
+//! Native TLS keeps the application's certificate and handshake unchanged.
 
 mod certificates;
 mod facts;
@@ -38,6 +39,7 @@ mod listeners;
 mod probe;
 mod routes;
 mod scans;
+mod selection;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -49,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use self::facts::ContainerFacts;
 use self::routes::Routes;
+pub use self::selection::{HttpsBackend, SelectedRoutes};
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.
 const RULE_OWNER: &str = "arcbox-domain:";

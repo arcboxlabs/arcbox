@@ -1,6 +1,6 @@
 //! The task that owns the container-domain rules.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -9,7 +9,10 @@ use tokio_util::sync::CancellationToken;
 use super::http_port::HTTPS_PORT;
 use super::https::Https;
 use super::scans::Scans;
-use super::{Command, ContainerFacts, HttpPorts, RULE_OWNER, http_port, listeners, probe};
+use super::selection::ALT_HTTPS_PORT;
+use super::{
+    Command, ContainerFacts, HttpPorts, RULE_OWNER, SelectedRoutes, http_port, listeners, probe,
+};
 use crate::iptables::{self, NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
@@ -139,10 +142,29 @@ impl Routes {
                 }
             };
             // A server between two binds lists nothing: keep what it served.
-            if listening.is_empty() && tracked.facts.pin.is_none() {
+            if listening.is_empty()
+                && tracked.facts.pin.is_none()
+                && tracked.facts.https_pin.is_none()
+            {
                 continue;
             }
-            let mut candidates = listening.clone();
+            let mut native = BTreeSet::new();
+            if tracked.facts.https_pin.is_none() {
+                for port in [HTTPS_PORT, ALT_HTTPS_PORT] {
+                    if listening.contains(&port)
+                        && probe::responds(
+                            tracked.facts.ips()[0],
+                            port,
+                            &tracked.facts.hostname,
+                            true,
+                        )
+                        .await
+                    {
+                        native.insert(port);
+                    }
+                }
+            }
+            let mut candidates = listening.difference(&native).copied().collect();
             let http_port = loop {
                 let choice =
                     http_port::choose(tracked.facts.pin, &candidates, &tracked.facts.exposed);
@@ -155,10 +177,13 @@ impl Routes {
                 }
                 candidates.remove(&port);
             };
-            self.ports.route(tracked.facts.ips(), http_port);
-            // A container serving TLS on 443 itself keeps it.
-            let https = self.https && !listening.contains(&HTTPS_PORT);
-            let wanted = tracked.facts.rules(http_port, https);
+            let mut selected = SelectedRoutes::choose(http_port, tracked.facts.https_pin, &native);
+            if !self.https && selected.terminated_port().is_some() {
+                selected.https = None;
+            }
+            self.ports
+                .route(tracked.facts.ips(), selected.terminated_port());
+            let wanted = tracked.facts.rules(selected);
             if wanted == tracked.installed {
                 continue;
             }
@@ -166,8 +191,7 @@ impl Routes {
                 Ok(()) => {
                     tracing::info!(
                         container_id = id,
-                        ?http_port,
-                        https,
+                        ?selected,
                         ?listening,
                         "container domain rerouted"
                     );

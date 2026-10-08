@@ -211,6 +211,9 @@ non-obvious invariants and failure signatures.
   Automatic HTTP discovery requires a real HTTP response to a bounded `HEAD /`
   probe with the container domain in `Host`. An exposed or listening TCP port
   alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
+  Native HTTPS discovery checks 443 then 8443 and takes precedence over the
+  TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
+  managed HTTPS routing. Native TLS preserves the application's certificate.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.

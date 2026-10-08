@@ -4,9 +4,10 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use super::RULE_OWNER;
 use super::http_port::{self, HTTP_PORT, HTTPS_PORT, Pin};
 use super::https::PROXY_PORT;
+use super::selection::HTTPS_LABEL;
+use super::{HttpsBackend, RULE_OWNER, SelectedRoutes};
 use crate::iptables::NatRule;
 
 /// A running container, as far as its domain is concerned.
@@ -20,6 +21,7 @@ pub struct ContainerFacts {
     pub(super) netns: PathBuf,
     ips: Vec<Ipv4Addr>,
     pub(super) pin: Option<Pin>,
+    pub(super) https_pin: Option<Pin>,
     pub(super) exposed: BTreeSet<u16>,
 }
 
@@ -55,16 +57,8 @@ impl ContainerFacts {
         if ips.is_empty() {
             return None;
         }
-        let pin = inspect
-            .pointer("/Config/Labels")
-            .and_then(|labels| labels.get(http_port::LABEL)?.as_str())
-            .and_then(|value| match value.parse() {
-                Ok(pin) => Some(pin),
-                Err(e) => {
-                    tracing::warn!(container_id = %id, "{e}; choosing the HTTP port by itself");
-                    None
-                }
-            });
+        let pin = read_pin(inspect, &id, http_port::LABEL);
+        let https_pin = read_pin(inspect, &id, HTTPS_LABEL);
         let exposed = inspect
             .pointer("/Config/ExposedPorts")
             .and_then(|ports| ports.as_object())
@@ -82,6 +76,7 @@ impl ContainerFacts {
             netns,
             ips,
             pin,
+            https_pin,
             exposed,
         })
     }
@@ -91,40 +86,48 @@ impl ContainerFacts {
         &self.ips
     }
 
-    /// The rules for each of the container's addresses: port 80 DNATed to
-    /// `http_port` unless that is 80 itself, and with `https` port 443
-    /// redirected to the HTTPS proxy. None without an HTTP port.
-    pub(super) fn rules(&self, http_port: Option<u16>, https: bool) -> Vec<NatRule> {
-        let Some(port) = http_port else {
-            return Vec::new();
+    /// Native HTTPS keeps the application's TLS; terminated HTTPS reaches the proxy.
+    pub(super) fn rules(&self, selected: SelectedRoutes) -> Vec<NatRule> {
+        let native = match selected.https {
+            Some(HttpsBackend::Native(port)) => Some(port),
+            _ => None,
         };
-        let (http, tls, proxy) = (
-            HTTP_PORT.to_string(),
-            HTTPS_PORT.to_string(),
-            PROXY_PORT.to_string(),
-        );
         let mut rules = Vec::new();
         for ip in &self.ips {
             let ip = ip.to_string();
-            if port != HTTP_PORT {
+            for (incoming, target) in [(HTTP_PORT, selected.http), (HTTPS_PORT, native)] {
+                let Some(port) = target.filter(|port| *port != incoming) else {
+                    continue;
+                };
                 let destination = format!("{ip}:{port}");
                 rules.push(NatRule::new(
                     RULE_OWNER,
                     &self.id,
-                    &["-d", &ip, "-p", "tcp", "--dport", &http],
+                    &["-d", &ip, "-p", "tcp", "--dport", &incoming.to_string()],
                     &["-j", "DNAT", "--to-destination", &destination],
                 ));
             }
-            if https {
+            if selected.terminated_port().is_some() {
                 rules.push(NatRule::new(
                     RULE_OWNER,
                     &self.id,
-                    &["-d", &ip, "-p", "tcp", "--dport", &tls],
-                    &["-j", "REDIRECT", "--to-ports", &proxy],
+                    &["-d", &ip, "-p", "tcp", "--dport", &HTTPS_PORT.to_string()],
+                    &["-j", "REDIRECT", "--to-ports", &PROXY_PORT.to_string()],
                 ));
             }
         }
         rules
+    }
+}
+
+fn read_pin(inspect: &serde_json::Value, id: &str, label: &str) -> Option<Pin> {
+    let value = inspect.pointer("/Config/Labels")?.get(label)?.as_str()?;
+    match value.parse() {
+        Ok(pin) => Some(pin),
+        Err(error) => {
+            tracing::warn!(container_id = id, label, %error, "invalid port override; using protocol discovery");
+            None
+        }
     }
 }
 
@@ -208,7 +211,10 @@ mod tests {
     fn port_80_of_every_address_routes_to_the_http_port() {
         let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
         assert_eq!(
-            specs(&facts.rules(Some(3000), false)),
+            specs(&facts.rules(SelectedRoutes {
+                http: Some(3000),
+                https: None
+            })),
             [
                 "-d 172.17.0.2 -p tcp --dport 80 -m comment --comment arcbox-domain:abc123 \
                  -j DNAT --to-destination 172.17.0.2:3000",
@@ -216,8 +222,15 @@ mod tests {
                  -j DNAT --to-destination 172.18.0.3:3000",
             ]
         );
-        assert_eq!(facts.rules(Some(80), false), [], "80 needs no rule");
-        assert_eq!(facts.rules(None, false), []);
+        assert_eq!(
+            facts.rules(SelectedRoutes {
+                http: Some(80),
+                https: None
+            }),
+            [],
+            "80 needs no rule"
+        );
+        assert_eq!(facts.rules(SelectedRoutes::default()), []);
     }
 
     #[test]
@@ -225,15 +238,42 @@ mod tests {
         let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
         let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
                         arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
-        let served_on_80 = specs(&facts.rules(Some(80), true));
+        let served_on_80 =
+            specs(&facts.rules(SelectedRoutes::choose(Some(80), None, &BTreeSet::new())));
         assert_eq!(served_on_80.len(), 2, "one redirect per address");
         assert_eq!(served_on_80[0], redirect);
-        let served_on_3000 = specs(&facts.rules(Some(3000), true));
+        let served_on_3000 =
+            specs(&facts.rules(SelectedRoutes::choose(Some(3000), None, &BTreeSet::new())));
         assert_eq!(served_on_3000.len(), 4);
         assert!(served_on_3000.contains(&redirect.to_owned()));
         assert!(
-            facts.rules(None, true).is_empty(),
+            facts
+                .rules(SelectedRoutes::choose(None, None, &BTreeSet::new()))
+                .is_empty(),
             "no HTTP port, nothing to relay to"
+        );
+    }
+
+    #[test]
+    fn https_only_8443_maps_without_a_proxy_or_http_route() {
+        let mut inspect = inspect();
+        inspect["Config"]["Labels"][HTTPS_LABEL] = "8443".into();
+        let facts = ContainerFacts::from_inspect(&inspect).unwrap();
+        let selected = SelectedRoutes::choose(None, facts.https_pin, &BTreeSet::new());
+        assert_eq!(
+            specs(&facts.rules(selected)),
+            [
+                "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment arcbox-domain:abc123 -j DNAT --to-destination 172.17.0.2:8443",
+                "-d 172.18.0.3 -p tcp --dport 443 -m comment --comment arcbox-domain:abc123 -j DNAT --to-destination 172.18.0.3:8443",
+            ]
+        );
+        assert_eq!(
+            facts.rules(SelectedRoutes::choose(
+                None,
+                Some(Pin::Port(443)),
+                &BTreeSet::new()
+            )),
+            []
         );
     }
 }
