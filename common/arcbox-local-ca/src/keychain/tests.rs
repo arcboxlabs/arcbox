@@ -1,5 +1,7 @@
 use super::*;
 
+mod rotation;
+
 #[test]
 fn identity_lookup_rejects_multiple_matches() {
     let certificate = authority::parameters()
