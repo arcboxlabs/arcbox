@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use arcbox_constants::dns::Domain;
 
-use crate::claims::{self, Boundary, Claim, Resolution};
+use crate::claims::{self, Boundary, Claim, Resolution, ResourceScope};
 
 /// A validated namespace from the complete instance authority snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +97,7 @@ impl Registry {
         }
     }
 
-    /// Reserves exact host aliases and the index apex before resources register.
+    /// Reserves host aliases, the index apex, and machine and sandbox trees before registration.
     ///
     /// # Errors
     /// Returns an error if the suffix replaces a host alias or exceeds its name budget.
@@ -126,6 +126,9 @@ impl Registry {
             name: domain.clone(),
             authority: "index".into(),
         });
+        for scope in [ResourceScope::Machine, ResourceScope::Sandbox] {
+            boundaries.push(scope.boundary(domain)?);
+        }
         Ok(Self::new(boundaries))
     }
 

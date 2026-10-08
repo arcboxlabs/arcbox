@@ -9,6 +9,47 @@ use arcbox_constants::dns::Domain;
 
 use crate::NamePattern;
 
+/// A local resource tree that container claims cannot enter.
+#[derive(Debug, Clone, Copy)]
+pub enum ResourceScope {
+    /// Linux machines reached through their bridge address.
+    Machine,
+    /// Sandboxes reached through their TAP address.
+    Sandbox,
+}
+
+impl ResourceScope {
+    /// Returns the trusted authority that can register names in this tree.
+    #[must_use]
+    pub const fn authority(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::Sandbox => "sandbox",
+        }
+    }
+
+    /// Qualifies a resource hostname within its dedicated tree.
+    ///
+    /// # Errors
+    /// Returns an error if the resulting name violates DNS label or length limits.
+    pub fn name(self, hostname: &str, domain: &Domain) -> Result<Domain, String> {
+        format!(
+            "{}.{}.{domain}",
+            hostname.to_ascii_lowercase(),
+            self.authority()
+        )
+        .parse()
+    }
+
+    pub(crate) fn boundary(self, domain: &Domain) -> Result<Boundary, String> {
+        self.name(&"x".repeat(63), domain)?;
+        Ok(Boundary::ReservedTree {
+            root: format!("{}.{domain}", self.authority()).parse()?,
+            authority: self.authority().into(),
+        })
+    }
+}
+
 /// A name claim with trusted resource and namespace identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {

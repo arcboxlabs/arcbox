@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use arcbox_constants::dns::Domain;
 use arcbox_dns::NamePattern;
-use arcbox_dns::claims::{Boundary, Claim};
+use arcbox_dns::claims::{Boundary, Claim, ResourceScope};
 use arcbox_dns::registry::{InstanceAuthority, InstanceTarget, Lookup, OwnerMismatch, Registry};
 
 fn domain(name: &str) -> Domain {
@@ -19,6 +19,62 @@ fn claim(name: &str, owner: &str) -> Claim {
 
 fn ip(last: u8) -> IpAddr {
     [172, 17, 0, last].into()
+}
+
+#[test]
+fn resource_trees_block_container_claims_before_creation_and_after_address_loss() {
+    for suffix in ["arcbox.local", "dev.arcbox.local"] {
+        let suffix = domain(suffix);
+        let mut registry = Registry::with_builtin_names(&suffix).unwrap();
+        let mut container =
+            Claim::generated(suffix.clone(), "docker".into(), "docker".into()).to_vec();
+        for scope in [ResourceScope::Machine, ResourceScope::Sandbox] {
+            let name = scope.name("HOST", &suffix).unwrap();
+            container.push(claim(name.as_str(), "docker"));
+        }
+        registry
+            .replace("docker".into(), container, Some(ip(2)))
+            .unwrap();
+        for scope in [ResourceScope::Machine, ResourceScope::Sandbox] {
+            let name = scope.name("HOST", &suffix).unwrap();
+            assert!(matches!(registry.resolve(&name), Lookup::Reserved(_)));
+            let owner = format!("{}:host", scope.authority());
+            let resource = vec![Claim::exclusive(
+                NamePattern::Exact(name.clone()),
+                owner.clone(),
+                scope.authority().into(),
+            )];
+            registry
+                .replace(owner.clone(), resource.clone(), Some(ip(3)))
+                .unwrap();
+            assert!(
+                matches!(registry.resolve(&name), Lookup::Matched { address, .. } if address == ip(3))
+            );
+            registry.replace(owner.clone(), resource, None).unwrap();
+            assert!(matches!(registry.resolve(&name), Lookup::Reserved(_)));
+            registry.remove(&owner);
+            assert!(matches!(registry.resolve(&name), Lookup::Reserved(_)));
+            assert!(matches!(
+                registry.resolve(&domain(&format!("child.{name}"))),
+                Lookup::Reserved(_)
+            ));
+            assert!(matches!(
+                registry.resolve(&domain(&format!("host.not{}.{suffix}", scope.authority()))),
+                Lookup::Matched { address, .. } if address == ip(2)
+            ));
+        }
+        assert!(
+            ResourceScope::Sandbox
+                .name(&"x".repeat(64), &suffix)
+                .is_err()
+        );
+        for invalid in ["under_score", "-leading", "trailing-"] {
+            assert!(ResourceScope::Sandbox.name(invalid, &suffix).is_err());
+        }
+    }
+    let longest_suffix = format!("{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(53));
+    assert!(Registry::with_builtin_names(&domain(&longest_suffix)).is_ok());
+    assert!(Registry::with_builtin_names(&domain(&format!("{longest_suffix}x"))).is_err());
 }
 
 #[test]
