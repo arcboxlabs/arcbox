@@ -11,7 +11,7 @@ use super::http_port::HTTPS_PORT;
 use super::https::Https;
 use super::index::Publisher;
 use super::scans::Scans;
-use super::selection::{ALT_HTTPS_PORT, HttpBackend, HttpProtocol};
+use super::selection::{ALT_HTTPS_PORT, HttpBackend};
 use super::{
     Command, ContainerFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
 };
@@ -257,42 +257,16 @@ impl Routes {
                     if listening.contains(&port)
                         && tracked
                             .probes
-                            .responds(
-                                tracked.facts.primary_ip,
-                                port,
-                                &tracked.facts.hostname,
-                                true,
-                            )
+                            .responds_https(tracked.facts.primary_ip, port, &tracked.facts.hostname)
                             .await
                     {
                         native.insert(port);
                     }
                 }
             }
-            let mut candidates = listening.difference(&native).copied().collect();
-            let http_port = loop {
-                let choice =
-                    http_port::choose(tracked.facts.pin, &candidates, &tracked.facts.exposed);
-                let Some(port) = choice else { break None };
-                if tracked.facts.pin.is_some()
-                    || tracked
-                        .probes
-                        .responds(
-                            tracked.facts.primary_ip,
-                            port,
-                            &tracked.facts.hostname,
-                            false,
-                        )
-                        .await
-                {
-                    break Some(port);
-                }
-                candidates.remove(&port);
-            };
-            let http = http_port.map(|port| HttpBackend {
-                port,
-                protocol: tracked.facts.pin.is_none().then_some(HttpProtocol::Http1),
-            });
+            let candidates = listening.difference(&native).copied().collect();
+            let http = tracked.http_backend(candidates).await;
+            let id = tracked.facts.id.as_str();
             let selected = SelectedRoutes::choose(http, tracked.facts.https_pin, &native)
                 .with_managed_https(self.https);
             let wanted = tracked.facts.rules(selected);
@@ -316,6 +290,22 @@ impl Routes {
             }
             tracked.selected = selected;
             self.services.publish(&tracked.facts, selected);
+        }
+    }
+}
+
+impl Tracked {
+    async fn http_backend(&mut self, mut candidates: BTreeSet<u16>) -> Option<HttpBackend> {
+        loop {
+            let port = http_port::choose(self.facts.pin, &candidates, &self.facts.exposed)?;
+            let protocol = self
+                .probes
+                .http(self.facts.primary_ip, port, &self.facts.hostname)
+                .await;
+            if self.facts.pin.is_some() || protocol.is_some() {
+                return Some(HttpBackend { port, protocol });
+            }
+            candidates.remove(&port);
         }
     }
 }
@@ -352,9 +342,60 @@ fn warn_unless_bridged_traffic_is_filtered() {
 
 #[cfg(test)]
 mod tests {
-    use super::super::HttpsBackend;
     use super::super::http_port::Pin;
+    use super::super::{HttpProtocol, HttpsBackend};
     use super::*;
+
+    #[tokio::test]
+    async fn pinned_unverified_endpoints_remain_selected_while_automatic_candidates_do_not() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                listener
+                    .accept()
+                    .await
+                    .unwrap()
+                    .0
+                    .write_all(b"-ERR not HTTP\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let facts = ContainerFacts::from_inspect(
+            &serde_json::json!({
+                "Id": "pinned", "Name": "/web", "State": { "Pid": 1 },
+                "Config": { "Labels": { "dev.arcbox.http-port": port.to_string() } },
+                "NetworkSettings": {
+                    "SandboxKey": "/var/run/docker/netns/web",
+                    "Networks": { "bridge": { "IPAddress": "127.0.0.1" } }
+                }
+            }),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut routes = Routes::new(WebServices::default());
+        routes.track(facts);
+        let tracked = routes.containers.get_mut("pinned").unwrap();
+        let backend = tracked.http_backend(BTreeSet::new()).await;
+        assert_eq!(
+            backend,
+            Some(HttpBackend {
+                port,
+                protocol: None
+            })
+        );
+        let selected = SelectedRoutes::choose(backend, None, &BTreeSet::new());
+        assert_eq!(selected.http, Some(port));
+        assert_eq!(selected.terminated_backend(), backend);
+        tracked.facts.pin = None;
+        assert_eq!(tracked.http_backend(BTreeSet::from([port])).await, None);
+        server.await.unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn failed_index_retries_without_containers_and_success_clears_the_deadline() {

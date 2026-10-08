@@ -8,11 +8,18 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-pub(super) struct Executor(Arc<Mutex<Option<JoinSet<()>>>>);
+pub(super) struct Executor(Arc<Mutex<Scope>>);
+
+#[derive(Default)]
+struct Scope {
+    closed: bool,
+    tasks: JoinSet<()>,
+    children: Vec<Executor>,
+}
 
 impl Default for Executor {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(Some(JoinSet::new()))))
+        Self(Arc::new(Mutex::new(Scope::default())))
     }
 }
 
@@ -22,17 +29,50 @@ where
 {
     fn execute(&self, future: F) {
         // Closing the scope also rejects tasks spawned by an already-stopping driver.
-        if let Some(tasks) = self.0.lock().expect("HTTP tasks lock poisoned").as_mut() {
-            tasks.spawn(future);
+        let mut scope = self.0.lock().expect("HTTP tasks lock poisoned");
+        if !scope.closed {
+            while let Some(result) = scope.tasks.try_join_next() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "managed HTTP internal task failed");
+                }
+            }
+            scope.tasks.spawn(future);
         }
     }
 }
 
 impl Executor {
+    pub(super) fn child(&self) -> Self {
+        let mut parent = self.0.lock().expect("HTTP tasks lock poisoned");
+        let child = Self(Arc::new(Mutex::new(Scope {
+            closed: parent.closed,
+            ..Scope::default()
+        })));
+        parent.children.push(child.clone());
+        child
+    }
+
     pub(super) async fn shutdown(&self) {
-        let tasks = self.0.lock().expect("HTTP tasks lock poisoned").take();
-        if let Some(mut tasks) = tasks {
-            tasks.shutdown().await;
+        let mut pending = vec![self.clone()];
+        while let Some(executor) = pending.pop() {
+            {
+                let mut scope = executor.0.lock().expect("HTTP tasks lock poisoned");
+                scope.closed = true;
+                scope.tasks.abort_all();
+                pending.extend(scope.children.iter().cloned());
+            }
+            // Keep handles in the shared scope if cancellation interrupts a child's cleanup.
+            while std::future::poll_fn(|context| {
+                executor
+                    .0
+                    .lock()
+                    .expect("HTTP tasks lock poisoned")
+                    .tasks
+                    .poll_join_next(context)
+            })
+            .await
+            .is_some()
+            {}
         }
     }
 }

@@ -11,6 +11,7 @@ pub(super) const ALT_HTTPS_PORT: u16 = 8443;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpProtocol {
     Http1,
+    Http2,
 }
 
 /// A selected HTTP endpoint; explicit ports can await successful discovery.
@@ -103,7 +104,7 @@ mod tests {
 
     #[test]
     fn managed_routes_preserve_verified_and_unknown_protocols() {
-        for protocol in [None, Some(HttpProtocol::Http1)] {
+        for protocol in [None, Some(HttpProtocol::Http1), Some(HttpProtocol::Http2)] {
             let backend = HttpBackend {
                 port: 8080,
                 protocol,

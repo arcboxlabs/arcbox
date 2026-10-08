@@ -109,6 +109,8 @@ resolve to a container IPv4 address. The agent discovers HTTP with a bounded
 `HEAD /` request that includes the container domain in `Host`. A valid HTTP
 response is required; listening TCP ports alone do not identify web services.
 
+Discovery prefers cleartext HTTP/2 and probes HTTP/1.1 on a separate connection if needed. Each probe has a one-second deadline. Explicit HTTP ports remain selected while their protocol is unknown; failed probes retry, and listener replacement invalidates the cached protocol.
+
 DNS checks local names for every query type, including HTTPS and SVCB. Known IPv4-only names return NODATA for other types. Missing names under the configured suffix return NXDOMAIN; external names are forwarded to the gateway.
 
 The guest reserves `host`, `host.<configured suffix>`, `host.docker.internal`, `gateway.docker.internal`, and the configured index apex before containers register. These exact names use the host's current DNS answer through the gateway even without a local address. Container aliases cannot override these reservations; descendant names remain independent.
