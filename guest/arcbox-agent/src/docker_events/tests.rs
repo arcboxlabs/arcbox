@@ -450,6 +450,8 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     let socket = tmp.path().join("docker.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
+    let sandbox_ip = "10.0.3.2";
+    dns.register_sandbox("Box", sandbox_ip).unwrap();
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
         sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
     }
@@ -524,6 +526,11 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     result.unwrap();
     assert!(registry.read().unwrap().get(OLD_ID).is_none());
     assert!(registry.read().unwrap().get(OFFLINE_ID).is_some());
+    assert!(matches!(
+        registry.read().unwrap().resolve(&"box.sandbox.arcbox.local".parse().unwrap()),
+        Lookup::Matched { claim, address, .. }
+        if claim.owner() == "sandbox:Box" && address == sandbox_ip.parse::<std::net::IpAddr>().unwrap()
+    ));
 }
 
 #[tokio::test]

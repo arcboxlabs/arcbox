@@ -88,10 +88,18 @@ impl AuthorityPeer {
     }
 }
 
-fn services(registry: &ContainerRegistry) -> Services {
-    Services::system(
-        crate::domains::WebServices::new(registry.clone()),
-        registry.clone(),
+fn services() -> (Services, ContainerRegistry) {
+    let dns = std::sync::Arc::new(
+        crate::dns_server::GuestDnsServer::new(
+            Default::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+    let registry = dns.containers();
+    (
+        Services::system(crate::domains::WebServices::new(registry.clone()), dns),
+        registry,
     )
 }
 
@@ -123,8 +131,8 @@ fn instance(registry: &ContainerRegistry) -> (InstanceTarget, u64) {
 
 #[tokio::test]
 async fn snapshot_is_committed_before_ack_and_eof_revokes_known_roots() {
-    let registry = ContainerRegistry::default();
-    let mut peer = AuthorityPeer::open(services(&registry)).await;
+    let (services, registry) = services();
+    let mut peer = AuthorityPeer::open(services).await;
     peer.replace(replacement(0)).await;
     assert_eq!(instance(&registry).0, InstanceTarget::Current);
     peer.close().await.unwrap_err();
@@ -139,9 +147,9 @@ async fn only_the_host_on_the_system_vm_can_open_authority() {
         (Guest::StorageRecovery, 2, true),
         (Guest::SystemVm, 2, false),
     ] {
-        let registry = ContainerRegistry::default();
+        let (services, registry) = services();
         let context = if configured {
-            services(&registry)
+            services
         } else {
             Services::default()
         };
@@ -156,8 +164,7 @@ async fn only_the_host_on_the_system_vm_can_open_authority() {
 
 #[tokio::test]
 async fn exclusive_handoff_resets_source_revision_after_withdrawal() {
-    let registry = ContainerRegistry::default();
-    let services = services(&registry);
+    let (services, registry) = services();
     let mut owner = AuthorityPeer::open(services.clone()).await;
     owner.replace(replacement(10)).await;
     let current = instance(&registry);
@@ -204,8 +211,8 @@ async fn invalid_replacements_close_the_connection_and_retain_unavailable_roots(
         "other-zero",
         "other-large",
     ] {
-        let registry = ContainerRegistry::default();
-        let mut peer = AuthorityPeer::open(services(&registry)).await;
+        let (services, registry) = services();
+        let mut peer = AuthorityPeer::open(services).await;
         peer.replace(replacement(10)).await;
         let mut invalid = replacement(11);
         match case {
@@ -239,8 +246,8 @@ async fn invalid_replacements_close_the_connection_and_retain_unavailable_roots(
 
 #[tokio::test]
 async fn coalesced_source_lifetimes_invalidate_identical_and_empty_snapshots() {
-    let registry = ContainerRegistry::default();
-    let mut peer = AuthorityPeer::open(services(&registry)).await;
+    let (services, registry) = services();
+    let mut peer = AuthorityPeer::open(services).await;
     for (revision, target, port) in [
         (10, Target::Current, 0),
         (20, Target::Other, 5354),
@@ -278,8 +285,8 @@ async fn coalesced_source_lifetimes_invalidate_identical_and_empty_snapshots() {
 
 #[tokio::test]
 async fn replacement_without_open_cannot_mutate_the_registry() {
-    let registry = ContainerRegistry::default();
-    let mut peer = AuthorityPeer::spawn(services(&registry), Guest::SystemVm, 2);
+    let (services, registry) = services();
+    let mut peer = AuthorityPeer::spawn(services, Guest::SystemVm, 2);
     peer.send(&replacement(0)).await;
     assert!(peer.response().await.is_err());
     peer.close().await.unwrap_err();
@@ -296,8 +303,8 @@ async fn malformed_and_unexpected_frames_revoke_the_active_snapshot() {
         &[0, 0, 0, 6, 0, 0],
         &[0, 0, 0, 6, 0, 0, 0, 1, 0, 0],
     ] {
-        let registry = ContainerRegistry::default();
-        let mut peer = AuthorityPeer::open(services(&registry)).await;
+        let (services, registry) = services();
+        let mut peer = AuthorityPeer::open(services).await;
         peer.replace(replacement(1)).await;
         peer.client.write_all(raw).await.unwrap();
         peer.client.shutdown().await.unwrap();
@@ -310,8 +317,7 @@ async fn malformed_and_unexpected_frames_revoke_the_active_snapshot() {
 #[tokio::test]
 async fn cancellation_during_partial_read_or_ack_revokes_before_the_next_open() {
     for phase in ["partial-frame", "ack"] {
-        let registry = ContainerRegistry::default();
-        let services = services(&registry);
+        let (services, registry) = services();
         let (mut client, server) = tokio::io::duplex(1);
         let task = tokio::spawn({
             let services = services.clone();

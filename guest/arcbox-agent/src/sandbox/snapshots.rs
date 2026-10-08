@@ -4,7 +4,7 @@ use arcbox_computer_runtime::{ComputerState, RestoreComputerSpec};
 use arcbox_connect::sandbox_v1;
 use buffa::Message;
 
-use super::{SandboxService, convert, register_sandbox_dns};
+use super::{SandboxService, convert};
 use crate::error::SandboxError;
 
 impl SandboxService {
@@ -31,6 +31,7 @@ impl SandboxService {
     ) -> Result<sandbox_v1::RestoreResponse, SandboxError> {
         let req = sandbox_v1::RestoreRequest::decode_from_slice(payload)
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
+        self.validate_dns_id(&req.id)?;
         self.manager.wait_startup_cleanup_complete().await;
         let _operation = self.operations.lock(&req.id).await;
         let restore_key = crate::create_key::restore_key(&req);
@@ -62,7 +63,7 @@ impl SandboxService {
                 .is_some_and(|network| network.ip_address == ip_address)
         });
         if live {
-            register_sandbox_dns(&id, &ip_address);
+            self.register_sandbox_dns(&id, &ip_address)?;
         }
         Ok(sandbox_v1::RestoreResponse {
             id,

@@ -2,17 +2,16 @@
 //!
 //! Listens on `0.0.0.0:53` (UDP) inside the guest VM. Lookup priority:
 //!
-//! 1. DNS registry (container claims and trusted namespace reservations)
-//! 2. Exact sandbox IDs within the reserved sandbox tree
-//! 3. Names under the configured domain not found → NXDOMAIN
-//! 4. Everything else → forward to gateway (`10.0.2.1:53`)
+//! 1. Shared DNS registry (resource claims and trusted namespace reservations)
+//! 2. Names under the configured domain not found → NXDOMAIN
+//! 3. Everything else → forward to gateway (`10.0.2.1:53`)
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
+use anyhow::Context as _;
 use arcbox_constants::dns::Domain;
-use arcbox_dns::claims::Boundary;
+use arcbox_dns::claims::{Boundary, Claim, ResourceScope};
 use arcbox_dns::registry::{InstanceTarget, Lookup, Registry};
 use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType, NamePattern};
 use tokio::net::UdpSocket;
@@ -24,23 +23,10 @@ const GATEWAY: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(1
 /// Maximum DNS UDP packet size.
 const MAX_PACKET: usize = 512;
 
-/// Shared sandbox registry using std::sync::RwLock so it can be written
-/// from synchronous code (sandbox.rs) and read from async code (dns_server).
-pub type SandboxRegistry = Arc<std::sync::RwLock<HashMap<String, Ipv4Addr>>>;
-
-// Global sandbox registry so sandbox.rs can register without needing
-// an async handle. The GuestDnsServer reads from these same Arcs.
-static SANDBOX_REGISTRY: std::sync::OnceLock<SandboxRegistry> = std::sync::OnceLock::new();
-
-/// Returns the global sandbox registry. Initialized on first access.
-pub fn sandbox_registry() -> &'static SandboxRegistry {
-    SANDBOX_REGISTRY.get_or_init(|| Arc::new(std::sync::RwLock::new(HashMap::new())))
-}
-
 /// Upstream forwarding timeout.
 const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Current container claims and addresses, keyed by complete container ID.
+/// Current resource claims and addresses, keyed by owner identity.
 /// Keep guards within synchronous memory operations so teardown can revoke authority.
 pub type ContainerRegistry = Arc<RwLock<Registry>>;
 
@@ -48,15 +34,11 @@ pub type ContainerRegistry = Arc<RwLock<Registry>>;
 pub struct GuestDnsServer {
     domain: Domain,
     containers: ContainerRegistry,
-    sandboxes: SandboxRegistry,
     cancel: CancellationToken,
 }
 
 impl GuestDnsServer {
     /// Creates a new server instance. Does not start listening yet.
-    ///
-    /// The sandbox registry is shared via a global so that `sandbox.rs`
-    /// can register entries synchronously without an async handle.
     ///
     /// # Errors
     /// Returns an error if the configured suffix cannot reserve the built-in names.
@@ -65,7 +47,6 @@ impl GuestDnsServer {
         Ok(Self {
             domain,
             containers: Arc::new(RwLock::new(registry)),
-            sandboxes: Arc::clone(sandbox_registry()),
             cancel,
         })
     }
@@ -76,36 +57,43 @@ impl GuestDnsServer {
         &self.domain
     }
 
-    /// Returns a handle to the container registry for external registration.
+    /// Returns the shared resource registry for registration and authority delivery.
     #[allow(dead_code)]
     pub fn containers(&self) -> ContainerRegistry {
         Arc::clone(&self.containers)
     }
 
-    /// Returns a handle to the sandbox registry.
-    #[allow(dead_code)]
-    pub fn sandboxes(&self) -> SandboxRegistry {
-        Arc::clone(&self.sandboxes)
-    }
-
-    /// Registers a sandbox ID → IP mapping.
-    #[allow(dead_code)]
-    pub fn register_sandbox(&self, id: &str, ip: Ipv4Addr) {
-        let key = id.to_lowercase();
-        tracing::debug!(id = %key, %ip, "dns: register sandbox");
-        if let Ok(mut map) = self.sandboxes.write() {
-            map.insert(key, ip);
+    /// Registers an exact sandbox name in its reserved tree.
+    /// An empty address withdraws the name for a sandbox without networking.
+    ///
+    /// # Errors
+    /// Returns an error if the ID or nonempty IPv4 address is invalid.
+    pub fn register_sandbox(&self, id: &str, ip: &str) -> anyhow::Result<()> {
+        let name = ResourceScope::Sandbox
+            .name(id, &self.domain)
+            .map_err(anyhow::Error::msg)?;
+        if ip.is_empty() {
+            self.deregister_sandbox(id);
+            return Ok(());
         }
+        let address = ip
+            .parse::<Ipv4Addr>()
+            .context("parse sandbox DNS IPv4 address")?;
+        let owner = format!("sandbox:{id}");
+        let claim = Claim::exclusive(NamePattern::Exact(name), owner.clone(), "sandbox".into());
+        self.containers
+            .write()
+            .expect("DNS registry lock poisoned")
+            .replace(owner, vec![claim], Some(address.into()))?;
+        Ok(())
     }
 
     /// Deregisters a sandbox by ID.
-    #[allow(dead_code)]
     pub fn deregister_sandbox(&self, id: &str) {
-        let key = id.to_lowercase();
-        tracing::debug!(id = %key, "dns: deregister sandbox");
-        if let Ok(mut map) = self.sandboxes.write() {
-            map.remove(&key);
-        }
+        self.containers
+            .write()
+            .expect("DNS registry lock poisoned")
+            .remove(&format!("sandbox:{id}"));
     }
 
     /// Runs the DNS server. Blocks until cancellation.
@@ -216,22 +204,6 @@ impl GuestDnsServer {
                 {
                     return Ok(None);
                 }
-                Lookup::Reserved(Boundary::ReservedTree { root, authority })
-                    if authority == "sandbox" =>
-                {
-                    let sandboxes = self.sandboxes.read().expect("sandbox DNS lock poisoned");
-                    let ip = name
-                        .as_str()
-                        .strip_suffix(&format!(".{root}"))
-                        .and_then(|id| sandboxes.get(id));
-                    return Ok(Some(match ip {
-                        Some(ip) if is_a_query => {
-                            arcbox_dns::build_response_a(data, *ip, DEFAULT_TTL)?
-                        }
-                        Some(_) => arcbox_dns::build_nodata(data)?,
-                        None => arcbox_dns::build_nxdomain(data)?,
-                    }));
-                }
                 Lookup::Reserved(_) => return Ok(Some(arcbox_dns::build_nxdomain(data)?)),
                 Lookup::Delegated(_) => return Ok(None),
                 Lookup::Unmatched => {}
@@ -268,7 +240,6 @@ impl GuestDnsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arcbox_dns::claims::Claim;
 
     fn register(server: &GuestDnsServer, name: &str, id: &str, ip: Ipv4Addr) {
         let claims = Claim::generated(
@@ -301,14 +272,15 @@ mod tests {
 
     #[test]
     fn resolves_relative_and_configured_names_for_containers_and_sandboxes() {
-        let mut server =
+        let server =
             GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new())
                 .unwrap();
-        server.sandboxes = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let container_ip = Ipv4Addr::new(172, 17, 0, 2);
         let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
         register(&server, "web.demo", "container", container_ip);
-        server.register_sandbox("sandbox", sandbox_ip);
+        server
+            .register_sandbox("Sandbox", &sandbox_ip.to_string())
+            .unwrap();
 
         for (name, ip) in [
             ("web.demo", container_ip),
@@ -331,6 +303,41 @@ mod tests {
         assert_eq!(
             local_query(&server, "sandbox.containers.test", DnsRecordType::A).unwrap()[3] & 15,
             3
+        );
+    }
+
+    #[test]
+    fn sandbox_claims_are_instance_local_and_address_updates_are_atomic() {
+        let server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
+        let other = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
+        let name = "box.sandbox.arcbox.local";
+        server.register_sandbox("Box", "10.0.3.2").unwrap();
+        assert_eq!(
+            local_query(&other, name, DnsRecordType::A).unwrap()[3] & 15,
+            3
+        );
+        for (id, ip) in [("Box", "invalid"), ("two.labels", "10.0.3.3")] {
+            let epoch = server.containers.read().unwrap().epoch();
+            assert!(server.register_sandbox(id, ip).is_err());
+            assert_eq!(server.containers.read().unwrap().epoch(), epoch);
+            assert!(
+                local_query(&server, name, DnsRecordType::A)
+                    .unwrap()
+                    .ends_with(&[10, 0, 3, 2])
+            );
+        }
+        server.register_sandbox("Box", "").unwrap();
+        assert_eq!(
+            local_query(&server, name, DnsRecordType::A).unwrap()[3] & 15,
+            3
+        );
+        assert!(
+            server
+                .containers
+                .read()
+                .unwrap()
+                .get("sandbox:Box")
+                .is_none()
         );
     }
 
@@ -359,12 +366,11 @@ mod tests {
 
     #[test]
     fn builtin_names_forward_without_local_addresses_despite_hostile_claims() {
-        let mut server = GuestDnsServer::new(
+        let server = GuestDnsServer::new(
             "dev.arcbox.local".parse().unwrap(),
             CancellationToken::new(),
         )
         .unwrap();
-        server.sandboxes = Arc::default();
         let ip = Ipv4Addr::new(172, 17, 0, 2);
         let names = [
             "host",
@@ -373,9 +379,7 @@ mod tests {
             "gateway.docker.internal",
             "dev.arcbox.local",
         ];
-        for name in names {
-            server.register_sandbox(name, ip);
-        }
+        server.register_sandbox("host", &ip.to_string()).unwrap();
         for patterns in [
             Vec::new(),
             names
@@ -422,8 +426,7 @@ mod tests {
 
     #[test]
     fn resource_trees_reject_container_wildcards_and_keep_machine_queries_on_the_host() {
-        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
-        server.sandboxes = Arc::default();
+        let server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
         let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
         server
             .containers
@@ -435,10 +438,12 @@ mod tests {
                 Some(Ipv4Addr::new(172, 17, 0, 2).into()),
             )
             .unwrap();
-        server.register_sandbox("box", sandbox_ip);
+        server
+            .register_sandbox("Box", &sandbox_ip.to_string())
+            .unwrap();
         let live = local_query(&server, "box.sandbox.arcbox.local", DnsRecordType::A).unwrap();
         assert!(live.ends_with(&sandbox_ip.octets()));
-        server.deregister_sandbox("box");
+        server.deregister_sandbox("Box");
         for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
             for name in [
                 "sandbox.arcbox.local",
@@ -454,12 +459,11 @@ mod tests {
     }
 
     #[test]
-    fn instance_roots_gate_sandbox_fallback_and_every_query_type() {
+    fn instance_roots_gate_sandbox_claims_and_every_query_type() {
         use arcbox_dns::registry::InstanceAuthority;
-        let mut server =
+        let server =
             GuestDnsServer::new("custom.local".parse().unwrap(), CancellationToken::new()).unwrap();
-        server.sandboxes = Arc::default();
-        server.register_sandbox("sandbox", Ipv4Addr::new(10, 0, 3, 2));
+        server.register_sandbox("sandbox", "10.0.3.2").unwrap();
         for target in [
             InstanceTarget::Current,
             InstanceTarget::Other { port: 5354 },
@@ -497,9 +501,8 @@ mod tests {
     }
 
     #[test]
-    fn terminal_ownership_results_do_not_reach_sandboxes_or_short_names() {
-        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
-        server.sandboxes = Arc::default();
+    fn terminal_ownership_results_do_not_reach_short_names() {
+        let server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
         *server.containers.write().unwrap() = Registry::new(vec![
             Boundary::ReservedName {
                 name: "reserved.local".parse().unwrap(),
@@ -517,7 +520,6 @@ mod tests {
         let ip = Ipv4Addr::new(172, 17, 0, 2);
         for name in ["reserved.local", "remote.local", "conflict.arcbox.local"] {
             register(&server, name, name, ip);
-            server.register_sandbox(name, ip);
         }
         for id in ["first", "second"] {
             register(&server, "conflict", id, ip);

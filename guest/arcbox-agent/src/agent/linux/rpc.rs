@@ -113,7 +113,8 @@ where
         // RPC request/response cycle because streaming operations hold the
         // connection open and write multiple frames.
         if msg_type.is_sandbox_request() {
-            if let Err(e) = handle_sandbox_message(&mut stream, msg_type, &trace_id, &payload).await
+            if let Err(e) =
+                handle_sandbox_message(&mut stream, msg_type, &trace_id, &payload, services).await
             {
                 tracing::warn!(
                     trace_id = %trace_id,
@@ -581,6 +582,38 @@ mod recovery_tests {
     use crate::rpc::MessageType;
 
     #[tokio::test]
+    async fn sandbox_requests_require_injected_system_services_before_runtime_access() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::DistroMachine,
+                &crate::agent::Services::default(),
+                2,
+            )
+            .await
+        });
+        for kind in [
+            MessageType::SandboxCreateRequest,
+            MessageType::SandboxRestoreRequest,
+        ] {
+            write_message(&mut client, kind, "sandbox-scope", &[0xff])
+                .await
+                .unwrap();
+            let (kind, trace, payload) =
+                tokio::time::timeout(Duration::from_secs(3), read_message(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(kind, MessageType::Error);
+            assert_eq!(trace, "sandbox-scope");
+            assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 403);
+        }
+        drop(client);
+        dispatcher.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn recovery_blocks_mutation_requests_before_parsing_or_dispatch() {
         let (mut client, server) = tokio::io::duplex(4096);
         let dispatcher = tokio::spawn(async move {
@@ -821,7 +854,8 @@ mod tests {
             );
         }
         let (mut client, server) = tokio::io::duplex(4096);
-        let services = crate::agent::Services::system(services, dns.containers());
+        let dns = std::sync::Arc::new(dns);
+        let services = crate::agent::Services::system(services, dns.clone());
         let task = tokio::spawn(async move {
             handle_connection(
                 server,

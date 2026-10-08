@@ -1,7 +1,7 @@
 //! Agent entry point: vsock listener, connection accept loop, and process-wide
 //! singletons (sandbox service, API proxies).
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use arcbox_constants::ports::AGENT_PORT;
 
@@ -26,7 +26,13 @@ impl Agent {
     /// Runs the agent for `guest`, listening on vsock.
     pub async fn run(&self, guest: Guest, services: crate::agent::Services) -> Result<()> {
         if guest == Guest::SystemVm {
-            start_system_vm_services().await;
+            start_system_vm_services(
+                services
+                    .dns
+                    .as_ref()
+                    .context("System VM requires DNS services")?,
+            )
+            .await;
         }
 
         let mut listener = bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
@@ -76,14 +82,14 @@ impl Default for Agent {
 
 /// The System VM's services beside the RPC listener. A distro machine runs
 /// none of them; see [`Guest::DistroMachine`].
-async fn start_system_vm_services() {
+async fn start_system_vm_services(dns: &std::sync::Arc<crate::dns_server::GuestDnsServer>) {
     // Mount standard VirtioFS shares if not already mounted.
     crate::mount::mount_standard_shares();
 
     // Eagerly initialise the sandbox service so its first-time
     // NetworkManager setup (which requires root) happens at startup
     // rather than on the first sandbox request.
-    let _ = sandbox_service();
+    let _ = sandbox_service(dns);
 
     // Drop half-written rootfs build artifacts from a previous crash.
     crate::sandbox::rootfs_builder(crate::sandbox::block_tools())

@@ -83,17 +83,19 @@ impl Guest {
 pub struct Services {
     web: crate::domains::WebServices,
     authority: Option<instance_authority::Receiver>,
+    dns: Option<std::sync::Arc<crate::dns_server::GuestDnsServer>>,
 }
 
 impl Services {
     /// Connects System VM services to the DNS registry used by container routing.
     pub fn system(
         web: crate::domains::WebServices,
-        registry: crate::dns_server::ContainerRegistry,
+        dns: std::sync::Arc<crate::dns_server::GuestDnsServer>,
     ) -> Self {
         Self {
             web,
-            authority: Some(instance_authority::Receiver::new(registry)),
+            authority: Some(instance_authority::Receiver::new(dns.containers())),
+            dns: Some(dns),
         }
     }
 }

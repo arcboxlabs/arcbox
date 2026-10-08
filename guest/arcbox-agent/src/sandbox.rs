@@ -64,6 +64,7 @@ pub fn probe_kvm() -> Result<(), String> {
 
 /// Thin wrapper around [`ComputerManager`] for use in the agent's RPC layer.
 pub struct SandboxService {
+    dns: Arc<crate::dns_server::GuestDnsServer>,
     manager: Arc<ComputerManager>,
     creates: Arc<CreateRegistry>,
     operations: SandboxOperationLocks,
@@ -187,7 +188,10 @@ impl SandboxService {
     }
 
     /// Create a new [`SandboxService`] from the given config.
-    pub fn new(config: GuestConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        config: GuestConfig,
+        dns: Arc<crate::dns_server::GuestDnsServer>,
+    ) -> anyhow::Result<Self> {
         let default_rootfs = config.runtime.defaults.rootfs.clone();
         // The rootfs builder shares the environment's block tooling so both
         // mount through the same busybox.
@@ -201,6 +205,7 @@ impl SandboxService {
             .into_shared();
         let creates = Arc::new(CreateRegistry::default());
         Ok(Self {
+            dns,
             manager,
             creates,
             operations: SandboxOperationLocks::default(),
@@ -224,6 +229,7 @@ impl SandboxService {
     ) -> Result<sandbox_v1::CreateSandboxResponse, SandboxError> {
         let mut request = sandbox_v1::CreateSandboxRequest::decode_from_slice(payload)
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
+        self.validate_dns_id(&request.id)?;
         if create_uses_network(&request) {
             self.manager.wait_startup_cleanup_complete().await;
         }
@@ -352,7 +358,7 @@ impl SandboxService {
             .create_computer_keyed(spec, create_key)
             .await
             .map_err(SandboxError::from)?;
-        register_sandbox_dns(&id, &ip_address);
+        self.register_sandbox_dns(&id, &ip_address)?;
         Ok(sandbox_v1::CreateSandboxResponse {
             id,
             ip_address,
@@ -426,7 +432,7 @@ impl SandboxService {
             .stop_computer(&req.id, req.timeout_seconds)
             .await
             .map_err(SandboxError::from)?;
-        deregister_sandbox_dns(&req.id);
+        self.dns.deregister_sandbox(&req.id);
         Ok(())
     }
 
@@ -441,7 +447,7 @@ impl SandboxService {
             .pause_computer(&req.id)
             .await
             .map_err(SandboxError::from)?;
-        deregister_sandbox_dns(&req.id);
+        self.dns.deregister_sandbox(&req.id);
         Ok(())
     }
 
@@ -464,9 +470,7 @@ impl SandboxService {
             .resume_computer(&req.id, reason)
             .await
             .map_err(SandboxError::from)?;
-        if !ip_address.is_empty() {
-            register_sandbox_dns(&req.id, &ip_address);
-        }
+        self.register_sandbox_dns(&req.id, &ip_address)?;
         Ok(arcbox_connect::v1::SandboxResumeResponse {
             ip_address,
             ..Default::default()
@@ -502,7 +506,7 @@ impl SandboxService {
             .remove_computer(&req.id, req.force)
             .await
             .map_err(SandboxError::from)?;
-        deregister_sandbox_dns(&req.id);
+        self.dns.deregister_sandbox(&req.id);
         self.clear_stale_completed_create(&req.id);
         Ok(())
     }
@@ -664,8 +668,23 @@ impl SandboxService {
             .finalize_network_cleanup(&ticket.id, &ticket.token)
             .await
             .map_err(SandboxError::from)?;
-        deregister_sandbox_dns(&ticket.id);
+        self.dns.deregister_sandbox(&ticket.id);
         Ok(())
+    }
+
+    fn validate_dns_id(&self, id: &str) -> Result<(), SandboxError> {
+        if !id.is_empty() {
+            arcbox_dns::claims::ResourceScope::Sandbox
+                .name(id, self.dns.domain())
+                .map_err(SandboxError::InvalidArgument)?;
+        }
+        Ok(())
+    }
+
+    fn register_sandbox_dns(&self, id: &str, ip: &str) -> Result<(), SandboxError> {
+        self.dns.register_sandbox(id, ip).map_err(|error| {
+            SandboxError::Internal(format!("register sandbox {id} DNS: {error:#}"))
+        })
     }
 
     pub(crate) fn clear_stale_completed_create(&self, id: &str) {
@@ -695,26 +714,6 @@ fn completed_create_is_stale(state: Result<ComputerState, ComputerError>) -> boo
             | ComputerState::Paused,
         )
         | Err(_) => false,
-    }
-}
-
-/// Register a sandbox in the guest DNS server registry.
-fn register_sandbox_dns(id: &str, ip: &str) {
-    let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() else {
-        tracing::warn!(id, ip, "invalid sandbox IP for DNS registration");
-        return;
-    };
-    let registry = crate::dns_server::sandbox_registry();
-    if let Ok(mut map) = registry.write() {
-        map.insert(id.to_lowercase(), ipv4);
-    }
-}
-
-/// Deregister a sandbox from the guest DNS server registry.
-fn deregister_sandbox_dns(id: &str) {
-    let registry = crate::dns_server::sandbox_registry();
-    if let Ok(mut map) = registry.write() {
-        map.remove(&id.to_lowercase());
     }
 }
 

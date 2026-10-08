@@ -187,9 +187,10 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
     let registry = sync.dns.containers();
     let absent = {
         let mut registry = registry.write().expect("DNS registry lock poisoned");
+        // Resource owners are namespaced; Docker's complete container IDs contain no colon.
         let absent: Vec<_> = registry
             .owners()
-            .filter(|owner| !ids.contains(owner))
+            .filter(|owner| !owner.contains(':') && !ids.contains(owner))
             .map(str::to_owned)
             .collect();
         for container in &snapshot {

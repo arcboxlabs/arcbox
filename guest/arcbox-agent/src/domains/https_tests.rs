@@ -165,14 +165,21 @@ async fn ownership_changes_at_each_tls_stage_stop_application_forwarding() {
             let incoming_address = incoming.local_addr().unwrap();
             let backend = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let port = backend.local_addr().unwrap().port();
-            let dns = ContainerRegistry::default();
+            let server = Arc::new(
+                crate::dns_server::GuestDnsServer::new(
+                    Default::default(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .unwrap(),
+            );
+            let dns = server.containers();
             let services = WebServices::new(dns.clone());
             publish(&services, &dns, "a", port, "arcbox.local");
             let mut authority = if mutation == "resource" {
                 None
             } else {
                 let mut peer =
-                    AuthorityPeer::open(Services::system(services.clone(), dns.clone())).await;
+                    AuthorityPeer::open(Services::system(services.clone(), server)).await;
                 peer.replace(authority_snapshot(10)).await;
                 Some(peer)
             };
