@@ -258,6 +258,7 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
             &ctx.layout
                 .data_dir
                 .join(arcbox_constants::paths::guest::TLS),
+            &ctx.setup_state,
         )
         .await
         .context("Failed to prepare local HTTPS trust")?;

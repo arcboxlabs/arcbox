@@ -1395,7 +1395,8 @@ pub mod setup_status {
     /// value and never compare ordinals. The happy path is:
     ///
     ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> \[DOWNLOADING_ASSETS\]
-    ///    -> ASSETS_READY -> \[VM_STARTING -> VM_READY\] -> NETWORK_READY -> READY
+    ///    -> ASSETS_READY -> \[AWAITING_HTTPS_TRUST -> ASSETS_READY\]
+    ///    -> \[VM_STARTING -> VM_READY\] -> NETWORK_READY -> READY
     ///
     /// Bracketed steps are conditional: CLEANING_UP only when a displaced
     /// daemon's resources must be released, DOWNLOADING_ASSETS only when boot
@@ -1434,6 +1435,9 @@ pub mod setup_status {
         /// Startup failed fatally; the daemon exits shortly after
         /// publishing this phase. See the `error` field for the cause.
         Failed = 10,
+        /// The production CA needs authorization in the logged-in user's session.
+        /// The daemon stays alive without booting the VM until trust is configured.
+        AwaitingHttpsTrust = 11,
     }
     impl Phase {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -1453,6 +1457,7 @@ pub mod setup_status {
                 Self::DownloadingAssets => "DOWNLOADING_ASSETS",
                 Self::CleaningUp => "CLEANING_UP",
                 Self::Failed => "FAILED",
+                Self::AwaitingHttpsTrust => "AWAITING_HTTPS_TRUST",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1469,6 +1474,7 @@ pub mod setup_status {
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 "CLEANING_UP" => Some(Self::CleaningUp),
                 "FAILED" => Some(Self::Failed),
+                "AWAITING_HTTPS_TRUST" => Some(Self::AwaitingHttpsTrust),
                 _ => None,
             }
         }

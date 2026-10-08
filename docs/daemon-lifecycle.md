@@ -31,7 +31,8 @@ prepare_assets           Seed/download boot assets               variable
     │
 boot_runtime             Construct Runtime, boot the System VM   variable
     │                    Canonical production first verifies
-    │                    helper-managed local HTTPS trust.
+    │                    local HTTPS trust, waiting at
+    │                    AWAITING_HTTPS_TRUST if authorization is needed.
     │                    Reported as VM_STARTING → VM_READY,
     │                    published from inside Runtime::init so
     │                    the span covers the guest boot alone.
@@ -59,7 +60,7 @@ When protected startup has no System VM record, recovery rebuilds that record fr
 ### Phase enum caveats
 
 - The observable progression is `INITIALIZING → [CLEANING_UP →
-  INITIALIZING] → [DOWNLOADING_ASSETS] → ASSETS_READY → [VM_STARTING →
+  INITIALIZING] → [DOWNLOADING_ASSETS] → ASSETS_READY → [AWAITING_HTTPS_TRUST → ASSETS_READY] → [VM_STARTING →
   VM_READY] → NETWORK_READY → READY` (or `FAILED`). Bracketed phases are
   conditional; the VM pair is skipped entirely by a `--no-linux-vm`
   daemon, which boots no guest. `DEGRADED` is reserved and never emitted.
@@ -85,7 +86,7 @@ When protected startup has no System VM record, recovery rebuilds that record fr
 - `--docker-integration` is production-only. Its global Docker context switch
   runs after startup-critical recovery, so a resolver failure cannot leave a
   dead ArcBox context selected.
-- Local HTTPS trust is required before the canonical production instance boots its Linux VM. The daemon uses helper 1.2.0 or later to install and verify TLS-only Admin trust. Failure is published through `WatchSetupStatus`. Isolated data directories, development profiles, and `--no-linux-vm` do not request automatic trust.
+- Local HTTPS trust is required before the canonical production instance boots its Linux VM. The daemon creates the Keychain identity and uses helper 1.2.0 or later to inspect TLS-only Admin trust. Missing trust publishes `AWAITING_HTTPS_TRUST`; the daemon stays alive with no VM until Desktop or `abctl tls trust` authorizes the certificate. Desktop runs the bundled CLI in the login user's GUI session. A canceled prompt leaves a retryable startup step, without restarting the daemon or automatically repeating authorization. Correct existing trust skips the prompt. Isolated data directories, development profiles, and `--no-linux-vm` do not request automatic trust.
 - Enum ordinal ≠ progression order (`DOWNLOADING_ASSETS = 8` occurs before
   `READY = 6`). Clients must match on the value, never compare ordinals.
   New phases are appended with the next free number regardless of where
