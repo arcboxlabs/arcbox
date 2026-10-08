@@ -18,15 +18,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_api::SetupPhase;
+use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use arcbox_core::{Config, InitProgress, Runtime};
-use arcbox_helper::validate::Domain;
 use tracing::info;
 
 use crate::DaemonArgs;
 use crate::context::{DaemonContext, EarlyContext, StartupHandles, VmArgs};
 
-pub const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
+pub const DEFAULT_DNS_DOMAIN: &str = arcbox_constants::dns::LOCAL_DOMAIN;
 
 /// Phase 1: directories, config, sockets. No runtime, no lock yet.
 ///

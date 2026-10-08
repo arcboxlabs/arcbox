@@ -9,9 +9,9 @@
 use anyhow::{Context, Result, bail};
 use arcbox_constants::{
     container_network::ContainerNetwork,
+    dns::Domain,
     paths::{ArcboxProfile, HostLayout},
 };
-use arcbox_helper::validate::Domain;
 use clap::{Args, ValueEnum};
 use humantime::format_duration;
 use std::ffi::OsString;

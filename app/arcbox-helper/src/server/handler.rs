@@ -4,11 +4,10 @@
 //! Input validation (parse, don't validate) happens here at the RPC
 //! boundary — mutation functions only accept validated types.
 
+use arcbox_constants::dns::Domain;
 use arcbox_helper::HelperError;
 use arcbox_helper::HelperService;
-use arcbox_helper::validate::{
-    BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
-};
+use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, DnsPort, SocketTarget, Subnet};
 use arcbox_local_ca::PublicAuthority;
 
 use super::mutations;

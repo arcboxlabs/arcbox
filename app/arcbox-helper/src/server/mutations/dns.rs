@@ -3,8 +3,9 @@
 use std::fs;
 use std::path::Path;
 
+use arcbox_constants::dns::Domain;
 use arcbox_helper::HelperError;
-use arcbox_helper::validate::{DnsPort, Domain};
+use arcbox_helper::validate::DnsPort;
 
 use crate::server::fs_root;
 
@@ -65,8 +66,9 @@ fn status_at(resolver_dir: &Path, domain: &Domain) -> Result<bool, HelperError> 
 #[cfg(test)]
 mod tests {
     use super::{MARKER, install_at, status_at, uninstall_at};
+    use arcbox_constants::dns::Domain;
     use arcbox_helper::HelperError;
-    use arcbox_helper::validate::{DnsPort, Domain};
+    use arcbox_helper::validate::DnsPort;
     use std::fs;
 
     fn domain() -> Domain {
