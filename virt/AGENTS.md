@@ -103,6 +103,7 @@ files above.
 - Pass `NetworkManager::shared_dns()` through `HostNetwork` to both VMM datapaths. Resolve every query from that shared Registry and use its configured relative-name suffix. Concrete projections must never override conflicts or delegated names.
 - Configure DNS through `NetConfig::dns` before constructing NetworkManager. The forwarder configuration is immutable; do not add an outer forwarder lock.
 - Resolve instance ownership before local records or upstream cache lookup. Current empty roots receive a local negative answer. Unavailable roots terminate with SERVFAIL.
+- Forward Other instance roots only to their explicit loopback endpoint. Bypass the upstream cache and reject replies after authority revisions change.
 
 ## vmnet relay (bridge NIC, `arcbox-vmnet`)
 
