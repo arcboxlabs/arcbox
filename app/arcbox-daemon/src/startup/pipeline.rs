@@ -158,6 +158,8 @@ impl RuntimeBooted {
             if linux_vm {
                 #[cfg(target_os = "macos")]
                 crate::tls_signer::spawn(&self.ctx, &self.runtime);
+                #[cfg(target_os = "macos")]
+                crate::https_access::spawn(&self.ctx, &self.runtime);
                 services::enable_docker_integration(&self.ctx);
                 crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
                 crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);

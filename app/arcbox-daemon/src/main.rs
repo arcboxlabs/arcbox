@@ -6,6 +6,8 @@ mod disk_reclaim;
 mod dns_service;
 mod host_mount;
 mod host_network;
+#[cfg(target_os = "macos")]
+mod https_access;
 mod kubernetes_lb;
 mod kubernetes_proxy;
 mod machine_dns;
