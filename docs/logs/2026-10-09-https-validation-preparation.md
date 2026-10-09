@@ -136,3 +136,9 @@ All 29 targeted daemon tests pass: nine DNS, six shutdown, nine service, and fiv
 `vsock::SocketScope` closes admission and interrupts live dedicated sockets on both transports. Transport leases retain duplicate descriptors across split streams; the scope stores only weak references. Normal connection release still delivers EOF while the scope remains open. Registration and closure share one lock, so a connection that finishes after closure is rejected.
 
 All 33 transport tests pass, including real socket checks for idle async receivers, blocking readers, saturated blocking writers, normal EOF, explicit close, and rejected late registration. Transport all-target Clippy with `-D warnings` and workspace formatting pass. One existing documentation test remains ignored. The checks run on macOS Unix sockets; native AF_VSOCK and VM teardown remain unverified. Scope closure interrupts socket I/O but does not join native connectors or channel producers.
+
+## Operational agent connection cancellation
+
+`MachineManager` now registers normal and expected-run agent clients in one socket scope. Final host shutdown can reject new operational connections and interrupt pending guest I/O. The final VM shutdown request keeps its independent connection. Callers must still retain and join connection and operation workers.
+
+Both engine cancellation tests pass. The new test performs the real Ping handshake and sends a one-hour `SandboxExecWaitRequest` through each transport. The peer withholds its response; scope closure causes a receive error within two seconds and releases the socket. The existing test verifies that cancellation joins a blocking worker after socket shutdown. Engine all-target Clippy with `-D warnings` and workspace formatting pass. These socket checks do not start a VM or prove daemon cleanup ordering.

@@ -8,6 +8,8 @@ Before stopping or removing a VM through `VmManager`, capture `run_incarnation` 
 
 Use `MachineManager::stop(name, Some(timeout))` for graceful shutdown followed by forced shutdown of the same run when graceful shutdown is unavailable or times out. Pass `None` for immediate forced shutdown. Other shutdown errors propagate to the caller.
 
+Before final host shutdown, call `MachineManager::close_agent_connections()` to reject new operational agent connections and interrupt pending guest I/O. Then join the connection and operation workers before stopping VMs. The scope covers both transports and split streams. The final VM shutdown request uses a separate connection. Closing the scope is permanent and does not join workers or stop VMs.
+
 One operation owns stopping each physical run. A failed forced takeover preserves a pending graceful stop; a confirmed live run restores admission through `MachineStopCancelled`.
 
 Use `host_hold_expected` to admit host work only while the named machine is running the captured physical VM. On `MachineStopping`, cancel and join the work before dropping its hold.

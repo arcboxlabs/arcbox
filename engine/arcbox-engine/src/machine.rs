@@ -436,6 +436,7 @@ fn validate_mount(mount: &MachineMount) -> Result<()> {
 
 /// Machine manager.
 pub struct MachineManager {
+    agent_connections: arcbox_transport::vsock::SocketScope,
     storage_maintenance: RwLock<bool>,
     machines: RwLock<HashMap<String, MachineInfo>>,
     stop_operations: Mutex<HashMap<String, stop_owner::StopOperation>>,
@@ -545,6 +546,7 @@ impl MachineManager {
         tracing::info!("Loaded {} persisted machines", machines.len());
 
         Self {
+            agent_connections: arcbox_transport::vsock::SocketScope::default(),
             storage_maintenance: RwLock::new(false),
             machines: RwLock::new(machines),
             stop_operations: Mutex::new(HashMap::new()),
@@ -1075,6 +1077,7 @@ impl MachineManager {
     #[cfg(target_os = "macos")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
+        self.agent_connections.check_open()?;
         let (cid, vm_id) = {
             let machines = self
                 .machines
@@ -1100,10 +1103,11 @@ impl MachineManager {
         // socketpair needs the blocking transport (tokio/kqueue stalls on
         // rapid connect/teardown cycles), and only the async transport
         // supports the streaming sandbox RPCs VZ clients rely on.
-        match backend {
+        let client = match backend {
             arcbox_vmm::VmBackend::Hv => AgentClient::from_fd_blocking(cid, fd),
             arcbox_vmm::VmBackend::Vz => AgentClient::from_fd_async(cid, fd),
-        }
+        }?;
+        client.with_scope(&self.agent_connections)
     }
 
     /// Connects to a vsock port on a running machine (macOS).
@@ -1133,6 +1137,7 @@ impl MachineManager {
     #[cfg(target_os = "linux")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
+        self.agent_connections.check_open()?;
 
         let machines = self
             .machines
@@ -1155,7 +1160,7 @@ impl MachineManager {
             .ok_or_else(|| EngineError::invalid_state("CID not assigned"))?;
 
         // On Linux, AgentClient connects directly via AF_VSOCK
-        Ok(AgentClient::new(cid))
+        AgentClient::new(cid).with_scope(&self.agent_connections)
     }
 
     /// Connects to a vsock port on a running machine (Linux).
@@ -1210,6 +1215,7 @@ impl MachineManager {
         name: &str,
         expected: &VmIncarnation,
     ) -> Result<crate::agent_client::AgentClient> {
+        self.agent_connections.check_open()?;
         let machines = self
             .machines
             .read()
@@ -1226,7 +1232,19 @@ impl MachineManager {
             .cid
             .ok_or_else(|| EngineError::invalid_state("CID not assigned"))?;
         self.vm_manager
-            .connect_agent_expected(&machine.vm_id, expected, cid)
+            .connect_agent_expected(&machine.vm_id, expected, cid)?
+            .with_scope(&self.agent_connections)
+    }
+
+    /// Rejects agent connections and interrupts current guest I/O.
+    ///
+    /// The caller must join operation workers before stopping their VMs.
+    /// Final VM shutdown uses a separate connection outside this scope.
+    ///
+    /// # Errors
+    /// Returns an error if a live socket cannot be shut down.
+    pub fn close_agent_connections(&self) -> Result<()> {
+        self.agent_connections.close().map_err(EngineError::from)
     }
 
     /// Connects to the machine's agent and pings it once.

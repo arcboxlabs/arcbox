@@ -11,6 +11,19 @@ use super::{AgentClient, transport::AgentTransport};
 use crate::error::{EngineError, Result};
 
 impl AgentClient {
+    pub(crate) fn with_scope(
+        mut self,
+        scope: &arcbox_transport::vsock::SocketScope,
+    ) -> Result<Self> {
+        self.transport = match self.transport {
+            AgentTransport::Async(transport) => AgentTransport::Async(transport.with_scope(scope)?),
+            AgentTransport::Blocking(transport) => {
+                AgentTransport::Blocking(transport.with_scope(scope)?)
+            }
+        };
+        Ok(self)
+    }
+
     /// Cancels a dedicated check through `cancelled` and joins its blocking worker.
     /// The operation owner must await this future after cancellation.
     pub async fn storage_check_with_cancel(
@@ -120,6 +133,74 @@ fn cancelled_error() -> EngineError {
 mod tests {
     use super::*;
     use std::{io::Read as _, os::fd::IntoRawFd as _, os::unix::net::UnixStream};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_scope_interrupts_unanswered_execution_wait_on_both_transports() {
+        use arcbox_connect::{sandbox_v1::WaitExecutionRequest, v1::AgentPingResponse};
+        use arcbox_constants::wire::MessageType;
+        use arcbox_transport::vsock::{SocketScope, read_framed};
+        use buffa::Message as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        for blocking in [false, true] {
+            let scope = SocketScope::default();
+            let (host, mut guest) = tokio::net::UnixStream::pair().unwrap();
+            let fd = host.into_std().unwrap().into_raw_fd();
+            let client = if blocking {
+                AgentClient::from_fd_blocking(3, fd)
+            } else {
+                AgentClient::from_fd_async(3, fd)
+            }
+            .unwrap();
+            let mut client = client.with_scope(&scope).unwrap();
+            let waiting = tokio::spawn(async move {
+                client
+                    .sandbox_exec_wait(WaitExecutionRequest {
+                        timeout_seconds: 3600,
+                        ..Default::default()
+                    })
+                    .await
+            });
+            let frame = read_framed(&mut guest).await.unwrap();
+            assert_eq!(
+                super::super::wire::parse_response(&frame).unwrap().0,
+                MessageType::PingRequest as u32,
+            );
+            guest
+                .write_all(&AgentClient::build_message(
+                    MessageType::PingResponse,
+                    "",
+                    &AgentPingResponse {
+                        protocol_version: arcbox_constants::wire::AGENT_PROTOCOL_VERSION,
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ))
+                .await
+                .unwrap();
+            let frame = read_framed(&mut guest).await.unwrap();
+            let (kind, _, payload) = super::super::wire::parse_response(&frame).unwrap();
+            assert_eq!(kind, MessageType::SandboxExecWaitRequest as u32);
+            assert_eq!(
+                WaitExecutionRequest::decode_from_slice(&payload)
+                    .unwrap()
+                    .timeout_seconds,
+                3600
+            );
+
+            scope.close().unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+                .await
+                .expect("scope closure must interrupt the five-second transport wait")
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("response receive failed"),
+                "{error}"
+            );
+            assert_eq!(guest.read(&mut [0]).await.unwrap(), 0);
+        }
+    }
 
     #[tokio::test]
     async fn cancellation_joins_the_blocking_worker_after_socket_shutdown() {
