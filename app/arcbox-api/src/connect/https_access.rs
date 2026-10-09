@@ -301,7 +301,12 @@ mod tests {
         let access = &setup.https_access;
         setup.set_local_https(untrusted("root"));
         assert!(access.observing_cycle().is_none());
-        let service = SystemServiceImpl::new(setup.clone(), Arc::default(), Arc::default());
+        let service = SystemServiceImpl::new(
+            setup.clone(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        );
         let body = bytes::Bytes::new();
         let view = Empty::decode_view(&body).unwrap();
         let request = ServiceRequest::from_parts(&view, &body);

@@ -19,7 +19,7 @@ use crate::error::ApiError;
 
 use super::{SharedRuntime, stream_input};
 
-use super::{ConnectRuntimeExt as _, ContextExt as _};
+use super::{ConnectRuntimeExt as _, ContextExt as _, DEFAULT_MACHINE_NAME};
 
 /// The NAT gateway every machine's primary interface routes through; it also
 /// serves DNS (same literal the guest agent's DHCP path documents).
@@ -45,6 +45,15 @@ fn refusal<E: std::fmt::Display + Into<ApiError>>(error: E) -> ConnectError {
     connect
 }
 
+fn require_user_machine(name: &str) -> Result<(), ConnectError> {
+    if name == DEFAULT_MACHINE_NAME {
+        return Err(ConnectError::invalid_argument(
+            "default is reserved for the System VM; use SystemService controls",
+        ));
+    }
+    Ok(())
+}
+
 /// Machine service implementation.
 pub struct MachineServiceImpl {
     runtime: SharedRuntime,
@@ -52,7 +61,7 @@ pub struct MachineServiceImpl {
 }
 
 impl MachineServiceImpl {
-    /// Uses the early handle for directory reads and the operational handle for all other requests.
+    /// Uses the early handle for directory reads and the prepared host handle for operations.
     #[must_use]
     pub fn new(runtime: SharedRuntime, early_runtime: SharedRuntime) -> Self {
         Self {
@@ -76,6 +85,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::CreateMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready_for_write(&req.name)?;
+        require_user_machine(&req.name)?;
 
         // Convert bytes to MB for internal config.
         let memory_mb = req.memory / (1024 * 1024);
@@ -159,6 +169,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let id = request.to_owned_message().id;
         let runtime = self.runtime.ready_for_write(&id)?;
+        require_user_machine(&id)?;
 
         runtime
             .machine_manager()
@@ -176,6 +187,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
+        require_user_machine(&req.id)?;
         let manager = std::sync::Arc::clone(runtime.machine_manager());
 
         // Graceful stop (guest ACPI) with a force fallback, unless the caller
@@ -208,6 +220,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready_for_write(&req.id)?;
+        require_user_machine(&req.id)?;
         let manager = std::sync::Arc::clone(runtime.machine_manager());
 
         // A forced removal stops a running machine first: a synchronous VM
@@ -228,6 +241,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::CloneMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
+        require_user_machine(&req.name)?;
         let id = runtime
             .machine_manager()
             .clone_machine(&req.id, &req.name)

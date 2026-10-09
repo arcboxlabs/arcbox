@@ -27,7 +27,8 @@ pub async fn start_control_plane(ctx: &DaemonContext) -> Result<ControlPlane> {
 /// Starts the gRPC server with all services.
 ///
 /// Setup status works immediately. Machine directory reads and web snapshots
-/// become available at Runtime construction; operations wait for initialization.
+/// become available at Runtime construction. Machine operations wait for host
+/// preparation; System operations wait for System startup.
 async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
     let socket_path = &ctx.layout.grpc_socket;
     let listener = crate::control_plane::bind(socket_path)?;
@@ -37,11 +38,13 @@ async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> 
     let system_service = SystemServiceImpl::new(
         Arc::clone(&ctx.setup_state),
         Arc::clone(&ctx.shared_runtime),
+        Arc::clone(&ctx.host_runtime),
         Arc::clone(&ctx.early_runtime),
     );
     let app = crate::control_plane::into_app(
         crate::control_plane::connect_router(
             Arc::clone(&ctx.shared_runtime),
+            Arc::clone(&ctx.host_runtime),
             Arc::clone(&ctx.early_runtime),
             system_service,
         )?,

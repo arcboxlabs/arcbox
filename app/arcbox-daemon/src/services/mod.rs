@@ -116,6 +116,9 @@ pub async fn start_services(
     ctx.shared_runtime
         .set(Arc::clone(runtime))
         .map_err(|_| anyhow::anyhow!("start_services called twice"))?;
+    ctx.host_runtime
+        .set(Arc::clone(runtime))
+        .map_err(|_| anyhow::anyhow!("Machine host already admitted"))?;
 
     register_host_dns(runtime).await?;
 

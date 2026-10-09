@@ -99,7 +99,7 @@ fn status(setup: &SetupState, state: TrustState) {
 }
 
 async fn watch(setup: Arc<SetupState>) -> ServiceStream<LocalHttpsAccess> {
-    let service = SystemServiceImpl::new(setup, Arc::default(), Arc::default());
+    let service = SystemServiceImpl::new(setup, Arc::default(), Arc::default(), Arc::default());
     let body = bytes::Bytes::new();
     let view = Empty::decode_view(&body).unwrap();
     service

@@ -78,6 +78,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         profile,
         layout,
         shared_runtime: handles.shared_runtime,
+        host_runtime: handles.host_runtime,
         early_runtime: handles.early_runtime,
         setup_state: handles.setup_state,
         shutdown: handles.shutdown,
@@ -148,6 +149,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         layout: early.layout,
         daemon_lock: lock,
         shared_runtime: early.shared_runtime,
+        host_runtime: early.host_runtime,
         early_runtime: early.early_runtime,
         setup_state: early.setup_state,
         #[cfg(target_os = "macos")]

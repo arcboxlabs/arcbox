@@ -48,6 +48,8 @@ pub type SharedContainerNetworkLease = Arc<std::sync::OnceLock<ContainerNetworkL
 #[derive(Clone)]
 pub struct StartupHandles {
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled right after runtime construction, before the VM boots.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
@@ -73,6 +75,7 @@ impl StartupHandles {
     pub fn new(setup_state: Arc<SetupState>) -> Self {
         Self {
             shared_runtime: Arc::new(std::sync::OnceLock::new()),
+            host_runtime: Arc::new(std::sync::OnceLock::new()),
             early_runtime: Arc::new(std::sync::OnceLock::new()),
             setup_state,
             shutdown: CancellationToken::new(),
@@ -101,6 +104,8 @@ pub struct EarlyContext {
     pub profile: ArcboxProfile,
     pub layout: HostLayout,
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled as soon as the runtime is constructed, before the VM boots.
     /// Serves diagnostics and read-only directories while startup is incomplete.
     pub early_runtime: SharedRuntime,
@@ -154,6 +159,8 @@ pub struct DaemonContext {
     pub daemon_lock: Arc<DaemonLock>,
     /// Shared with gRPC services. Filled after runtime service endpoints bind.
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled by `init_runtime` right after runtime construction, before
     /// the VM boots, for diagnostics and read-only directories.
     pub early_runtime: SharedRuntime,

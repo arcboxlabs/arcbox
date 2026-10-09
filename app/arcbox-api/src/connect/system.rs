@@ -1,4 +1,4 @@
-//! System service — daemon readiness, version, and diagnostics.
+//! System service — independent host/System readiness, version, and diagnostics.
 //!
 //! Provides setup status queries so the desktop app (or any client) can
 //! observe daemon readiness without managing its lifecycle.
@@ -176,7 +176,8 @@ impl Default for SetupState {
 /// SystemService gRPC implementation.
 pub struct SystemServiceImpl {
     setup_state: Arc<SetupState>,
-    runtime: SharedRuntime,
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
     /// Constructed Runtime for diagnostics and web discovery before System VM startup.
     /// Core checks the captured guest's readiness for each web snapshot.
     early_runtime: SharedRuntime,
@@ -186,12 +187,14 @@ impl SystemServiceImpl {
     /// Creates a new system service.
     pub fn new(
         setup_state: Arc<SetupState>,
-        runtime: SharedRuntime,
+        system_runtime: SharedRuntime,
+        host_runtime: SharedRuntime,
         early_runtime: SharedRuntime,
     ) -> Self {
         Self {
             setup_state,
-            runtime,
+            system_runtime,
+            host_runtime,
             early_runtime,
         }
     }
@@ -310,7 +313,7 @@ impl pb::SystemService for SystemServiceImpl {
             .ok_or_else(|| {
                 ConnectError::invalid_argument("action must be CHECK_ONLY or RECOVER")
             })?;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         let (initial, mut updates) = runtime
             .recover_storage(action)
             .await
@@ -450,7 +453,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::Empty>,
     ) -> ServiceResult<pb::SystemVmBackendInfo> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         let info = pb::SystemVmBackendInfo {
             backend: backend_to_proto(runtime.system_vm_backend()).into(),
             ..Default::default()
@@ -548,7 +551,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ResolveContainerFsRequest>,
     ) -> ServiceResult<pb::ResolveContainerFsResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.system_runtime.ready()?;
         let req = request.to_owned_message();
         if req.container_id.is_empty() {
             return Err(ConnectError::invalid_argument(
@@ -572,7 +575,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ResolveImageFsRequest>,
     ) -> ServiceResult<pb::ResolveImageFsResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.system_runtime.ready()?;
         let req = request.to_owned_message();
         if req.top_chain_id.is_empty() {
             return Err(ConnectError::invalid_argument(
@@ -595,7 +598,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::Empty>,
     ) -> ServiceResult<pb::SystemVmResources> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         Response::ok(resources_to_proto(runtime.system_vm_resources()))
     }
 
@@ -605,7 +608,7 @@ impl pb::SystemService for SystemServiceImpl {
         request: ServiceRequest<'_, pb::SetSystemVmResourcesRequest>,
     ) -> ServiceResult<pb::SystemVmResources> {
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
+        let runtime = self.host_runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         let resources = runtime
             .resize_system_vm(req.cpus, req.memory_mb)
             .await
@@ -628,7 +631,7 @@ impl pb::SystemService for SystemServiceImpl {
         let req = request.to_owned_message();
         let backend = backend_from_proto(req.backend.as_known().unwrap_or_default())
             .ok_or_else(|| ConnectError::invalid_argument("backend must be HV or VZ"))?;
-        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
+        let runtime = self.host_runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         runtime
             .switch_system_vm_backend(backend)
             .await
@@ -655,8 +658,12 @@ mod tests {
         let (directory, early) = crate::connect::tests::storage_runtime();
         let shared: SharedRuntime = Arc::default();
         for (early_runtime, available) in [(Arc::default(), false), (early, true)] {
-            let service =
-                SystemServiceImpl::new(Arc::new(SetupState::new()), shared.clone(), early_runtime);
+            let service = SystemServiceImpl::new(
+                Arc::new(SetupState::new()),
+                shared.clone(),
+                Arc::default(),
+                early_runtime,
+            );
             let bytes = bytes::Bytes::from(pb::ListWebServicesRequest::default().encode_to_vec());
             let view = pb::ListWebServicesRequest::decode_view(&bytes).unwrap();
             let listed = service

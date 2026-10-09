@@ -73,7 +73,7 @@ pub use template::TemplateServiceImpl;
 /// Shared handle to a runtime that may not be initialized yet.
 ///
 /// Services are registered before Runtime exists. Each RPC calls `ready()` on
-/// its early or operational handle and returns `Unavailable` until that handle is filled.
+/// its early, host, or System handle and returns `Unavailable` until that handle is filled.
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
 /// Idle interval after which a server stream emits a keepalive frame, so
@@ -263,8 +263,12 @@ fn exposed_port(
 /// registration is what decides whether a path is served at all: the router
 /// answers exactly what it was given, and an omission 404s at runtime.
 #[must_use]
-pub fn router(runtime: SharedRuntime, early_runtime: SharedRuntime) -> connectrpc::Router {
-    let clone = || Arc::clone(&runtime);
+pub fn router(
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
+) -> connectrpc::Router {
+    let clone = || Arc::clone(&system_runtime);
     let sandbox_operations = Arc::new(arcbox_computer::locks::SandboxOperationLocks::default());
     let router = connectrpc::Router::new()
         .add_service(Arc::new(SandboxServiceImpl::new(
@@ -289,20 +293,24 @@ pub fn router(runtime: SharedRuntime, early_runtime: SharedRuntime) -> connectrp
         .add_service(Arc::new(StatsServiceImpl::new(clone())))
         .add_service(Arc::new(KubernetesServiceImpl::new(clone())))
         .add_service(Arc::new(MigrationServiceImpl::new(clone())))
-        .add_service(Arc::new(MachineServiceImpl::new(clone(), early_runtime)));
+        .add_service(Arc::new(MachineServiceImpl::new(
+            Arc::clone(&host_runtime),
+            early_runtime,
+        )));
     #[cfg(target_os = "macos")]
-    let router = router.add_service(Arc::new(MacosServiceImpl::new(clone())));
+    let router = router.add_service(Arc::new(MacosServiceImpl::new(host_runtime)));
     router
 }
 
 /// Registers every service, including SystemService with its setup state.
 #[must_use]
 pub fn router_with_system(
-    runtime: SharedRuntime,
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
     early_runtime: SharedRuntime,
     system: SystemServiceImpl,
 ) -> connectrpc::Router {
-    router(runtime, early_runtime).add_service(Arc::new(system))
+    router(system_runtime, host_runtime, early_runtime).add_service(Arc::new(system))
 }
 
 #[cfg(test)]

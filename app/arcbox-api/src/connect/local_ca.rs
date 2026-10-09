@@ -146,7 +146,7 @@ mod tests {
     async fn system_handlers_dispatch_pinned_identities_without_a_ready_runtime() {
         let setup = Arc::new(SetupState::new());
         let mut receiver = setup.local_ca.register().unwrap();
-        let service = SystemServiceImpl::new(setup, Arc::default(), Arc::default());
+        let service = SystemServiceImpl::new(setup, Arc::default(), Arc::default(), Arc::default());
         let bytes = bytes::Bytes::from(
             pb::PrepareLocalCaRotationRequest {
                 expected_current_sha256: "previous".into(),

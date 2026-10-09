@@ -12,7 +12,7 @@ use arcbox_core::{HostCapacity, Runtime};
 use connectrpc::{ConnectError, RequestContext};
 
 use super::super::ContextExt as _;
-use super::{refusal, rootfs};
+use super::{refusal, require_user_machine, rootfs};
 
 /// Writes machine `id` to the archive at `path`; the image manifest it
 /// carries is the registry entry the machine's rootfs device belongs to.
@@ -64,6 +64,9 @@ pub(super) async fn import(
     req: pb::ImportMachineRequest,
 ) -> Result<pb::ImportMachineResponse, ConnectError> {
     ctx.check_shutdown()?;
+    if !req.name.is_empty() {
+        require_user_machine(&req.name)?;
+    }
     let path = archive_path(&req.path)?;
     let manifest_path = path.clone();
     let manifest = tokio::task::spawn_blocking(move || read_manifest(&manifest_path))
@@ -72,6 +75,7 @@ pub(super) async fn import(
         .map_err(refusal)?;
     let archived = manifest.machine;
     let name = if req.name.is_empty() {
+        require_user_machine(&archived.name)?;
         archived.name.clone()
     } else {
         req.name
