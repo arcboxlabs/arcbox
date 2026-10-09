@@ -1,8 +1,15 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use arcbox_connect::v1::Empty;
-use connectrpc::{Response, ServiceStream, bidi_streaming_handler_fn, client_streaming_handler_fn};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use connectrpc::{
+    Response, ServiceStream, bidi_streaming_handler_fn, client_streaming_handler_fn, handler_fn,
+};
 use tokio::sync::{Notify, mpsc, oneshot};
+use tower::ServiceExt as _;
 
 use super::*;
 
@@ -143,4 +150,56 @@ async fn close_and_caller_drop_retain_native_work_and_async_cleanup() {
         .await
         .unwrap();
     completed.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn connect_deadline_preserves_admitted_handler_completion() {
+    let started = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let router = Router::new().route(
+        "test.Lifecycle",
+        "Run",
+        handler_fn({
+            let started = Arc::clone(&started);
+            let released = Arc::clone(&released);
+            move |ctx: RequestContext, _: Empty| {
+                let started = Arc::clone(&started);
+                let released = Arc::clone(&released);
+                async move {
+                    started.notify_one();
+                    released.notified().await;
+                    assert!(
+                        ctx.extensions()
+                            .get::<CancellationToken>()
+                            .unwrap()
+                            .is_cancelled()
+                    );
+                    Response::ok(Empty::default())
+                }
+            }
+        }),
+    );
+    let calls = Calls::default();
+    let app = crate::control_plane::into_app(router, calls.clone());
+    let request = Request::post("/test.Lifecycle/Run")
+        .header("content-type", "application/json")
+        .header("connect-timeout-ms", "1000")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = tokio::spawn(app.oneshot(request));
+    started.notified().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "deadline_exceeded");
+
+    calls.close();
+    let mut joined = Box::pin(calls.wait());
+    assert!(matches!(futures::poll!(&mut joined), Poll::Pending));
+    released.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), joined)
+        .await
+        .unwrap();
 }

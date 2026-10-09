@@ -3,6 +3,7 @@ use std::future::pending;
 use super::*;
 
 mod dns;
+mod rpc;
 
 #[tokio::test]
 async fn graceful_failure_returns_an_error_without_forcing() {
