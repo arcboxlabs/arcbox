@@ -6,7 +6,7 @@
 //! Startup::prepare_host()          → EarlyContext   (no lock, no runtime)
 //! Startup::acquire_daemon_lease()  → DaemonContext  (lock held, no runtime yet)
 //! Startup::start_control_plane()   → ControlPlane   (gRPC serving, DNS socket bound)
-//! Startup::boot_runtime()          → Arc<Runtime>   (also fills SharedRuntime for gRPC)
+//! Startup::boot_runtime()          → Arc<Runtime>   (shared host state prepared)
 //! ```
 //!
 //! This encoding makes it a compile error to access the daemon lock
@@ -61,6 +61,7 @@ pub struct StartupHandles {
     pub daemon_lock: SharedDaemonLock,
     /// Filled before an isolated VM boots and held through shutdown cleanup.
     pub container_network_lease: SharedContainerNetworkLease,
+    pub system_service: BackgroundTask,
     pub resolver_service: BackgroundTask,
     pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
@@ -82,6 +83,7 @@ impl StartupHandles {
             rpc_calls: Calls::default(),
             daemon_lock: Arc::new(std::sync::OnceLock::new()),
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
+            system_service: BackgroundTask::default(),
             resolver_service: BackgroundTask::default(),
             dns_service: BackgroundTask::default(),
             guest_trust_service: BackgroundTask::default(),
@@ -116,6 +118,7 @@ pub struct EarlyContext {
     pub daemon_lock_slot: SharedDaemonLock,
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
+    pub system_service: BackgroundTask,
     pub resolver_service: BackgroundTask,
     pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
@@ -157,7 +160,7 @@ pub struct DaemonContext {
     /// `StartupHandles` holds a sibling clone so a cancelled startup
     /// future cannot release it early.
     pub daemon_lock: Arc<DaemonLock>,
-    /// Shared with gRPC services. Filled after runtime service endpoints bind.
+    /// System RPC admission, filled after System initialization and endpoint binding.
     pub shared_runtime: SharedRuntime,
     /// Admits Machine operations after shared host preparation and listener startup.
     pub host_runtime: SharedRuntime,
@@ -172,6 +175,7 @@ pub struct DaemonContext {
     pub rpc_calls: Calls,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
+    pub system_service: BackgroundTask,
     pub resolver_service: BackgroundTask,
     pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
@@ -219,16 +223,18 @@ pub struct ControlPlane {
     pub dns: DnsService,
 }
 
-/// Handles to spawned services for drain-on-shutdown.
+/// Machine host endpoints drained during daemon shutdown.
 pub struct ServiceHandles {
     /// Actual UDP port selected by the bound DNS socket.
     pub dns_port: u16,
-    /// Docker API server task; `None` in VM-host-only mode.
-    pub docker: Option<tokio::task::JoinHandle<()>>,
     pub grpc: tokio::task::JoinHandle<()>,
-    pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
-    /// SSH server task; `None` when its best-effort default port was taken.
+    /// SSH server task; absent when the best-effort default port was taken.
     pub ssh: Option<tokio::task::JoinHandle<()>>,
-    /// Host container-route guard; present only on macOS with the Linux VM enabled.
+}
+
+/// System VM endpoints owned by the retained System startup task.
+pub struct SystemServiceHandles {
+    pub docker: Option<tokio::task::JoinHandle<()>>,
+    pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
     pub route_guard: Option<tokio::task::JoinHandle<()>>,
 }

@@ -22,7 +22,7 @@ use arcbox_docker::DockerContextManager;
 use tokio::signal;
 use tracing::{info, warn};
 
-use crate::context::{DaemonContext, ServiceHandles, StartupHandles};
+use crate::context::{DaemonContext, ServiceHandles, StartupHandles, SystemServiceHandles};
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,7 +33,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_ABORT_GRACE: Duration = Duration::from_secs(10);
 
 /// Waits for a shutdown signal, drains services, and cleans up.
-pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> {
+pub async fn run(ctx: Arc<DaemonContext>, mut handles: ServiceHandles) -> Result<()> {
     tokio::select! {
         () = wait_for_signal() => {}
         () = ctx.shutdown.cancelled() => {
@@ -52,6 +52,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     crate::machine_mount::cleanup().await;
     let disconnected = close_guest_connections(&ctx.early_runtime);
     ctx.shutdown.cancel();
+    if let Err(error) = ctx.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
     if let Err(error) = ctx.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed");
     }
@@ -80,7 +83,7 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     drain(&mut handles).await;
     ctx.rpc_calls.wait().await;
 
-    let stopped = match ctx.shared_runtime.get() {
+    let stopped = match ctx.early_runtime.get() {
         Some(runtime) => stop_runtime(Arc::clone(runtime), None).await,
         None => RuntimeStop::Graceful(Ok(())),
     };
@@ -259,6 +262,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let disconnected = close_guest_connections(&handles.early_runtime);
     handles.shutdown.cancel();
+    if let Err(error) = handles.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed during startup cancellation");
     }
@@ -313,6 +319,9 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
         warn!(%error, "guest agent connection cleanup failed after startup error");
     }
     handles.shutdown.cancel();
+    if let Err(error) = handles.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed after startup error");
     }
@@ -371,19 +380,25 @@ pub async fn wait_for_signal() {
 }
 
 async fn drain(handles: &mut ServiceHandles) {
+    let tasks = std::iter::once(&mut handles.grpc).chain(handles.ssh.as_mut());
+    drain_servers(tasks).await;
+}
+
+/// Drains System listeners before dependent services and Runtime stop.
+pub async fn drain_system(handles: &mut SystemServiceHandles) {
+    let tasks = handles
+        .docker
+        .iter_mut()
+        .chain(handles.kubernetes_proxy.iter_mut())
+        .chain(handles.route_guard.iter_mut());
+    drain_servers(tasks).await;
+}
+
+async fn drain_servers<'a>(tasks: impl Iterator<Item = &'a mut tokio::task::JoinHandle<()>>) {
+    let mut tasks: Vec<_> = tasks.collect();
     if tokio::time::timeout(DRAIN_TIMEOUT, async {
-        let _ = (&mut handles.grpc).await;
-        if let Some(h) = handles.docker.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.kubernetes_proxy.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.ssh.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.route_guard.as_mut() {
-            let _ = h.await;
+        for task in &mut tasks {
+            let _ = (&mut **task).await;
         }
     })
     .await
@@ -393,18 +408,13 @@ async fn drain(handles: &mut ServiceHandles) {
             "Server drain timed out after {}s, aborting remaining tasks",
             DRAIN_TIMEOUT.as_secs()
         );
-        handles.grpc.abort();
-        if let Some(h) = handles.docker.as_mut() {
-            h.abort();
+        for task in &tasks {
+            task.abort();
         }
-        if let Some(h) = handles.kubernetes_proxy.as_mut() {
-            h.abort();
-        }
-        if let Some(h) = handles.ssh.as_mut() {
-            h.abort();
-        }
-        if let Some(h) = handles.route_guard.as_mut() {
-            h.abort();
+        for task in tasks {
+            if !task.is_finished() {
+                let _ = task.await;
+            }
         }
     }
 }

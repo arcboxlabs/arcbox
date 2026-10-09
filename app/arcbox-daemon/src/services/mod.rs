@@ -1,7 +1,7 @@
 //! Service startup: DNS, Docker API, gRPC servers.
 //!
 //! gRPC starts once with all services. Machine directory reads use the early
-//! Runtime; operations wait for the operational Runtime. Empty handles return
+//! Runtime; operations use separate host and System admission. Empty handles return
 //! `UNAVAILABLE` without restarting the gRPC server mid-boot.
 
 mod control_plane;
@@ -20,17 +20,15 @@ use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::context::{ControlPlane, DaemonContext, ServiceHandles};
+use crate::context::{ControlPlane, DaemonContext, ServiceHandles, SystemServiceHandles};
 
 #[cfg(target_os = "macos")]
 const ROUTE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const ROUTE_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Starts DNS, Docker API, and Kubernetes services.
-///
-/// Called after `init_runtime()` — the runtime must be available.
-pub async fn start_services(
+/// Starts Machine host listeners without waiting for the System VM.
+pub async fn start_host_services(
     ctx: &DaemonContext,
     runtime: &Arc<Runtime>,
     control_plane: ControlPlane,
@@ -39,8 +37,54 @@ pub async fn start_services(
         grpc,
         dns: dns_service,
     } = control_plane;
-    let linux_vm = runtime.config().vm.autostart;
+    let dns_port = dns_service.host_port()?;
+    // Machines are VMs of their own, so SSH does not depend on the Linux VM.
+    let ssh = crate::ssh_service::SshService::bind_requested(
+        ctx.ssh_port,
+        &ctx.layout,
+        ctx.profile.ssh_host(),
+        Arc::clone(runtime),
+    )
+    .await?;
 
+    register_host_dns(runtime).await?;
+
+    let dns_shutdown = ctx.shutdown.clone();
+    let network_manager = Arc::clone(runtime.network_manager());
+    ctx.dns_service
+        .start(async move {
+            dns_service
+                .run(network_manager, dns_shutdown)
+                .await
+                .inspect_err(|error| tracing::error!(%error, "DNS service error"))
+        })
+        .await;
+
+    // Mirror route-install events into SetupStatus. VM (re)starts install
+    // the container route from vm_lifecycle, outside the cold-start
+    // recovery path that sets the flag directly — without this bridge,
+    // route_installed would stay stale until the next daemon restart.
+    let route_events = runtime.event_bus().subscribe();
+    let route_state = Arc::clone(&ctx.setup_state);
+    let route_shutdown = ctx.shutdown.clone();
+    drop(tokio::spawn(async move {
+        route_status_loop(route_events, route_state, route_shutdown).await;
+    }));
+
+    let ssh = ssh.map(|service| service.start(ctx.shutdown.clone()));
+    Ok(ServiceHandles {
+        dns_port,
+        grpc,
+        ssh,
+    })
+}
+
+/// Binds System VM endpoints after container runtime initialization succeeds.
+pub async fn start_system_services(
+    ctx: &DaemonContext,
+    runtime: &Arc<Runtime>,
+) -> Result<SystemServiceHandles> {
+    let linux_vm = runtime.config().vm.autostart;
     // A custom instance pool must be routable before any API reports ready.
     // Production keeps its existing best-effort recovery semantics.
     #[cfg(target_os = "macos")]
@@ -52,8 +96,6 @@ pub async fn start_services(
         )
         .await?;
     }
-
-    let dns_port = dns_service.host_port()?;
 
     // VM-host-only mode: the Docker API, Docker CLI integration, and the
     // Kubernetes proxy all depend on the Linux VM, so they are skipped when it
@@ -101,15 +143,6 @@ pub async fn start_services(
         None
     };
 
-    // Machines are VMs of their own, so SSH does not depend on the Linux VM.
-    let ssh = crate::ssh_service::SshService::bind_requested(
-        ctx.ssh_port,
-        &ctx.layout,
-        ctx.profile.ssh_host(),
-        Arc::clone(runtime),
-    )
-    .await?;
-
     // Normal RPCs become available only after their advertised listeners are
     // bound. Kubernetes RPCs remain unavailable when its best-effort default
     // listener could not bind; an explicit listener is required to succeed.
@@ -119,19 +152,6 @@ pub async fn start_services(
     ctx.host_runtime
         .set(Arc::clone(runtime))
         .map_err(|_| anyhow::anyhow!("Machine host already admitted"))?;
-
-    register_host_dns(runtime).await?;
-
-    let dns_shutdown = ctx.shutdown.clone();
-    let network_manager = Arc::clone(runtime.network_manager());
-    ctx.dns_service
-        .start(async move {
-            dns_service
-                .run(network_manager, dns_shutdown)
-                .await
-                .inspect_err(|error| tracing::error!(%error, "DNS service error"))
-        })
-        .await;
 
     let docker = docker_service.map(|(docker_server, listener)| {
         let docker_shutdown = ctx.shutdown.clone();
@@ -143,18 +163,6 @@ pub async fn start_services(
     });
 
     let kubernetes_proxy = kubernetes_proxy.map(|proxy| proxy.start(Arc::clone(runtime)));
-    let ssh = ssh.map(|service| service.start(ctx.shutdown.clone()));
-
-    // Mirror route-install events into SetupStatus. VM (re)starts install
-    // the container route from vm_lifecycle, outside the cold-start
-    // recovery path that sets the flag directly — without this bridge,
-    // route_installed would stay stale until the next daemon restart.
-    let route_events = runtime.event_bus().subscribe();
-    let route_state = Arc::clone(&ctx.setup_state);
-    let route_shutdown = ctx.shutdown.clone();
-    drop(tokio::spawn(async move {
-        route_status_loop(route_events, route_state, route_shutdown).await;
-    }));
 
     #[cfg(target_os = "macos")]
     let route_guard = linux_vm.then(|| {
@@ -169,12 +177,9 @@ pub async fn start_services(
     #[cfg(not(target_os = "macos"))]
     let route_guard = None;
 
-    Ok(ServiceHandles {
-        dns_port,
+    Ok(SystemServiceHandles {
         docker,
-        grpc,
         kubernetes_proxy,
-        ssh,
         route_guard,
     })
 }
@@ -200,14 +205,8 @@ pub fn enable_docker_integration(ctx: &DaemonContext) {
     }
 }
 
-/// Starts the `vm_running` mirror for the System VM.
-///
-/// Spawned from `init_runtime`, not from [`start_services`]: the VM reaches
-/// `VmLifecycleState::Running` partway through `Runtime::init` — that is what
-/// publishes `VM_READY` — and `init` then waits for the guest container
-/// runtime. A mirror started once `boot_runtime` has returned would report
-/// `vm_running = false` across that whole window while the agent is already
-/// answering, which is exactly what the field promises it is not.
+/// Mirrors agent readiness before independent System initialization starts.
+/// The agent-ready milestone precedes Docker readiness.
 pub fn spawn_vm_running_mirror(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let state = runtime.subscribe_system_vm_state();
     let setup_state = Arc::clone(&ctx.setup_state);

@@ -26,7 +26,7 @@ pub struct Startup {
 }
 
 pub struct ReadyDaemon {
-    pub ctx: DaemonContext,
+    pub ctx: Arc<DaemonContext>,
     pub handles: ServiceHandles,
 }
 
@@ -57,12 +57,12 @@ impl HostPrepared {
     /// Acquires the exclusive daemon lease.
     pub async fn acquire_daemon_lease(self) -> Result<DaemonLeased> {
         let ctx = record_startup_phase("acquire_daemon_lease", acquire_lock(self.early)).await?;
-        Ok(DaemonLeased { ctx })
+        Ok(DaemonLeased { ctx: Arc::new(ctx) })
     }
 }
 
 pub struct DaemonLeased {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
 }
 
 impl DaemonLeased {
@@ -83,7 +83,7 @@ impl DaemonLeased {
 }
 
 pub struct ControlPlaneStarted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
 }
 
@@ -104,7 +104,7 @@ impl ControlPlaneStarted {
 }
 
 pub struct ResourcesReleased {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
 }
 
@@ -122,7 +122,7 @@ impl ResourcesReleased {
 }
 
 pub struct AssetsPrepared {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
     _assets: assets::PreparedAssets,
 }
@@ -140,7 +140,7 @@ impl AssetsPrepared {
 }
 
 pub struct RuntimeBooted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
     runtime: Arc<Runtime>,
 }
@@ -151,7 +151,18 @@ impl RuntimeBooted {
         let linux_vm = self.runtime.config().vm.autostart;
         let handles = record_startup_phase("start_runtime_services", async {
             let handles =
-                services::start_services(&self.ctx, &self.runtime, self.control_plane).await?;
+                services::start_host_services(&self.ctx, &self.runtime, self.control_plane).await?;
+            let mut system_handles =
+                services::start_system_services(&self.ctx, &self.runtime).await?;
+            let shutdown = self.ctx.shutdown.clone();
+            self.ctx
+                .system_service
+                .start(async move {
+                    shutdown.cancelled().await;
+                    crate::shutdown::drain_system(&mut system_handles).await;
+                    Ok(())
+                })
+                .await;
             recovery::prepare_host(&self.ctx, &self.runtime, handles.dns_port).await?;
             recovery::run_system(&self.ctx, &self.runtime).await?;
             #[cfg(target_os = "macos")]
@@ -187,7 +198,7 @@ impl RuntimeBooted {
 }
 
 pub struct RuntimeServicesStarted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     handles: ServiceHandles,
     /// Whether the Linux VM (and its Docker/K8s services) is running.
     linux_vm: bool,
