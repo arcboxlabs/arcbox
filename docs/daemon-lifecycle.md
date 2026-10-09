@@ -149,6 +149,9 @@ write current PID
 
 ```
 signal received
+  ├─ close RPC admission              → client input fails with Unavailable
+  ├─ unmount owned NFS exports        → guest servers remain available during unmount
+  ├─ close agent connection scope     → pending guest I/O is interrupted
   ├─ cancel CancellationToken         → all services begin draining
   ├─ join resolver publication        → Bonjour connection and records are released
   ├─ join DNS                        → running upstream queries finish; listener closes
@@ -157,6 +160,7 @@ signal received
   │   once and finish in-flight requests with `Connection: close`; only
   │   a request still running can use the budget. A client that parks
   │   a pooled connection does not hold the daemon.
+  ├─ join admitted RPC handlers       → shared barrier survives a cancelled cleanup waiter
   ├─ runtime.shutdown()
   │   ├─ stop port forwarders
   │   ├─ vm_lifecycle.shutdown()       → graceful VM stop; bridge routes expire
@@ -171,6 +175,10 @@ signal received
 The daemon completes host cleanup before reporting a runtime shutdown error. A failed graceful stop returns the error to `main`; a failed forced stop exits with status 1. A shutdown task panic also remains a failure, even if the subsequent forced stop succeeds. Forced stops still use `process::exit` after cleanup because an abandoned graceful task can block Tokio runtime destruction.
 
 The DNS service owns its UDP listener and retains blocking upstream queries in a `JoinSet`. Cancellation stops admission and replies, cancels queued work, then joins running queries. A listener error or query panic follows the same cleanup path before returning an error. A running query can wait up to two seconds for each configured upstream. DNS uses a shared `BackgroundTask` outside the five-second server drain. Normal shutdown, interrupted startup, and failed startup join that task before stopping Runtime. Cancelling a cleanup waiter preserves the service in the shared slot so another waiter can finish the join. DNS task failures are logged before the eventual join.
+
+All three exit paths close RPC admission and the operational agent socket scope before joining services. Normal exit first unmounts owned NFS exports. Each handler context carries a shutdown token. Remote preparation cancels HTTP requests or kills and reaps its Docker child; machine downloads drain pending file writes before removing staging. The shared RPC barrier retains admitted handlers through client disconnects and deadlines, then joins them before Runtime stops. Client and bidirectional input streams receive one `Unavailable` error followed by EOF; shutdown cannot turn a partial upload into successful input completion. Socket closure interrupts both async and blocking guest I/O, including split transports. The final VM shutdown connection remains outside this scope. The handler barrier does not own response-stream producers or detached native workers; their owners must retain and join those tasks separately.
+
+Cleanup continues to await accepted native operations. The force-shutdown prompt appears after service and RPC cleanup, when runtime shutdown starts listening for another signal.
 
 ### Residual state after graceful exit
 
@@ -193,9 +201,12 @@ kill-and-orphan:
 
 ```
 signal received during startup
+  ├─ close RPC admission                            → reject new handlers
   ├─ SetupState.set_failed("startup interrupted…")  → WatchSetupStatus clients see the cause
+  ├─ close agent connection scope                    → interrupt pending guest I/O
   ├─ cancel CancellationToken                       → gRPC (if started) drains
   ├─ join resolver publication                       → retain cleanup across a cancelled join
+  ├─ join admitted RPC handlers                       → finish before stopping Runtime
   ├─ early_runtime empty?  → exit (nothing to tear down)
   ├─ runtime.shutdown()    → bounded to 10 s: an in-flight boot parks
   │                          graceful Stop behind itself, so an unbounded

@@ -22,6 +22,7 @@ use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use tokio_util::sync::CancellationToken;
 
 use crate::background_task::BackgroundTask;
+use crate::control_plane::Calls;
 use crate::dns_service::DnsService;
 use crate::startup::{ContainerNetworkLease, DaemonLock};
 
@@ -51,6 +52,7 @@ pub struct StartupHandles {
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Filled by the lease phase. Held here (not only in the pipeline's
     /// context) so the exclusive flock lives until process exit even when
     /// the startup future is cancelled mid-flight.
@@ -74,6 +76,7 @@ impl StartupHandles {
             early_runtime: Arc::new(std::sync::OnceLock::new()),
             setup_state,
             shutdown: CancellationToken::new(),
+            rpc_calls: Calls::default(),
             daemon_lock: Arc::new(std::sync::OnceLock::new()),
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
             resolver_service: BackgroundTask::default(),
@@ -103,6 +106,7 @@ pub struct EarlyContext {
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Empty slot the lease phase publishes the acquired lock into.
     pub daemon_lock_slot: SharedDaemonLock,
     /// Slot filled once the selected non-default container CIDR is known.
@@ -158,6 +162,7 @@ pub struct DaemonContext {
     #[cfg(target_os = "macos")]
     pub local_ca: tokio::sync::watch::Sender<Option<Arc<arcbox_local_ca::KeychainAuthority>>>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,

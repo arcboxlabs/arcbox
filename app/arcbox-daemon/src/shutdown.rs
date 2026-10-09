@@ -40,7 +40,8 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
             warn!("internal safety condition requested daemon shutdown");
         }
     }
-    println!("Shutting down guest VM... (press Ctrl+C again to force quit)");
+    ctx.rpc_calls.close();
+    println!("Finishing active operations before stopping VMs...");
     info!("Shutdown signal received, draining connections...");
 
     // Keep the NFS proxy and guest alive until macOS has detached the mount.
@@ -49,6 +50,7 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     // the machines `stop_runtime` is about to stop.
     crate::nfs_mount::cleanup(&ctx).await;
     crate::machine_mount::cleanup().await;
+    let disconnected = close_guest_connections(&ctx.early_runtime);
     ctx.shutdown.cancel();
     if let Err(error) = ctx.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed");
@@ -76,6 +78,7 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     }
 
     drain(&mut handles).await;
+    ctx.rpc_calls.wait().await;
 
     let stopped = match ctx.shared_runtime.get() {
         Some(runtime) => stop_runtime(Arc::clone(runtime), None).await,
@@ -85,7 +88,18 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     cleanup(&ctx).await;
     info!("ArcBox daemon stopped");
 
-    stopped.finish()
+    stopped.finish()?;
+    disconnected
+}
+
+fn close_guest_connections(runtime: &arcbox_api::SharedRuntime) -> Result<()> {
+    if let Some(runtime) = runtime.get() {
+        runtime
+            .machine_manager()
+            .close_agent_connections()
+            .context("Failed to interrupt guest agent connections")?;
+    }
+    Ok(())
 }
 
 enum RuntimeStop {
@@ -123,6 +137,7 @@ impl RuntimeStop {
 /// Retains shutdown errors and task panics until daemon cleanup completes.
 /// A forced result must exit directly because the graceful task can remain blocked.
 async fn stop_runtime(runtime: Arc<Runtime>, grace: Option<Duration>) -> RuntimeStop {
+    println!("Stopping VMs... (press Ctrl+C again to force shutdown)");
     let graceful_runtime = Arc::clone(&runtime);
     stop_runtime_with(
         async move { graceful_runtime.shutdown().await.map_err(Into::into) },
@@ -231,7 +246,8 @@ fn remove_sockets(ctx: &DaemonContext) {
 /// [`STARTUP_ABORT_GRACE`] (or cut short by a second signal), then the VM
 /// is force-killed.
 pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
-    println!("Shutting down... (press Ctrl+C again to force quit)");
+    handles.rpc_calls.close();
+    println!("Finishing startup cleanup before stopping VMs...");
     info!("Shutdown signal received during startup, aborting");
 
     // Publish the cause on the setup stream, then give already-connected
@@ -241,6 +257,7 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
         .setup_state
         .set_failed("startup interrupted by shutdown signal");
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let disconnected = close_guest_connections(&handles.early_runtime);
     handles.shutdown.cancel();
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed during startup cancellation");
@@ -267,6 +284,8 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
         warn!(%error, "Kubernetes LoadBalancer service cleanup failed during startup cancellation");
     }
 
+    handles.rpc_calls.wait().await;
+
     // `early_runtime` is filled before the VM boots, so it covers every
     // window in which a VM can exist; empty means nothing to tear down.
     let Some(runtime) = handles.early_runtime.get() else {
@@ -279,7 +298,8 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
 
     info!("ArcBox daemon stopped");
 
-    stopped.finish()
+    stopped.finish()?;
+    disconnected
 }
 
 /// Force-cleans a runtime after the startup pipeline itself returns an error.
@@ -288,6 +308,10 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
 /// leaving Virtualization.framework helpers or disk holders behind while still
 /// letting the original startup error reach the caller.
 pub async fn abort_failed_startup(handles: &StartupHandles) {
+    handles.rpc_calls.close();
+    if let Err(error) = close_guest_connections(&handles.early_runtime) {
+        warn!(%error, "guest agent connection cleanup failed after startup error");
+    }
     handles.shutdown.cancel();
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed after startup error");
@@ -313,6 +337,7 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
     if let Err(error) = handles.kubernetes_lb_service.join().await {
         warn!(%error, "Kubernetes LoadBalancer service cleanup failed after startup error");
     }
+    handles.rpc_calls.wait().await;
     if let Some(runtime) = handles.early_runtime.get() {
         if let Err(error) = runtime.shutdown_force().await {
             warn!(%error, "failed to force-clean runtime after startup error");

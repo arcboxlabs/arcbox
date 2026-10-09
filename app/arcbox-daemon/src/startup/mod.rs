@@ -81,6 +81,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         early_runtime: handles.early_runtime,
         setup_state: handles.setup_state,
         shutdown: handles.shutdown,
+        rpc_calls: handles.rpc_calls,
         daemon_lock_slot: handles.daemon_lock,
         container_network_lease_slot: handles.container_network_lease,
         resolver_service: handles.resolver_service,
@@ -152,6 +153,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         #[cfg(target_os = "macos")]
         local_ca: tokio::sync::watch::channel(None).0,
         shutdown: early.shutdown,
+        rpc_calls: early.rpc_calls,
         container_network_lease_slot: early.container_network_lease_slot,
         resolver_service: early.resolver_service,
         dns_service: early.dns_service,

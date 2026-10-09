@@ -10,6 +10,10 @@
 //! `curl --unix-socket` posting JSON arrives over HTTP/1.1, and the same
 //! handlers answer both.
 
+mod calls;
+
+pub use calls::Calls;
+
 use anyhow::{Context, Result};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -129,8 +133,9 @@ pub fn connect_router(
 /// Kept separate from [`connect_router`] so tests can inspect the routing
 /// table — once it is an `axum::Router` the registered method paths are no
 /// longer visible.
-pub fn into_app(router: connectrpc::Router) -> axum::Router {
-    router.into_axum_router()
+pub fn into_app(router: connectrpc::Router, calls: Calls) -> axum::Router {
+    axum::Router::new()
+        .fallback_service(connectrpc::ConnectRpcService::new(calls.dispatcher(router)))
 }
 
 #[cfg(test)]
@@ -162,8 +167,10 @@ mod tests {
             Arc::clone(&runtime),
             Arc::clone(&runtime),
         );
-        let app =
-            into_app(connect_router(runtime.clone(), runtime, system).expect("connect router"));
+        let app = into_app(
+            connect_router(runtime.clone(), runtime, system).expect("connect router"),
+            Calls::default(),
+        );
 
         let listener = bind(&socket).expect("bind temp socket");
         let shutdown = CancellationToken::new();

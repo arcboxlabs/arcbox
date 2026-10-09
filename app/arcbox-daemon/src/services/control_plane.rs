@@ -39,11 +39,14 @@ async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> 
         Arc::clone(&ctx.shared_runtime),
         Arc::clone(&ctx.early_runtime),
     );
-    let app = crate::control_plane::into_app(crate::control_plane::connect_router(
-        Arc::clone(&ctx.shared_runtime),
-        Arc::clone(&ctx.early_runtime),
-        system_service,
-    )?);
+    let app = crate::control_plane::into_app(
+        crate::control_plane::connect_router(
+            Arc::clone(&ctx.shared_runtime),
+            Arc::clone(&ctx.early_runtime),
+            system_service,
+        )?,
+        ctx.rpc_calls.clone(),
+    );
 
     let shutdown = ctx.shutdown.clone();
     Ok(tokio::spawn(crate::control_plane::serve(
