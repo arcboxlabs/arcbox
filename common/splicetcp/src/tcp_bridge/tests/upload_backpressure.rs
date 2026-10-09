@@ -19,6 +19,164 @@ async fn limited_fast_path_pair(
     (server, guaranteed_oversized(send_size, recv_size))
 }
 
+/// Filling one upload hole must drain retained bytes only to the next hole,
+/// including when the first segment crosses the sequence-number boundary.
+#[tokio::test]
+async fn upload_multi_hole_burst_advances_to_each_missing_range() {
+    use std::io::Read;
+
+    const SEGMENT: usize = 1460;
+    let holes = [0, 16 * SEGMENT, 899 * SEGMENT];
+    let payload: Vec<_> = (0..3 * 1024 * 1024)
+        .map(|i| ((i * 31 + i / 251) % 256) as u8)
+        .collect();
+    let base = u32::MAX - 1000;
+    let mut bridge = TcpBridge::new(GW_IP);
+    bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+    let key = SynFlowKey {
+        src_ip: GUEST_IP,
+        src_port: 40040,
+        dst_ip: Ipv4Addr::new(198, 18, 30, 108),
+        dst_port: 443,
+    };
+    let mut server = fast_path_pair(&mut bridge, key, base).await;
+    let reader = std::thread::spawn(move || {
+        let mut received = Vec::new();
+        server.read_to_end(&mut received).unwrap();
+        received
+    });
+    let segment = |offset: usize, flags: u8, bytes: &[u8]| {
+        make_guest_segment(
+            (key.src_port, key.dst_ip, key.dst_port),
+            base.wrapping_add(offset as u32),
+            1000,
+            65535,
+            flags,
+            bytes,
+        )
+    };
+
+    for (index, bytes) in payload.chunks(SEGMENT).enumerate() {
+        let offset = index * SEGMENT;
+        if holes.contains(&offset) {
+            continue;
+        }
+        let reply = bridge
+            .try_fast_path_intercept(&segment(offset, 0x18, bytes))
+            .unwrap();
+        assert_eq!(tcp_ack_of(&reply), base, "the first hole must stay unACKed");
+    }
+    assert_eq!(
+        bridge.fast_path_conns[&key].ooo_bytes,
+        payload.len() - holes.len() * SEGMENT
+    );
+
+    for (index, &offset) in holes.iter().enumerate() {
+        let next_hole = holes.get(index + 1).copied().unwrap_or(payload.len());
+        let reply = bridge
+            .try_fast_path_intercept(&segment(offset, 0x18, &payload[offset..offset + SEGMENT]))
+            .unwrap();
+        let mut cursor = tcp_ack_of(&reply).wrapping_sub(base) as usize;
+        assert!(cursor >= offset && cursor <= next_hole);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while cursor < next_hole {
+                for frame in bridge.poll_fast_path() {
+                    let acked = tcp_ack_of(&frame).wrapping_sub(base) as usize;
+                    assert!(acked >= cursor && acked <= next_hole);
+                    cursor = acked;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("poll must drain retained bytes up to the next missing range");
+        assert_eq!(cursor, next_hole);
+        assert!(bridge.poll_fast_path().is_empty());
+    }
+
+    assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
+    assert_eq!(bridge.fast_path_conns[&key].up_ooo_dropped, 0);
+    let reply = bridge
+        .try_fast_path_intercept(&segment(payload.len(), 0x11, &[]))
+        .unwrap();
+    assert_eq!(
+        tcp_ack_of(&reply),
+        base.wrapping_add(payload.len() as u32 + 1)
+    );
+    assert_eq!(reader.join().unwrap(), payload);
+}
+
+/// A partially written parked segment must stay before later arrivals,
+/// including when the ACK cursor crosses the sequence-number boundary.
+#[tokio::test]
+async fn upload_ooo_insert_preserves_partially_written_front() {
+    use std::io::Read;
+
+    for base in [2000u32, u32::MAX - 1000] {
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+        let dst_ip = Ipv4Addr::new(198, 18, 30, 104);
+        let key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 40036,
+            dst_ip,
+            dst_port: 443,
+        };
+        let (mut server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
+        const HOLE: usize = 100;
+        const LATER: usize = 100;
+        let parked_end = HOLE + oversized;
+        let payload: Vec<_> = (0..parked_end + LATER).map(|i| (i % 251) as u8).collect();
+        let segment = |offset: usize, data: &[u8]| {
+            make_guest_segment(
+                (key.src_port, dst_ip, key.dst_port),
+                base.wrapping_add(offset as u32),
+                1000,
+                65535,
+                0x18,
+                data,
+            )
+        };
+        let parked = segment(HOLE, &payload[HOLE..parked_end]);
+        bridge.try_fast_path_intercept(&parked).unwrap();
+        let fill = segment(0, &payload[..HOLE]);
+        let reply = bridge.try_fast_path_intercept(&fill).unwrap();
+        let first_advance = tcp_ack_of(&reply).wrapping_sub(base) as usize;
+        assert!(first_advance > HOLE && first_advance < parked_end);
+        assert!(bridge.fast_path_conns[&key].up_short_writes > 0);
+
+        let later = segment(parked_end, &payload[parked_end..]);
+        let reply = bridge.try_fast_path_intercept(&later).unwrap();
+        assert_eq!(
+            tcp_ack_of(&reply).wrapping_sub(base) as usize,
+            first_advance
+        );
+        assert_eq!(
+            bridge.fast_path_conns[&key].ooo_segs.front().unwrap().0,
+            base.wrapping_add(HOLE as u32),
+            "the unwritten front must precede a future segment"
+        );
+
+        let mut received = Vec::new();
+        let mut cursor = first_advance;
+        for _ in 0..2000 {
+            let mut bytes = vec![0; cursor - received.len()];
+            server.read_exact(&mut bytes).unwrap();
+            received.extend(bytes);
+            if cursor == payload.len() {
+                break;
+            }
+            let retry = segment(cursor, &payload[cursor..=cursor]);
+            let reply = bridge.try_fast_path_intercept(&retry).unwrap();
+            cursor = tcp_ack_of(&reply).wrapping_sub(base) as usize;
+            assert!(cursor <= payload.len());
+        }
+        assert_eq!(cursor, payload.len(), "the retained tail must drain");
+        assert_eq!(received, payload);
+        assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
+    }
+}
+
 /// Retained upload bytes must resume when the host socket drains, without
 /// waiting for the guest to retransmit bytes the bridge already holds.
 #[tokio::test]
@@ -184,5 +342,50 @@ async fn poll_recovers_in_order_upload_tails() {
         .expect("poll must deliver the in-order tail without retransmission");
         assert_eq!(received, expected);
         assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
+    }
+}
+
+/// A full reassembly queue must reserve room for the contiguous tail by
+/// evicting the farthest future segment, without advancing the ACK.
+#[tokio::test]
+async fn upload_contiguous_tail_takes_priority_at_both_caps() {
+    for byte_cap in [false, true] {
+        let mut bridge = TcpBridge::new(GW_IP);
+        let key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 40039,
+            dst_ip: Ipv4Addr::new(198, 18, 30, 107),
+            dst_port: 443,
+        };
+        let _server = fast_path_pair(&mut bridge, key, 2000).await;
+        let conn = bridge.fast_path_conns.get_mut(&key).unwrap();
+        // Preserve a partially written front before the current ACK cursor.
+        conn.ooo_segs.push_back((1999, vec![0x11; 2]));
+        conn.ooo_bytes = 2;
+        let segment_len = if byte_cap { 2048 } else { 1 };
+        while conn.ooo_bytes < OOO_REASSEMBLY_CAP && conn.ooo_segs.len() < OOO_MAX_SEGMENTS {
+            let len = segment_len.min(OOO_REASSEMBLY_CAP - conn.ooo_bytes);
+            let seq = 2000 + conn.ooo_bytes as u32;
+            conn.ooo_segs.push_back((seq, vec![0x22; len]));
+            conn.ooo_bytes += len;
+        }
+        if byte_cap {
+            assert_eq!(conn.ooo_bytes, OOO_REASSEMBLY_CAP);
+        } else {
+            assert_eq!(conn.ooo_segs.len(), OOO_MAX_SEGMENTS);
+        }
+        let farthest = conn.ooo_segs.back().unwrap().0;
+        conn.buffer_upload_segment(2000, &[0x33; 16]);
+        assert_eq!(conn.last_ack, 2000);
+        assert_eq!(conn.ooo_segs.front().unwrap().0, 1999);
+        assert_eq!(conn.ooo_segs[1], (2000, vec![0x33; 16]));
+        assert!(conn.ooo_segs.back().unwrap().0 < farthest);
+        assert!(conn.up_ooo_dropped > 0);
+        assert!(conn.ooo_segs.len() <= OOO_MAX_SEGMENTS);
+        assert!(conn.ooo_bytes <= OOO_REASSEMBLY_CAP);
+        assert_eq!(
+            conn.ooo_bytes,
+            conn.ooo_segs.iter().map(|(_, p)| p.len()).sum()
+        );
     }
 }
