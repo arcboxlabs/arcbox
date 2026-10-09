@@ -77,12 +77,12 @@ the caller must keep polling while fast-path connections are active.
 
 `poll_fast_path` also retries retained guest→host bytes after host socket
 backpressure, including for inline flows. Upload ACKs advance only over bytes
-accepted by the host socket, except for the existing `BrokenPipe` teardown
-path. Pending upload data shares the reassembly limits of 4 MiB and 4096
-segments per flow. A contiguous tail takes priority over future segments at
-those limits; evicted bytes remain unacknowledged and require guest
-retransmission. A missing prefix still requires guest retransmission before
-parked bytes can drain.
+accepted by the host socket. Hard write errors, including `BrokenPipe`, reset
+the guest flow without ACKing rejected bytes. Pending upload data shares the
+reassembly limits of 4 MiB and 4096 segments per flow. A contiguous tail takes
+priority over future segments at those limits. Evicted bytes remain
+unacknowledged and require guest retransmission. A missing prefix still
+requires guest retransmission before parked bytes can drain.
 
 Enable the `tokio-frame-sink` feature to use
 `direct_rx::TokioFrameConnSink` instead:

@@ -255,15 +255,6 @@ impl TcpBridge {
                             conn.up_would_block += 1;
                             conn.buffer_upload_segment(conn.last_ack, fresh);
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                            // Peer closed; inject already relayed FIN. ACK at
-                            // TCP layer so the guest stops retransmitting.
-                            conn.set_last_ack(seq_end);
-                            in_order_advanced = true;
-                            tracing::debug!(
-                                "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} Broken pipe, draining {payload_len} bytes"
-                            );
-                        }
                         Err(e) => {
                             tracing::warn!("Fast path TX write error, RST to guest: {e}");
                             // Mirror the RX-error path: the host stream is dead,
