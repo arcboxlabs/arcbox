@@ -2,6 +2,8 @@
 
 ArcBox gives Docker containers local DNS names and routes their web services through ports 80 and 443. The daemon keeps the root private key in the user's macOS Keychain. The guest keeps leaf private keys and requests signatures from the daemon. The privileged helper handles public certificates only.
 
+On macOS, Runtime initialization removes the legacy shared `tls/ca-key.pem` before either System VM or machine operation becomes available. The check also runs with System VM autostart disabled. Removal failure blocks initialization; public certificates and unrelated files remain intact.
+
 ## User operations
 
 Containers and HTTP services can run without local CA trust. Enable local HTTPS from Desktop settings or run `abctl tls trust` in the login session. macOS controls authorization for changes to system trust. Existing correct trust does not require another authorization.

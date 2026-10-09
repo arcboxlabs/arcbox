@@ -161,10 +161,68 @@ async fn init_reports_no_milestones_without_a_linux_vm() {
     runtime
         .init(|milestone| reported.lock().unwrap().push(milestone))
         .await
-        .expect("VM-host-only init only creates data directories");
+        .expect("VM-host-only preparation succeeds");
 
     let reported = reported.into_inner().unwrap();
     assert!(reported.is_empty(), "expected silence, got {reported:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn vm_host_init_removes_shared_ca_key_and_preserves_public_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let tls = directory.path().join(arcbox_constants::paths::guest::TLS);
+    std::fs::create_dir_all(&tls).unwrap();
+    let key = tls.join(arcbox_constants::paths::guest::TLS_CA_KEY);
+    std::fs::write(&key, b"legacy private key").unwrap();
+    let certificate = tls.join(arcbox_constants::paths::guest::TLS_CA_CERT);
+    std::fs::write(&certificate, b"published public root").unwrap();
+    let unrelated = tls.join("application-key.pem");
+    std::fs::write(&unrelated, b"application key").unwrap();
+    let mut config = Config {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.vm.autostart = false;
+    let runtime = Runtime::new(config).unwrap();
+
+    runtime
+        .init(|_| panic!("unexpected VM startup"))
+        .await
+        .unwrap();
+
+    assert!(!key.try_exists().unwrap());
+    assert_eq!(
+        std::fs::read(certificate).unwrap(),
+        b"published public root"
+    );
+    assert_eq!(std::fs::read(unrelated).unwrap(), b"application key");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn vm_host_init_rejects_shared_ca_key_cleanup_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let key = directory
+        .path()
+        .join(arcbox_constants::paths::guest::TLS)
+        .join(arcbox_constants::paths::guest::TLS_CA_KEY);
+    std::fs::create_dir_all(&key).unwrap();
+    let mut config = Config {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.vm.autostart = false;
+    let runtime = Runtime::new(config).unwrap();
+
+    let error = runtime
+        .init(|_| panic!("unexpected VM startup"))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("ca-key.pem"), "{error}");
+    assert!(key.is_dir());
+    assert!(!directory.path().join("runtime").try_exists().unwrap());
 }
 
 #[tokio::test]

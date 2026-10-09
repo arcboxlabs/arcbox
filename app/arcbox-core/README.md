@@ -10,7 +10,7 @@ VM readiness, guest-agent connectivity, and networking/port-forward state.
 The main entry point is `Runtime`:
 
 - `Runtime::new(config)` creates the runtime synchronously
-- `runtime.init().await` prepares runtime state and assets
+- `runtime.init(|_| {}).await` prepares runtime state and assets
 - `runtime.ensure_vm_ready().await` ensures the default machine is running
 
 ## Key Components
@@ -27,10 +27,12 @@ The main entry point is `Runtime`:
 use arcbox_core::{Config, Runtime};
 
 let runtime = Runtime::new(Config::default())?;
-runtime.init().await?;
+runtime.init(|_| {}).await?;
 let cid = runtime.ensure_vm_ready().await?;
 println!("default machine CID: {cid}");
 ```
+
+On macOS, initialization removes the legacy shared `tls/ca-key.pem` before the runtime becomes usable, including with System VM autostart disabled. A removal failure stops initialization. Public certificates and unrelated application files remain intact.
 
 Capture `Runtime::capture_web_guest` before collecting HTTPS observation addresses. Read the bridge through `web_guest_bridge_address` and pass the captured guest to `Arc<Runtime>::reconcile_https_access` for enable and disable requests. The call retains the expected VM through native connection and RPC cleanup. Cancel through the token and await completion before disabling the lease. Validate prompt ownership through `with_web_guest_claim`. The daemon starts independent System and distro machine observers before Runtime initialization, including when System VM autostart is disabled.
 

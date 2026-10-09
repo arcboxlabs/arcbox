@@ -6,6 +6,7 @@ mod engine_config;
 mod host_network;
 #[cfg(target_os = "macos")]
 mod inbound_listeners;
+mod initialization;
 mod kubeconfig;
 mod kubernetes_lb;
 mod machine_dns;
@@ -50,7 +51,6 @@ use arcbox_net::NetworkManager;
 use arcbox_net::darwin::inbound_relay::InboundProtocol;
 #[cfg(not(target_os = "macos"))]
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
-use assets::ensure_guest_binaries;
 #[cfg(target_os = "macos")]
 use inbound_listeners::Slot as InboundListenerSlot;
 use kubeconfig::{host_endpoint, rewrite_kubeconfig};
@@ -1147,116 +1147,6 @@ impl Runtime {
         response.context_name.clone_from(&endpoint.context_name);
         response.endpoint = host_endpoint;
         Ok(response)
-    }
-
-    /// Initializes the runtime and eagerly starts the default VM.
-    ///
-    /// Validates that all guest binaries (agent + runtime) are present and
-    /// executable before starting the VM. This is a boot-blocking check.
-    ///
-    /// `progress` observes the [`InitProgress`] milestones as they are
-    /// reached — this is the only way to see inside the call, which spans
-    /// the slowest part of daemon startup. It is never invoked in
-    /// VM-host-only mode, where no VM starts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if initialization fails or guest binaries are missing.
-    pub async fn init(&self, progress: impl Fn(InitProgress) + Send) -> Result<()> {
-        // Create data directories.
-        tokio::fs::create_dir_all(&self.config.data_dir).await?;
-        tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
-        tokio::fs::create_dir_all(self.config.data_dir.join("machines")).await?;
-
-        // VM-host-only mode: skip the entire Linux/Docker system-VM bootstrap.
-        // The Linux VM never boots (so no lifecycle actor and no idle balloon
-        // management), and no guest binaries are downloaded. The daemon layer
-        // likewise skips the Docker API, Docker CLI integration, and the
-        // Kubernetes proxy. macOS guest management is unaffected.
-        if !self.config.vm.autostart {
-            tracing::info!(
-                "Linux VM autostart disabled; running as a VM host only (Docker/Kubernetes unavailable)"
-            );
-            return Ok(());
-        }
-
-        // Download every runtime binary in the boot manifest if not cached:
-        // dockerd, containerd, containerd-shim-runc-v2, runc, docker-init, k3s,
-        // and the optional FEX x86_64 interpreter for linux/amd64. ArcBox's
-        // FEX carries a small patch making it binfmt-only — no FEXServer.
-        let generation = self.vm_lifecycle.boot_assets().config().version.clone();
-        let runtime_bin_dir = self
-            .config
-            .data_dir
-            .join("runtime")
-            .join(&generation)
-            .join("bin");
-        tokio::fs::create_dir_all(&runtime_bin_dir).await?;
-        self.vm_lifecycle
-            .boot_assets()
-            .prepare_binaries(&runtime_bin_dir, None)
-            .await?;
-
-        // Validate all guest binaries are present and executable (boot-blocking).
-        ensure_guest_binaries(&self.config.data_dir, &generation)?;
-
-        // The operator's dockerd overrides ride the shared data directory
-        // into the guest, which merges them into daemon.json at init.
-        engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
-
-        if self.machine_manager.storage_is_held()? {
-            tracing::warn!(
-                "System VM storage is held for recovery; keeping the control plane available"
-            );
-            return Ok(());
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let tls_dir = self
-                .config
-                .data_dir
-                .join(arcbox_constants::paths::guest::TLS);
-            // Retire shared private keys before exposing the data directory to the guest.
-            tokio::task::spawn_blocking(move || {
-                std::fs::create_dir_all(&tls_dir)?;
-                arcbox_local_ca::remove_shared_private_key(&tls_dir)?;
-                Ok::<_, CoreError>(())
-            })
-            .await
-            .map_err(|error| {
-                CoreError::Vm(format!("shared CA key removal task failed: {error}"))
-            })??;
-        }
-
-        // Boot the VM through the lifecycle manager first so the agent
-        // handshake is observable on its own: `ensure_vm_ready` below covers
-        // the VM *and* the guest container runtime with no boundary between
-        // them. With the VM already up it short-circuits on the lifecycle
-        // actor's cached CID and only waits for dockerd.
-        progress(InitProgress::SystemVmStarting);
-        if let Err(error) = self.vm_lifecycle.ensure_ready().await {
-            if self.protect_failed_storage_boot(&error)? {
-                tracing::warn!(%error, "System VM storage is protected; keeping the control plane available");
-                return Ok(());
-            }
-            return Err(error.into());
-        }
-        progress(InitProgress::SystemVmReady);
-
-        if let Err(error) = self.ensure_vm_ready().await {
-            if self.protect_failed_runtime_start(&error).await? {
-                tracing::warn!(%error, "Required storage is unavailable; keeping the stopped System VM protected");
-                return Ok(());
-            }
-            return Err(error);
-        }
-
-        tracing::info!(
-            backend = self.container_backend.name(),
-            "ArcBox runtime initialized"
-        );
-        Ok(())
     }
 
     /// Stops every running macOS guest, logging any per-machine failures.

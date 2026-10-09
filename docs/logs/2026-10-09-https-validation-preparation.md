@@ -110,3 +110,9 @@ The new lifecycle regression directly polls the production session protocol over
 The owned-connection tests now block stream shutdown and route cleanup independently. Both completion orders retain admission until both operations finish. A separate production `Routes::run_machine` regression forces the initial sweep to fail through the selected executable. Readiness fails, cleanup still attempts another sweep, and both failures reach the caller.
 
 The fresh musl binary passed ten machine receiver tests and the production initialization-failure test in the isolated Colima image, without network, host mounts, or extra capabilities. Linux all-target Clippy with `-D warnings` and workspace formatting passed. These checks establish protocol and cleanup ordering. Successful AF_VSOCK binding, signing, packet forwarding, and installed machine HTTPS remain unverified.
+
+## Shared private-key initialization barrier
+
+Runtime initialization previously returned from VM-host-only mode before removing the legacy shared `tls/ca-key.pem`. A regression test reproduced the remaining key with System VM autostart disabled. Initialization now removes the key before either the autostart branch or the storage-recovery hold. Background CA preparation cannot substitute for this required barrier because preparation errors do not block runtime readiness.
+
+Two macOS regression tests pass: initialization removes only the legacy key while preserving the public certificate and an unrelated application key; a real removal failure stops initialization before runtime assets or VM milestones. The existing no-System-VM milestone test also passes. Core all-target Clippy with `-D warnings` and workspace formatting pass. The existing `proc-macro-error2` future-incompatibility notice remains. These tests use temporary directories and do not create a Keychain identity, alter native trust, or start a VM. Independent machine startup and installed migration acceptance remain pending.
