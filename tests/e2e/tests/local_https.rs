@@ -1,5 +1,6 @@
 //! Exercise automatic container HTTPS with a Keychain CA and guest-owned leaf keys.
-//! Requests cross the guest bridge to port 443. No host routes or trust settings change.
+//! Requests cross the guest bridge to port 443. CA trust settings remain unchanged.
+//! Run without another ArcBox daemon: startup can reconcile host routes through the helper.
 //! Default container trust, opt-out, and SNI ownership are checked separately.
 
 #![cfg(target_os = "macos")]

@@ -105,6 +105,9 @@ impl Drop for Publisher {
 }
 
 #[cfg(test)]
+mod kernel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
