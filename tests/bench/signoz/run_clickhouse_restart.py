@@ -5,23 +5,23 @@ ClickHouse starting five seconds after all 36 host workers start.
 """
 
 import argparse
-from contextlib import ExitStack
 import copy
 import datetime
 import hashlib
 import http.client
 import json
-from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
-from urllib.parse import quote
 import uuid
+from contextlib import ExitStack
+from pathlib import Path
+from urllib.parse import quote
 
 from clickhouse_trace import KernelTrace
-
 
 SECONDS = 300
 
@@ -183,6 +183,29 @@ def wait_for_clickhouse(output, name, started):
     raise RuntimeError("ClickHouse readiness exceeded 25 seconds; the planned contention window would be invalid.")
 
 
+def freeze_config(source, target, expected):
+    contents = source.read_bytes()
+    if hashlib.sha256(contents).hexdigest() != expected:
+        raise RuntimeError(f"Retained config hash changed: {source}.")
+    target.write_bytes(contents)
+    shutil.copymode(source, target)
+
+
+def inspect_reusable_network(output, identifier, label):
+    network = api("GET", "/networks/" + quote(identifier, safe=""))
+    (output / (label + ".json")).write_text(json.dumps(network, indent=2) + "\n")
+    if network["Id"] != identifier:
+        raise RuntimeError("Network reuse requires the exact network ID.")
+    if network["Driver"] != "bridge" or network["Scope"] != "local":
+        raise RuntimeError("The reused network must be a local bridge.")
+    name = network["Name"]
+    if not name.startswith("stall-warm-") or (network.get("Labels") or {}).get("arcbox.stall.experiment") != name:
+        raise RuntimeError("The reused network must belong to a retained restart experiment.")
+    if network["Containers"] != {}:
+        raise RuntimeError("The reused network must have no active endpoints.")
+    return network
+
+
 def run(args):
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
@@ -199,8 +222,11 @@ def run(args):
     prefix = "stall-warm-" + args.case + "-" + uuid.uuid4().hex[:8]
     names = {kind: prefix + "-" + kind for kind in SEEDS}
     volumes = {kind: name + "-data" for kind, name in names.items()}
+    network = inspect_reusable_network(output, args.network, "network-initial")["Name"] if args.network else prefix
     trace = KernelTrace(sys.modules[__name__], output, prefix, args.kernel_trace) if args.kernel_trace is not None else None
-    resources = {"socket": SOCKET, "prefix": prefix, "containers": names, "volumes": volumes, "network": prefix, "case": args.case}
+    resources = {"socket": SOCKET, "prefix": prefix, "containers": names, "volumes": volumes, "network": network, "case": args.case}
+    if args.network:
+        resources["reused_network_id"] = args.network
     if trace is not None:
         resources["tracer"] = trace.name
     (output / "resources.json").write_text(json.dumps(resources, indent=2) + "\n")
@@ -226,11 +252,8 @@ def run(args):
     (output / "configs").mkdir()
     frozen_configs = []
     for kind, relative, destination, expected in CONFIGS:
-        contents = (CONFIG_ROOT / relative).read_bytes()
-        if hashlib.sha256(contents).hexdigest() != expected:
-            raise RuntimeError(f"Retained config hash changed: {relative}.")
         frozen = output / "configs" / Path(relative).name
-        frozen.write_bytes(contents)
+        freeze_config(CONFIG_ROOT / relative, frozen, expected)
         frozen_configs.append((kind, frozen, destination))
     created = []
     sampler = None
@@ -245,9 +268,13 @@ def run(args):
                 current = api("GET", f"/containers/{SEEDS[kind][0]}/json")["State"]
                 if current["Running"] or current["StartedAt"] != seed["State"]["StartedAt"]:
                     raise RuntimeError("A seed changed while its volume was being copied.")
-            api("POST", "/networks/create", {"Name": prefix, "Labels": {"arcbox.stall.experiment": prefix}})
+            if args.network:
+                if inspect_reusable_network(output, args.network, "network-before-create")["Name"] != network:
+                    raise RuntimeError("The reused network name changed while copying seed volumes.")
+            else:
+                api("POST", "/networks/create", {"Name": network, "Labels": {"arcbox.stall.experiment": prefix}})
             for kind, seed in seeds.items():
-                payload = container_payload(seed, kind, prefix, prefix, volumes[kind])
+                payload = container_payload(seed, kind, prefix, network, volumes[kind])
                 if kind == "ch" and trace is None:
                     # Cross-process syscall reads require this diagnostic capability.
                     payload["HostConfig"]["CapAdd"] = ["SYS_PTRACE"]
@@ -359,7 +386,7 @@ def run(args):
                     cleanup_errors.append(f"{name} diagnostics: {error}")
             if sampler is not None:
                 terminate_owned([sampler])
-            event(output, "cleanup", errors=cleanup_errors, retained_containers=created, retained_volumes=volumes, retained_network=prefix)
+            event(output, "cleanup", errors=cleanup_errors, retained_containers=created, retained_volumes=volumes, retained_network=network)
             if cleanup_errors and sys.exc_info()[0] is None:
                 raise RuntimeError("Cleanup failed: " + "; ".join(cleanup_errors))
 
@@ -374,6 +401,7 @@ if __name__ == "__main__":
         parser.add_argument("--fixture", type=Path, required=True, help="Verified stopped-seed identities, config hashes, and Docker socket")
         parser.add_argument("--case", choices=("control", "contention", "startup-contention"), required=True)
         parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument("--network", help="Exact ID of an empty retained restart-experiment network; omit to create a new network")
         observer_mode = parser.add_mutually_exclusive_group()
         observer_mode.add_argument("--native-observer", type=Path, help="Static Linux observe_clickhouse binary; adds SYS_NICE for FIFO sampling")
         observer_mode.add_argument("--kernel-trace", choices=("off", "on"), help="Replace proc polling with an isolated tracefs recorder; off records markers only")

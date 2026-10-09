@@ -14,6 +14,14 @@ The [combined synthetic probe](2026-10-08-condvar-notification-latency.md) conne
 
 Each case copies the same stopped ClickHouse and Keeper seed volumes into new owned volumes. Source mounts are read-only. The driver verifies seed IDs, image IDs, Compose project labels, volume destinations, and config hashes. Config files are copied into new containers. The UDF volume is mounted read-only. The experiment starts Keeper first and waits for health, then starts ClickHouse. No original seed container is resumed.
 
+The driver creates a new network by default. To reuse an empty network retained by an earlier restart experiment, pass its full ID with `--network NETWORK_ID`. The driver inspects the network before copying seed volumes and again before creating containers. Both checks require the exact ID, the `bridge` driver, local scope, no active endpoints, and an `arcbox.stall.experiment` label equal to a name beginning with `stall-warm-`. The capture retains both inspections and records the selected ID and canonical name. The original ClickHouse and Keeper DNS aliases remain unchanged; the driver does not change the subnet or assign fixed IP addresses. Cleanup retains the network. Keep earlier experiment containers stopped while reusing their network; the checks do not reserve the network against concurrent starts.
+
+```bash
+python3 tests/bench/signoz/run_clickhouse_restart.py --fixture /absolute/fixture.json --case startup-contention --kernel-trace on --network FULL_NETWORK_ID --output /absolute/new-case
+```
+
+Network reuse does not change the 25-second readiness limit, the 30-second setup limit, or the 300-second observation requirement. Run the offline network regressions with `python3 -B tests/bench/signoz/test_clickhouse_network.py`.
+
 Each successful case observes ClickHouse for 300 seconds. `SELECT 1` runs through Docker exec about every five seconds, with a three-second guest timeout and a four-second host timeout. These limits bound the client once it executes; a delayed Docker exec can postpone guest client creation. Query success does not validate the Common executor's background work.
 
 The observer reads eight Common and 512 BgSchPool threads through one persistent Docker exec. Records include status, schedstat, syscall, wchan, sweep timestamps, and cgroup CPU counters. SYS_PTRACE is added only to the owned ClickHouse clones because ordinary exec cannot read another process's syscall state. Each record contains separate reads; neither a row nor a sweep is an atomic snapshot. Observer scheduler counters are read at sweep end; cgroup counters are read before sweep begin.
