@@ -1,6 +1,7 @@
 use super::*;
 
 mod rotation;
+mod signing_identity;
 
 #[test]
 fn identity_lookup_rejects_multiple_matches() {
