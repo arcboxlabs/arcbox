@@ -107,6 +107,7 @@ The restructure plan and its locked decisions live in
 
 ## Durable writes
 
+- `MachineImageManager::pull` accepts a cancellation token. Cancel HTTP reads and lock waits, then await pending file writes before removing staging. Await the pull before releasing its owner; do not cancel by dropping the pull future.
 - `MachineManager::close_agent_connections` permanently closes operational agent admission and interrupts registered sockets. Attach both normal and expected-run clients to the manager's socket scope. End readiness retries when the scope closes. Preserve the direct final-shutdown connection in `VmManager`. The caller must join native connectors and operation workers; scope closure alone does not establish worker completion.
 - Use `agent_client/retained_session.rs` to own dedicated session transport workers. Drop protocol channels before cancellation and worker joins. Keep protocol admission and acknowledgements in each session module.
 - Machine web sessions consume an expected machine connection and fix raw name, canonical hostname, and bridge IPv4 at Open. Replace the full policy with source revisions starting at one and strictly increasing. Validate the exact acknowledgement. Cancel and join before releasing the host hold; configuration acknowledgement does not imply installed routes.

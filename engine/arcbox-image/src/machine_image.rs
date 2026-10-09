@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{ImageError, Result};
 use crate::remote_image::{ImageReference, RemoteLocation, StagingGuard, validate_name};
@@ -271,30 +272,40 @@ impl MachineImageManager {
     /// against its manifest hash while streaming it to disk, and lands the
     /// image atomically (staging dir + rename). Re-pulling an already-present
     /// version is a no-op. `on_progress` receives `(downloaded, total)` bytes.
+    /// Cancel through `cancelled` and await completion; dropping an active pull
+    /// can abandon pending filesystem work.
     ///
     /// # Errors
-    /// Returns an error if resolution, download, integrity verification, or
+    /// Returns an error on cancellation or if resolution, download, integrity verification, or
     /// the final registry landing fails.
     pub async fn pull(
         &self,
         selector: &ImageSelector,
+        cancelled: &CancellationToken,
         mut on_progress: impl FnMut(u64, u64),
     ) -> Result<MachineImage> {
-        let (manifest_location, manifest) = self.resolve(selector).await?;
+        let (manifest_location, manifest) = cancelled
+            .run_until_cancelled(self.resolve(selector))
+            .await
+            .ok_or(ImageError::Cancelled)??;
 
         // Serialize pulls of the same stream: concurrent pulls would otherwise
         // share the staging directory and corrupt each other's download.
         let lock = self.pull_lock(&manifest.name);
-        let _pull_guard = lock.lock().await;
+        let _pull_guard = cancelled
+            .run_until_cancelled(lock.lock())
+            .await
+            .ok_or(ImageError::Cancelled)?;
+        if cancelled.is_cancelled() {
+            return Err(ImageError::Cancelled);
+        }
 
         if let Ok(existing) = self.get(&manifest.name, &manifest.version) {
             on_progress(existing.manifest.rootfs.size, existing.manifest.rootfs.size);
             return Ok(existing);
         }
 
-        // Assemble in a staging directory; rename live only when complete. The
-        // guard removes it on any early return — or if this future is dropped
-        // (client cancellation) at any await point.
+        // Cooperative cancellation drains file writes before this guard removes staging.
         let staging = self
             .images_dir
             .join(format!(".pull-{}-{}", manifest.name, manifest.version));
@@ -305,13 +316,18 @@ impl MachineImageManager {
         let mut guard = StagingGuard::new(staging.clone());
 
         let rootfs_location = manifest_location.join(&manifest.rootfs.path)?;
-        fetch_rootfs(
-            &rootfs_location,
-            &manifest.rootfs,
-            &staging.join(&manifest.rootfs.path),
-            &mut on_progress,
-        )
-        .await?;
+        manifest
+            .rootfs
+            .fetch(
+                &rootfs_location,
+                &staging.join(&manifest.rootfs.path),
+                cancelled,
+                &mut on_progress,
+            )
+            .await?;
+        if cancelled.is_cancelled() {
+            return Err(ImageError::Cancelled);
+        }
 
         let mut manifest_json = serde_json::to_string_pretty(&manifest)
             .map_err(|e| ImageError::image(format!("serialize manifest: {e}")))?;
@@ -444,64 +460,73 @@ impl MachineImageManager {
     }
 }
 
-/// Downloads the rootfs to `dst`, streaming through SHA-256. `dst` may hold a
-/// partial file on error; the caller stages it under a [`StagingGuard`], which
-/// removes the whole staging directory on failure.
-async fn fetch_rootfs(
-    location: &RemoteLocation,
-    rootfs: &RootfsFile,
-    dst: &Path,
-    on_progress: &mut impl FnMut(u64, u64),
-) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
+impl RootfsFile {
+    /// Flush pending writes before the caller's staging guard removes a failed download.
+    async fn fetch(
+        &self,
+        location: &RemoteLocation,
+        dst: &Path,
+        cancelled: &CancellationToken,
+        on_progress: &mut impl FnMut(u64, u64),
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
 
-    let mut hasher = Sha256::new();
-    let mut written: u64 = 0;
-    let mut file = tokio::fs::File::create(dst).await?;
-
-    match location {
-        RemoteLocation::Http(url) => {
-            let mut resp = reqwest::get(url.clone())
-                .await
-                .and_then(reqwest::Response::error_for_status)
-                .map_err(|e| ImageError::image(format!("download {url}: {e}")))?;
-            on_progress(0, rootfs.size);
-            while let Some(bytes) = resp
-                .chunk()
-                .await
-                .map_err(|e| ImageError::image(format!("download {url}: {e}")))?
-            {
-                written += bytes.len() as u64;
-                if written > rootfs.size {
-                    return Err(ImageError::image(format!(
-                        "{}: response exceeds manifest size {}",
-                        rootfs.path, rootfs.size
-                    )));
+        let mut hasher = Sha256::new();
+        let mut written: u64 = 0;
+        let mut file = tokio::fs::File::create(dst).await?;
+        let downloaded: Result<()> = async {
+            match location {
+                RemoteLocation::Http(url) => {
+                    let mut resp = cancelled
+                        .run_until_cancelled(reqwest::get(url.clone()))
+                        .await
+                        .ok_or(ImageError::Cancelled)?
+                        .and_then(reqwest::Response::error_for_status)
+                        .map_err(|e| ImageError::image(format!("download {url}: {e}")))?;
+                    on_progress(0, self.size);
+                    while let Some(bytes) = cancelled
+                        .run_until_cancelled(resp.chunk())
+                        .await
+                        .ok_or(ImageError::Cancelled)?
+                        .map_err(|e| ImageError::image(format!("download {url}: {e}")))?
+                    {
+                        written += bytes.len() as u64;
+                        if written > self.size {
+                            return Err(ImageError::image(format!(
+                                "{}: response exceeds manifest size {}",
+                                self.path, self.size
+                            )));
+                        }
+                        hasher.update(&bytes);
+                        file.write_all(&bytes).await?;
+                        on_progress(written, self.size);
+                    }
                 }
-                hasher.update(&bytes);
-                file.write_all(&bytes).await?;
-                on_progress(written, rootfs.size);
+                RemoteLocation::File(path) => {
+                    let bytes = tokio::fs::read(path).await?;
+                    written = bytes.len() as u64;
+                    hasher.update(&bytes);
+                    file.write_all(&bytes).await?;
+                    on_progress(written, self.size);
+                }
             }
+            Ok(())
         }
-        RemoteLocation::File(path) => {
-            let bytes = tokio::fs::read(path).await?;
-            written = bytes.len() as u64;
-            hasher.update(&bytes);
-            file.write_all(&bytes).await?;
-            on_progress(written, rootfs.size);
-        }
-    }
-    file.flush().await?;
-    drop(file);
+        .await;
+        // Tokio writes can outlive write_all; drain them even after HTTP failure or cancellation.
+        file.flush().await?;
+        drop(file);
+        downloaded?;
 
-    let digest = format!("{:x}", hasher.finalize());
-    if written != rootfs.size || digest != rootfs.sha256 {
-        return Err(ImageError::image(format!(
-            "{}: expected {} bytes sha256:{}, got {written} bytes sha256:{digest}",
-            rootfs.path, rootfs.size, rootfs.sha256
-        )));
+        let digest = format!("{:x}", hasher.finalize());
+        if written != self.size || digest != self.sha256 {
+            return Err(ImageError::image(format!(
+                "{}: expected {} bytes sha256:{}, got {written} bytes sha256:{digest}",
+                self.path, self.size, self.sha256
+            )));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -596,7 +621,11 @@ mod tests {
             arch: "arm64".into(),
         };
 
-        let image = manager.pull(&selector, |_, _| {}).await.unwrap();
+        let cancelled = CancellationToken::new();
+        let image = manager
+            .pull(&selector, &cancelled, |_, _| {})
+            .await
+            .unwrap();
         assert_eq!(image.manifest.name, "ubuntu-noble-arm64");
         assert_eq!(image.manifest.version, "20260716_0947");
         assert_eq!(std::fs::read(image.rootfs_path()).unwrap(), body);
@@ -604,7 +633,9 @@ mod tests {
         // Second pull is a cached no-op reporting full progress.
         let mut seen = Vec::new();
         let again = manager
-            .pull(&selector, |done, total| seen.push((done, total)))
+            .pull(&selector, &cancelled, |done, total| {
+                seen.push((done, total));
+            })
             .await
             .unwrap();
         assert_eq!(again.rootfs_path(), image.rootfs_path());
@@ -676,10 +707,138 @@ mod tests {
 
         let manager = test_manager(publish_dir.path(), data_dir.path());
         let selector = ImageSelector::Reference("alpine-3.24-arm64".parse().unwrap());
-        let err = manager.pull(&selector, |_, _| {}).await.unwrap_err();
+        let err = manager
+            .pull(&selector, &CancellationToken::new(), |_, _| {})
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("sha256"), "{err}");
         assert!(manager.get("alpine-3.24-arm64", "20260716_1300").is_err());
         assert!(manager.list().is_empty());
+    }
+
+    #[test]
+    fn cancelled_http_pull_drains_writes_cleans_staging_and_retries() {
+        use std::time::Duration;
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let publish_dir = tempdir().unwrap();
+            let data_dir = tempdir().unwrap();
+            let body = publish(
+                publish_dir.path(),
+                "ubuntu-noble-arm64",
+                "20260716_0947",
+                &vec![0x5a; 64 * 1024],
+            );
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let source = publish_dir.path().to_path_buf();
+            let server = tokio::spawn(async move {
+                for request_number in 0..6 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 1024];
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let read = stream.read(&mut buffer).await.unwrap();
+                        assert_ne!(read, 0);
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    let request = std::str::from_utf8(&request).unwrap();
+                    let path = request.split_whitespace().nth(1).unwrap();
+                    let content = std::fs::read(source.join(path.trim_start_matches('/'))).unwrap();
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        content.len()
+                    );
+                    stream.write_all(headers.as_bytes()).await.unwrap();
+                    if request_number == 2 {
+                        assert!(path.ends_with("/rootfs.squashfs"));
+                        stream
+                            .write_all(&content[..content.len() / 2])
+                            .await
+                            .unwrap();
+                        match stream.read(&mut buffer).await {
+                            Ok(0) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                            result => {
+                                panic!("canceled download retained its HTTP connection: {result:?}")
+                            }
+                        }
+                    } else {
+                        stream.write_all(&content).await.unwrap();
+                    }
+                }
+            });
+            let manager = MachineImageManager::with_base(
+                data_dir.path(),
+                RemoteLocation::parse(&format!("http://{address}")),
+            );
+            let selector = ImageSelector::Reference("ubuntu-noble-arm64".parse().unwrap());
+            let cancelled = CancellationToken::new();
+            let (release_write, write_release) = std::sync::mpsc::channel();
+            let mut write_release = Some(write_release);
+            let mut blocker = None;
+            let (written, observed) = oneshot::channel();
+            let mut written = Some(written);
+            let mut pulling = Box::pin(manager.pull(&selector, &cancelled, |done, _| {
+                if done == 0 {
+                    // Hold Tokio's only blocking worker after File::create, before the first write.
+                    let release = write_release.take().unwrap();
+                    let (started, held) = std::sync::mpsc::channel();
+                    blocker = Some(tokio::task::spawn_blocking(move || {
+                        started.send(()).unwrap();
+                        release.recv().unwrap();
+                    }));
+                    held.recv_timeout(Duration::from_secs(3)).unwrap();
+                } else if let Some(written) = written.take() {
+                    cancelled.cancel();
+                    written.send(()).unwrap();
+                }
+            }));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    result = &mut pulling => panic!("partial download completed: {result:?}"),
+                    result = observed => result.unwrap(),
+                }
+            })
+            .await
+            .unwrap();
+            std::future::poll_fn(|cx| {
+                assert!(pulling.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_write.send(()).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(3), pulling)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(matches!(error, ImageError::Cancelled));
+            blocker.unwrap().await.unwrap();
+            assert_eq!(std::fs::read_dir(&manager.images_dir).unwrap().count(), 0);
+            assert!(manager.list().is_empty());
+
+            let image = tokio::time::timeout(
+                Duration::from_secs(3),
+                manager.pull(&selector, &CancellationToken::new(), |_, _| {}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(std::fs::read(image.rootfs_path()).unwrap(), body);
+            tokio::time::timeout(Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap();
+        });
     }
 
     #[test]

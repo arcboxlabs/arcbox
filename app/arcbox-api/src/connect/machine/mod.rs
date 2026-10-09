@@ -19,7 +19,7 @@ use crate::error::ApiError;
 
 use super::{SharedRuntime, stream_input};
 
-use super::ConnectRuntimeExt as _;
+use super::{ConnectRuntimeExt as _, ContextExt as _};
 
 /// The NAT gateway every machine's primary interface routes through; it also
 /// serves DNS (same literal the guest agent's DHCP path documents).
@@ -71,7 +71,7 @@ impl MachineServiceImpl {
 impl pb::MachineService for MachineServiceImpl {
     async fn create(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::CreateMachineRequest>,
     ) -> ServiceResult<pb::CreateMachineResponse> {
         let req = request.to_owned_message();
@@ -86,11 +86,12 @@ impl pb::MachineService for MachineServiceImpl {
         let rootfs = if req.distro.is_empty() {
             None
         } else {
-            let image =
-                rootfs::pull_image(runtime, &req.name, &req.distro, &req.version, &req.arch)
-                    .await?;
+            ctx.check_shutdown()?;
+            let image = rootfs::pull_image(runtime, &ctx, &req).await?;
+            ctx.check_shutdown()?;
             Some(rootfs::rootfs_for(runtime, &image).await?)
         };
+        ctx.check_shutdown()?;
 
         let config = arcbox_core::machine::MachineConfig {
             name: req.name.clone(),
