@@ -10,7 +10,9 @@ VM readiness, guest-agent connectivity, and networking/port-forward state.
 The main entry point is `Runtime`:
 
 - `Runtime::new(config)` creates the runtime synchronously
-- `runtime.init(|_| {}).await` prepares runtime state and assets
+- `runtime.prepare_host().await` prepares shared directories and removes the legacy shared CA key
+- `runtime.init_system(|_| {}).await` prepares System VM assets and starts the optional System VM
+- `runtime.init(|_| {}).await` runs both stages in order
 - `runtime.ensure_vm_ready().await` ensures the default machine is running
 
 ## Key Components
@@ -32,7 +34,9 @@ let cid = runtime.ensure_vm_ready().await?;
 println!("default machine CID: {cid}");
 ```
 
-On macOS, initialization removes the legacy shared `tls/ca-key.pem` before the runtime becomes usable, including with System VM autostart disabled. A removal failure stops initialization. Public certificates and unrelated application files remain intact.
+On macOS, initialization removes the legacy shared `tls/ca-key.pem` before the runtime becomes usable, including with System VM autostart disabled. A removal failure stops host preparation. Callers that start machines independently must await `prepare_host` before admitting machine operations; System VM initialization can then run separately. Public certificates and unrelated application files remain intact.
+
+Before calling `init_system`, await `reserve_system_startup` and retain the guard through System service startup and readiness publication. The reservation waits for an existing System VM operation; the caller may cancel that wait. Recovery and configuration requests still reject concurrent operations. `init` holds the reservation across System initialization for direct callers.
 
 Capture `Runtime::capture_web_guest` before collecting HTTPS observation addresses. Read the bridge through `web_guest_bridge_address` and pass the captured guest to `Arc<Runtime>::reconcile_https_access` for enable and disable requests. The call retains the expected VM through native connection and RPC cleanup. Cancel through the token and await completion before disabling the lease. Validate prompt ownership through `with_web_guest_claim`. The daemon starts independent System and distro machine observers before Runtime initialization, including when System VM autostart is disabled.
 

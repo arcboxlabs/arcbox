@@ -13,6 +13,38 @@ fn runtime() -> (tempfile::TempDir, Arc<Runtime>) {
     (directory, runtime)
 }
 
+#[tokio::test]
+async fn system_startup_excludes_recovery_and_reconfiguration() {
+    let (_directory, runtime) = runtime();
+    let startup = runtime.reserve_system_startup().await;
+    let recovery = runtime
+        .recover_storage(Action::CheckOnly)
+        .await
+        .unwrap_err();
+    let resize = runtime.resize_system_vm(0, 0).await.unwrap_err();
+    let backend = runtime
+        .switch_system_vm_backend(runtime.system_vm_backend())
+        .await
+        .unwrap_err();
+    for error in [recovery, resize, backend] {
+        assert!(error.to_string().contains("another System VM operation"));
+    }
+    assert!(runtime.subscribe_storage_recovery().0.is_none());
+    assert!(!runtime.machine_manager.storage_is_held().unwrap());
+
+    drop(startup);
+    runtime.recover_storage(Action::CheckOnly).await.unwrap();
+    runtime
+        .storage_recovery
+        .owner
+        .tasks
+        .lock()
+        .await
+        .join()
+        .await;
+    assert!(runtime.machine_manager.storage_is_held().unwrap());
+}
+
 async fn fail_initial_persistence(runtime: &Arc<Runtime>) -> StorageRecoveryProgress {
     fs::write(&runtime.storage_recovery.directory, b"not a directory").unwrap();
     assert!(runtime.recover_storage(Action::CheckOnly).await.is_err());

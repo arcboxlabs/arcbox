@@ -128,11 +128,16 @@ impl StorageRecovery {
     }
 
     pub(super) fn publish(&self, progress: StorageRecoveryProgress) -> Result<()> {
+        self.persist(&progress)?;
+        self.publish_observation(progress);
+        Ok(())
+    }
+
+    pub(super) fn persist(&self, progress: &StorageRecoveryProgress) -> Result<()> {
         arcbox_atomic_file::write(
             &self.directory.join("status.json"),
-            &serde_json::to_vec_pretty(&Record::from(&progress))?,
+            &serde_json::to_vec_pretty(&Record::from(progress))?,
         )?;
-        self.publish_observation(progress);
         Ok(())
     }
 
@@ -155,6 +160,39 @@ pub(super) fn terminal(progress: &StorageRecoveryProgress) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_completion_waits_for_live_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StorageRecovery::load(directory.path()).unwrap();
+        fs::create_dir(&state.directory).unwrap();
+        let mut progress = StorageRecoveryProgress {
+            operation_id: "verified-operation".into(),
+            phase: Phase::Verifying.into(),
+            storage_protected: true,
+            ..Default::default()
+        };
+        state.publish(progress.clone()).unwrap();
+        let (_, mut updates) = state.subscribe();
+
+        progress.phase = Phase::Complete.into();
+        progress.storage_protected = false;
+        state.persist(&progress).unwrap();
+
+        assert_eq!(state.subscribe().0.unwrap().phase, Phase::Verifying);
+        assert!(matches!(
+            updates.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let restored = StorageRecovery::load(directory.path()).unwrap();
+        let completed = restored.subscribe().0.unwrap();
+        assert_eq!(completed.phase, Phase::Complete);
+        assert!(!completed.storage_protected);
+
+        state.publish_observation(progress);
+        assert_eq!(updates.try_recv().unwrap().phase, Phase::Complete);
+        assert_eq!(state.subscribe().0.unwrap().phase, Phase::Complete);
+    }
 
     #[test]
     fn hold_without_journal_is_visible_and_protected_after_restart() {
