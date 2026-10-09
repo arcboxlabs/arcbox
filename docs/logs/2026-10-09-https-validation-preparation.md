@@ -154,3 +154,9 @@ The probe extracts EROFS and compares the embedded machine init and helper scrip
 A new regression reproduced readiness retrying after the operational socket scope had permanently closed. The readiness loop now checks admission before acquiring another host hold or connecting. Scope closure ends the loop with its original error instead of waiting for the 60-second readiness deadline.
 
 All six targeted readiness tests pass, including the new cancellation case, stale physical-run rejection, distro initialization, and VM lifecycle ordering. Engine all-target Clippy with `-D warnings` and formatting pass. The new fixture uses a modeled VM; it verifies released host holds and unchanged addresses without starting a guest. Native startup acceptance remains pending.
+
+## Cancellation-aware API preparation
+
+Connect request contexts now accept a daemon cancellation token. Icon lookup and macOS image resolution cancel their read-only HTTP requests. Machine import checks cancellation before preparation and before starting the native import worker; accepted native work remains awaited. Calls without a daemon token preserve their existing behavior.
+
+Both targeted API tests pass: an already-cancelled request never polls its operation, and a real partial HTTP response is disconnected during macOS image resolution. The original direct-call error remains intact. API all-target Clippy with `-D warnings` and workspace formatting pass through devenv. Daemon token delivery and retained handler shutdown are separate integration work; these tests do not start a VM or modify native trust.

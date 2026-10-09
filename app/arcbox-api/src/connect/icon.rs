@@ -8,6 +8,8 @@
 use arcbox_connect::v1 as pb;
 use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult};
 
+use super::ContextExt as _;
+
 struct ResolvedIcon(Option<dimicon::IconSource>);
 
 impl From<ResolvedIcon> for pb::GetImageIconResponse {
@@ -87,9 +89,9 @@ impl IconServiceImpl {
 impl pb::IconService for IconServiceImpl {
     async fn get_image_icon(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::GetImageIconRequest>,
     ) -> ServiceResult<pb::GetImageIconResponse> {
-        Response::ok(self.resolve(request.fqin).await?)
+        Response::ok(ctx.until_shutdown(self.resolve(request.fqin)).await?)
     }
 }

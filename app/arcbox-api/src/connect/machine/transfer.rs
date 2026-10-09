@@ -9,8 +9,9 @@ use arcbox_core::machine::MachineConfig;
 use arcbox_core::machine::archive::read_manifest;
 use arcbox_core::machine_image::{self, MachineImage};
 use arcbox_core::{HostCapacity, Runtime};
-use connectrpc::ConnectError;
+use connectrpc::{ConnectError, RequestContext};
 
+use super::super::ContextExt as _;
 use super::{refusal, rootfs};
 
 /// Writes machine `id` to the archive at `path`; the image manifest it
@@ -59,8 +60,10 @@ pub(super) async fn export(
 /// Creates a machine from the archive at `req.path`.
 pub(super) async fn import(
     runtime: &Arc<Runtime>,
+    ctx: &RequestContext,
     req: pb::ImportMachineRequest,
 ) -> Result<pb::ImportMachineResponse, ConnectError> {
+    ctx.check_shutdown()?;
     let path = archive_path(&req.path)?;
     let manifest_path = path.clone();
     let manifest = tokio::task::spawn_blocking(move || read_manifest(&manifest_path))
@@ -93,6 +96,7 @@ pub(super) async fn import(
         .check(cpus, memory_mb)
         .map_err(|e| ConnectError::invalid_argument(format!("{e}; import with --cpus/--memory")))?;
 
+    ctx.check_shutdown()?;
     let config = MachineConfig {
         name,
         cpus,
@@ -110,6 +114,7 @@ pub(super) async fn import(
         enable_rosetta: false,
         nested_virt: false,
     };
+    ctx.check_shutdown()?;
     let manager = Arc::clone(runtime.machine_manager());
     let id = tokio::task::spawn_blocking(move || manager.import(config, &path))
         .await

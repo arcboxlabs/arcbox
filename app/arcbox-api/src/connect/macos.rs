@@ -17,8 +17,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::SharedRuntime;
 
-use super::ConnectRuntimeExt as _;
 use super::run_macos_blocking;
+use super::{ConnectRuntimeExt as _, ContextExt as _};
 
 /// Wire name of a pull stage.
 const fn stage_name(stage: PullStage) -> &'static str {
@@ -249,17 +249,20 @@ impl pb::MacosService for MacosServiceImpl {
 
     async fn image_resolve(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::MacosImageResolveRequest>,
     ) -> ServiceResult<pb::MacosImageResolveResponse> {
         let req = request.to_owned_message();
         let source = parse_source(&req.reference, &req.manifest_url)?;
         let mgr = Arc::clone(self.runtime.ready()?.mac_machine_manager());
-        let resolved = mgr
-            .images()
-            .resolve_remote(&source)
-            .await
-            .map_err(|e| ConnectError::internal(e.to_string()))?;
+        let resolved = ctx
+            .until_shutdown(async {
+                mgr.images()
+                    .resolve_remote(&source)
+                    .await
+                    .map_err(|e| ConnectError::internal(e.to_string()))
+            })
+            .await?;
         let resp = pb::MacosImageResolveResponse {
             name: resolved.name,
             version: resolved.version,
@@ -306,5 +309,85 @@ impl pb::MacosService for MacosServiceImpl {
             .remove(&name)
             .map_err(|e| ConnectError::internal(e.to_string()))?;
         Response::ok(pb::Empty::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use arcbox_connect::v1::MacosService as _;
+    use buffa::Message as _;
+    use connectrpc::HasMessageView as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_cancels_stalled_image_resolve_http_body() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requested, observed) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+            }
+            assert!(request.starts_with(b"GET /manifest.json HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 32\r\nConnection: close\r\n\r\n{",
+                )
+                .await
+                .unwrap();
+            requested.send(()).unwrap();
+            match stream.read(&mut buffer).await {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                result => panic!("canceled HTTP request left the connection open: {result:?}"),
+            }
+        });
+        let (directory, runtime) = super::super::tests::storage_runtime();
+        let service = MacosServiceImpl::new(runtime);
+        let shutdown = CancellationToken::new();
+        let mut context = RequestContext::new(Default::default());
+        context.extensions_mut().insert(shutdown.clone());
+        let bytes = bytes::Bytes::from(
+            pb::MacosImageResolveRequest {
+                manifest_url: format!("http://{address}/manifest.json"),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let view = pb::MacosImageResolveRequest::decode_view(&bytes).unwrap();
+        let response = service.image_resolve(context, ServiceRequest::from_parts(&view, &bytes));
+        tokio::pin!(response);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                _ = &mut response => panic!("resolution finished before the complete HTTP body"),
+                result = observed => result.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(3), response)
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

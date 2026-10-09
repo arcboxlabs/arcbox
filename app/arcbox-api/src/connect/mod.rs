@@ -42,6 +42,7 @@ mod system;
 mod template;
 mod web_services;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,7 @@ use arcbox_core::Runtime;
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use connectrpc::{ConnectError, RequestContext};
 use tokio_stream::{Stream, StreamExt as _};
+use tokio_util::sync::CancellationToken;
 
 pub use control::SandboxServiceImpl;
 pub use filesystem::SandboxFilesystemServiceImpl;
@@ -149,13 +151,24 @@ impl ConnectRuntimeExt for SharedRuntime {
     }
 }
 
-/// Extension trait for extracting routing metadata from a Connect request.
+/// Routing metadata and daemon shutdown control for a Connect request.
 pub(crate) trait ContextExt {
     /// Returns the target machine name, defaulting to the System VM.
     fn machine_id(&self) -> Result<String, ConnectError>;
 
     /// Returns the System VM for Sandbox V1, rejecting every other machine.
     fn sandbox_machine_id(&self) -> Result<String, ConnectError>;
+
+    /// Reject new work after daemon shutdown begins.
+    fn check_shutdown(&self) -> Result<(), ConnectError>;
+
+    /// Cancel a read or preparation future when daemon shutdown begins.
+    ///
+    /// The future must tolerate cancellation. Native workers must remain awaited.
+    fn until_shutdown<T: Send>(
+        &self,
+        future: impl Future<Output = Result<T, ConnectError>> + Send,
+    ) -> impl Future<Output = Result<T, ConnectError>> + Send;
 }
 
 impl ContextExt for RequestContext {
@@ -185,6 +198,32 @@ impl ContextExt for RequestContext {
             ));
         }
         Ok(machine)
+    }
+
+    fn check_shutdown(&self) -> Result<(), ConnectError> {
+        if self
+            .extensions()
+            .get::<CancellationToken>()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ConnectError::unavailable("daemon is shutting down"));
+        }
+        Ok(())
+    }
+
+    async fn until_shutdown<T: Send>(
+        &self,
+        future: impl Future<Output = Result<T, ConnectError>> + Send,
+    ) -> Result<T, ConnectError> {
+        let Some(shutdown) = self.extensions().get::<CancellationToken>() else {
+            // Direct library calls have no daemon lifecycle signal.
+            return future.await;
+        };
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => Err(ConnectError::unavailable("daemon is shutting down")),
+            result = future => result,
+        }
     }
 }
 
@@ -269,6 +308,33 @@ pub fn router_with_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_rejects_work_before_polling_and_preserves_direct_calls() {
+        let mut context = RequestContext::new(Default::default());
+        context.check_shutdown().unwrap();
+        let error = context
+            .until_shutdown(async { Err::<(), _>(ConnectError::not_found("missing image")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::NotFound);
+
+        let shutdown = CancellationToken::new();
+        context.extensions_mut().insert(shutdown.clone());
+        context.check_shutdown().unwrap();
+        shutdown.cancel();
+        assert_eq!(
+            context.check_shutdown().unwrap_err().code,
+            connectrpc::ErrorCode::Unavailable
+        );
+        let error = context
+            .until_shutdown::<()>(std::future::poll_fn(|_| {
+                panic!("shutdown must reject the operation before its first poll")
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+    }
 
     pub(super) fn storage_runtime() -> (std::path::PathBuf, SharedRuntime) {
         let directory = std::env::temp_dir().join(format!(

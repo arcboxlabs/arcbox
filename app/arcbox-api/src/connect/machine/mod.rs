@@ -249,12 +249,12 @@ impl pb::MachineService for MachineServiceImpl {
 
     async fn import_machine(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::ImportMachineRequest>,
     ) -> ServiceResult<pb::ImportMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
-        Response::ok(transfer::import(runtime, req).await?)
+        Response::ok(transfer::import(runtime, &ctx, req).await?)
     }
 
     async fn set_resources(

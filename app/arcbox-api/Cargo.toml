@@ -31,6 +31,7 @@ arcbox-transport.workspace = true
 arcbox-image.workspace = true
 arcbox-engine.workspace = true
 arcbox-computer.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 base64 = "0.22.1"

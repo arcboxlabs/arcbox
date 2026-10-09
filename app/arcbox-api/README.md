@@ -19,6 +19,8 @@ During storage recovery or a retained recovery hold, public System VM write requ
 
 ## Usage
 
+Connect callers can pass a `tokio_util::sync::CancellationToken` in `RequestContext` extensions. Icon lookup and macOS image resolution return `Unavailable` when that token is cancelled. Direct library calls without a token retain their existing behavior. Cancellation must not discard native workers or pending file writes.
+
 ```rust
 use arcbox_api::{MachineServiceImpl, SharedRuntime};
 
