@@ -1,5 +1,4 @@
-//! Post-startup recovery: re-establish networking for surviving containers
-//! and reconcile host routes.
+//! Publish host DNS and recover System VM networking in separate startup stages.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,17 +19,53 @@ use crate::context::DaemonContext;
 use crate::self_setup;
 use crate::self_setup::SetupTask as _;
 
-/// Runs recovery and host setup tasks.
+/// Publishes host DNS independently of System VM recovery.
+pub async fn prepare_host(
+    ctx: &DaemonContext,
+    runtime: &Arc<Runtime>,
+    dns_port: u16,
+) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = (runtime, dns_port);
+    // Best-effort self-setup (non-blocking).
+    //
+    let default_data_dir = HostLayout::resolve_for_profile_from_env(ctx.profile, None).data_dir;
+
+    // Host resolver files are a privileged global mutation. Canonical
+    // production DNS is implicit; any isolated domain requires the launch
+    // contract to authorize it explicitly rather than inferring ownership
+    // from caller-controlled text.
+    let owns_dns = owns_dns_resolver(
+        ctx.profile,
+        ctx.install_dns_resolver,
+        ctx.dns_domain.as_str(),
+        &ctx.layout.data_dir,
+        &default_data_dir,
+    );
+    if !owns_dns {
+        tracing::debug!(
+            domain = %ctx.dns_domain,
+            data_dir = %ctx.layout.data_dir.display(),
+            "non-canonical DNS owner; skipping /etc/resolver self-setup"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::resolver_service::start(ctx, Arc::clone(runtime), dns_port, owns_dns)
+            .await
+            .context("explicit DNS resolver setup failed")?;
+    }
+    Ok(())
+}
+
+/// Recovers System VM networking and Docker host integrations.
 ///
 /// - Recovers DNS and port forwarding for containers that survived a daemon restart
 /// - Re-installs the container subnet route (cold-start reconcile)
-/// - Installs DNS resolver and Docker socket via helper
+/// - Installs the Docker socket via helper
 ///
-/// An explicitly requested DNS resolver is startup-critical. Canonical
-/// production setup and all other host integrations remain best-effort.
-pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    let _ = dns_port;
+/// Host integrations remain best-effort.
+pub async fn run_system(ctx: &DaemonContext, runtime: &Arc<Runtime>) -> Result<()> {
     let linux_vm = runtime.config().vm.autostart;
     if linux_vm {
         if let Err(error) = recover_container_networking(runtime).await {
@@ -69,34 +104,8 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
         }
     }
 
-    // Best-effort self-setup (non-blocking).
-    //
     let default_data_dir = HostLayout::resolve_for_profile_from_env(ctx.profile, None).data_dir;
 
-    // Host resolver files are a privileged global mutation. Canonical
-    // production DNS is implicit; any isolated domain requires the launch
-    // contract to authorize it explicitly rather than inferring ownership
-    // from caller-controlled text.
-    let owns_dns = owns_dns_resolver(
-        ctx.profile,
-        ctx.install_dns_resolver,
-        ctx.dns_domain.as_str(),
-        &ctx.layout.data_dir,
-        &default_data_dir,
-    );
-    if !owns_dns {
-        tracing::debug!(
-            domain = %ctx.dns_domain,
-            data_dir = %ctx.layout.data_dir.display(),
-            "non-canonical DNS owner; skipping /etc/resolver self-setup"
-        );
-    }
-    #[cfg(target_os = "macos")]
-    {
-        crate::resolver_service::start(ctx, Arc::clone(runtime), dns_port, owns_dns)
-            .await
-            .context("explicit DNS resolver setup failed")?;
-    }
     // The `/var/run/docker.sock` symlink belongs to the production daemon
     // running its canonical data dir: the link target embeds the
     // data dir, so a daemon on an overridden one (an e2e harness daemon on

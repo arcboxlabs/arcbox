@@ -152,7 +152,8 @@ impl RuntimeBooted {
         let handles = record_startup_phase("start_runtime_services", async {
             let handles =
                 services::start_services(&self.ctx, &self.runtime, self.control_plane).await?;
-            recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
+            recovery::prepare_host(&self.ctx, &self.runtime, handles.dns_port).await?;
+            recovery::run_system(&self.ctx, &self.runtime).await?;
             #[cfg(target_os = "macos")]
             crate::tls_signer::spawn(&self.ctx, &self.runtime).await;
             if linux_vm {

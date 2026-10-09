@@ -254,7 +254,8 @@ async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 /// for the launched app version.
 async fn prepare_assets(ctx: &DaemonContext) -> Result<assets::PreparedAssets> {
     let config = effective_config(ctx)?;
-    let prepared = assets::prepare(&config, &ctx.setup_state).await?;
+    let prepared = assets::prepare(&config).await?;
+    prepared.prepare_system(&config, &ctx.setup_state).await?;
     ctx.setup_state
         .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
     Ok(prepared)
