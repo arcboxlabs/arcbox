@@ -92,6 +92,8 @@ Run `abctl machine web NAME` to read the saved HTTP and HTTPS backend policies. 
 
 Each replacement also carries the current public CA or explicit absence. Root-only updates use the same connection and revision sequence. The guest validates a present root before changing any accepted policy, stores the parsed certificate in session memory, and clears it before connection shutdown. This proxy authority is independent of distro client trust and does not read the writable guest share. Machine frontend consumption remains pending with route activation.
 
+Each NAT rule owner retains one explicit executable path for checks, changes, listings, and cleanup. System VM owners use `/sbin/iptables`. The boot-assets machine shim now stages the static tool at `/usr/lib/arcbox/iptables` before user mounts, with atomic replacement and protected mount destinations. This boot change is not yet released or selected in `assets.lock`; installed distro availability remains unverified. Machine route activation must select that product-owned path.
+
 Host service snapshots query running distro machines independently of System VM readiness. Exact machine hostnames select only their captured guest. Responses must match the raw machine name, canonical hostname, bridge IPv4 address, and current DNS claim revision. Queries run concurrently; any failure cancels and drains the remaining work before failing the complete snapshot.
 
 Machine List, Inspect, and Events are available when Runtime is constructed, before System VM initialization finishes. Loaded machine metadata can include saved addresses; only validated web-service snapshots establish installed endpoints. Machine operations retain their existing readiness and storage-recovery gates.

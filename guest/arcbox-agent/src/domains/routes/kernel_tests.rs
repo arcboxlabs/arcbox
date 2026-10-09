@@ -5,6 +5,7 @@ use arcbox_connect::v1::{
     GuestWebService, MachineWebPorts, WebPortPolicy, web_port_policy::Selection,
 };
 use arcbox_dns::{NamePattern, claims::Claim};
+use std::{fs, os::unix::fs::PermissionsExt as _};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
@@ -103,7 +104,7 @@ async fn exercise_machine_routes() {
     let addresses = command("ip", &["-o", "address", "show", "dev", "lo"]).await;
     command("ip", &["address", "add", "192.0.2.8/32", "dev", "lo"]).await;
 
-    let mut foreign = TaggedRules::new("unrelated:");
+    let mut foreign = TaggedRules::new("unrelated:", crate::iptables::SYSTEM_TOOL);
     foreign
         .replace(
             "witness",
@@ -138,7 +139,16 @@ async fn exercise_machine_routes() {
         )
         .unwrap();
     let services = WebServices::new(registry.clone());
-    let mut routes = Routes::new(services.clone());
+    let tool_directory = tempfile::tempdir().unwrap();
+    let executable = tool_directory.path().join("iptables");
+    let calls = tool_directory.path().join("calls");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\nexec /sbin/iptables \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut routes = Routes::new(services.clone(), &executable);
     let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let frontend_port = frontend.local_addr().unwrap().port();
     routes.frontend_port = Some(frontend_port);
@@ -172,6 +182,9 @@ async fn exercise_machine_routes() {
     assert!(installed.contains(&format!("--to-destination {ADDRESS}:{first_port}")));
     assert!(installed.contains(&format!("--to-ports {frontend_port}")));
     assert!(!installed.contains("arcbox-index:"));
+    let inserted = fs::read_to_string(&calls).unwrap();
+    assert!(inserted.contains("-C PREROUTING"));
+    assert!(inserted.contains("-I PREROUTING"));
     rescan(&mut routes, &facts).await;
     assert_eq!(nat().await, installed);
 
@@ -231,12 +244,26 @@ async fn exercise_machine_routes() {
     routes.track(facts.clone());
     routes.scan_due().await;
     assert_eq!(services.snapshot(None).len(), 1);
+    let before_forget = fs::read_to_string(&calls).unwrap().len();
     routes.forget(facts.owner()).await.unwrap();
+    let removed = fs::read_to_string(&calls).unwrap();
+    assert!(removed[before_forget..].contains("-C PREROUTING"));
+    assert!(removed[before_forget..].contains("-D PREROUTING"));
     assert_eq!(services.snapshot(None), [] as [GuestWebService; 0]);
     assert_eq!(nat().await, foreign_baseline);
     routes.track(facts.clone());
     routes.scan_due().await;
+    let before_shutdown = fs::read_to_string(&calls).unwrap().len();
+    let before_cleanup = nat().await;
+    let unavailable = tool_directory.path().join("unavailable");
+    fs::rename(&executable, &unavailable).unwrap();
+    assert!(routes.shutdown().await.is_err());
+    assert_eq!(nat().await, before_cleanup);
+    fs::rename(&unavailable, &executable).unwrap();
     routes.shutdown().await.unwrap();
+    let cleaned = fs::read_to_string(&calls).unwrap();
+    assert!(cleaned[before_shutdown..].contains("-S PREROUTING"));
+    assert!(cleaned[before_shutdown..].contains("-D PREROUTING"));
     assert_eq!(services.snapshot(None), [] as [GuestWebService; 0]);
     assert!(routes.frontend.is_empty());
     assert!(routes.frontend_cancel.is_cancelled());

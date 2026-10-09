@@ -135,7 +135,7 @@ impl PublishMirror {
     pub fn new(uplink: String) -> Self {
         Self {
             uplink,
-            rules: TaggedRules::new(RULE_OWNER),
+            rules: TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL),
         }
     }
 
@@ -170,7 +170,9 @@ impl PublishMirror {
 /// process's rules, and dockerd re-creates its own on restart, so the
 /// event reconciliation that follows reinstalls what is still needed.
 pub async fn remove_all_orphans() -> Result<()> {
-    let removed = iptables::sweep(RULE_OWNER).await?;
+    let removed = TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL)
+        .sweep()
+        .await?;
     if removed > 0 {
         tracing::info!(removed, "swept publish mirror rules from a previous agent");
     }

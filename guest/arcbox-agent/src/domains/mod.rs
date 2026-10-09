@@ -89,7 +89,7 @@ impl DomainRoutes {
             dns.domain().clone(),
             network.docker_bridge_gateway(),
         );
-        let routes = Routes::new(services.clone());
+        let routes = Routes::new(services.clone(), crate::iptables::SYSTEM_TOOL);
         let task = tokio::spawn(async move {
             let result = routes.run(inbox, index, cancel).await;
             if let Err(error) = &result {

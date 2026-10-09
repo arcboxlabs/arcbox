@@ -52,7 +52,7 @@ async fn kernel_index_repairs_order_and_preserves_unrelated_rules() {
         &["-p", "tcp", "--dport", "12345"],
         &["-j", "RETURN"],
     );
-    let mut foreign = TaggedRules::new("unrelated:");
+    let mut foreign = TaggedRules::new("unrelated:", iptables::SYSTEM_TOOL);
     foreign.replace("witness", vec![unrelated]).await.unwrap();
 
     let dns = DnsRegistry::default();
@@ -70,16 +70,16 @@ async fn kernel_index_repairs_order_and_preserves_unrelated_rules() {
     let mut publisher = Publisher::new(dns.clone(), apex, gateway);
     publisher.reconcile(port).await.unwrap();
     let wanted = publisher.redirect_rules(port);
-    let installed = iptables::list_prerouting().await.unwrap();
+    let installed = publisher.rules.list_prerouting().await.unwrap();
     assert!(precedes_docker_and_has_one_pair(&installed, &wanted));
     assert!(!installed.contains(&format!("--to-ports {previous_port}")));
     assert!(dns.read().unwrap().get(OWNER).is_some());
-    TaggedRules::new(RULE_OWNER)
+    TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL)
         .replace("gateway", wanted.clone())
         .await
         .unwrap();
     publisher.reconcile(port).await.unwrap();
-    assert_eq!(iptables::list_prerouting().await.unwrap(), installed);
+    assert_eq!(publisher.rules.list_prerouting().await.unwrap(), installed);
 
     let duplicate: Vec<_> = ["-I", "PREROUTING"]
         .into_iter()
@@ -116,7 +116,7 @@ async fn kernel_index_repairs_order_and_preserves_unrelated_rules() {
         .collect();
     publisher.reconcile(port).await.unwrap();
     assert!(precedes_docker_and_has_one_pair(
-        &iptables::list_prerouting().await.unwrap(),
+        &publisher.rules.list_prerouting().await.unwrap(),
         &wanted,
     ));
 

@@ -76,6 +76,7 @@ non-obvious invariants and failure signatures.
 
 - **Update the host and agent together.** Change paired callers and decoders in the same source change. Keep `AGENT_PROTOCOL_VERSION` and `MIN_AGENT_PROTOCOL_VERSION` at 7 for current feature work. Do not add compatibility branches or bump versions for each message change. Preserve existing field numbers. The connection handshake still rejects agents below the minimum version.
 - Machine web sessions validate optional public-root PEM before changing policies. Keep the parsed root in session memory. An absent root withdraws proxy authority; guest client trust uses its separate reconciliation channel. Clear proxy authority before awaiting stream shutdown. Reject invalid replacements without changing the accepted configuration.
+- `iptables::TaggedRules` owns the executable path for checks, inserts, deletes, listings, and sweeps. Pass the tool explicitly when constructing routes. System VM owners use `/sbin/iptables`; machine routing requires the boot-owned `/usr/lib/arcbox/iptables`. Do not select a tool through PATH or fall back to a distro package. Preserve the selected path through shutdown cleanup.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
   guest's `/arcbox/bin/arcbox-agent` (the agent is NOT baked into the EROFS rootfs — the

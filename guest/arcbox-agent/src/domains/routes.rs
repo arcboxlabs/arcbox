@@ -1,6 +1,7 @@
 //! The task that owns the container-domain rules.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -17,7 +18,7 @@ use super::selection::{ALT_HTTPS_PORT, HttpBackend};
 use super::{
     Command, EndpointFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
 };
-use crate::iptables::{self, NatRule, TaggedRules};
+use crate::iptables::{NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
 const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
@@ -52,9 +53,9 @@ struct Tracked {
 }
 
 impl Routes {
-    pub(super) fn new(services: WebServices) -> Self {
+    pub(super) fn new(services: WebServices, executable: impl Into<PathBuf>) -> Self {
         Self {
-            rules: TaggedRules::new(RULE_OWNER),
+            rules: TaggedRules::new(RULE_OWNER, executable),
             containers: HashMap::new(),
             frontend_port: None,
             services,
@@ -75,7 +76,7 @@ impl Routes {
         if let Err(error) = Self::cleanup_index(self.index.as_ref()).await {
             tracing::warn!(%error, "index redirect cleanup failed");
         }
-        match iptables::sweep(RULE_OWNER).await {
+        match self.rules.sweep().await {
             Ok(0) => {}
             Ok(removed) => {
                 tracing::info!(
@@ -150,7 +151,7 @@ impl Routes {
         self.begin_shutdown();
         finish_shutdown(
             &mut self.frontend,
-            iptables::sweep(RULE_OWNER),
+            self.rules.sweep(),
             Self::cleanup_index(self.index.as_ref()),
         )
         .await
@@ -426,7 +427,7 @@ mod tests {
             &Default::default(),
         )
         .unwrap();
-        let mut routes = Routes::new(WebServices::default());
+        let mut routes = Routes::new(WebServices::default(), crate::iptables::SYSTEM_TOOL);
         routes.track(facts);
         let tracked = routes.containers.get_mut("pinned").unwrap();
         let backend = tracked.http_backend(BTreeSet::new()).await;
@@ -449,7 +450,10 @@ mod tests {
     async fn failed_index_retries_without_containers_and_success_clears_the_deadline() {
         use std::{pin::pin, task::Poll};
 
-        let mut routes = Routes::new(WebServices::new(crate::dns_server::DnsRegistry::default()));
+        let mut routes = Routes::new(
+            WebServices::new(crate::dns_server::DnsRegistry::default()),
+            crate::iptables::SYSTEM_TOOL,
+        );
         assert!(routes.next_scan().is_none());
         routes.index_reconciled(Err(anyhow::anyhow!("transient rule failure")));
         let mut retry = pin!(sleep_until(routes.next_scan()));
@@ -536,7 +540,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(services.snapshot(None).len(), 2);
-                let mut routes = Routes::new(services.clone());
+                let mut routes = Routes::new(services.clone(), crate::iptables::SYSTEM_TOOL);
                 routes.index = Some(Publisher::new(dns.clone(), apex, gateway));
                 let child = routes.frontend_cancel.clone();
                 if stop == "drop" {
@@ -591,7 +595,7 @@ mod tests {
             use std::{cell::Cell, pin::pin};
             use tokio::sync::oneshot;
 
-            let mut routes = Routes::new(WebServices::default());
+            let mut routes = Routes::new(WebServices::default(), crate::iptables::SYSTEM_TOOL);
             routes.frontend.spawn(async { panic!("frontend panic") });
             let (release_frontend, frontend_gate) = oneshot::channel();
             let (frontend_done, joined) = oneshot::channel();
@@ -651,7 +655,7 @@ mod tests {
         for operation in ["reconcile", "update", "remove"] {
             let (domains, mut commands) = super::super::DomainRoutes::test_channel();
             let services = domains.services();
-            let mut routes = Routes::new(services.clone());
+            let mut routes = Routes::new(services.clone(), crate::iptables::SYSTEM_TOOL);
             let old: Vec<_> = ["live", "absent", "nofacts"]
                 .map(|id| {
                     EndpointFacts::from_inspect(
@@ -730,7 +734,7 @@ mod tests {
 
     #[test]
     fn proxy_availability_controls_managed_routes() {
-        let mut routes = Routes::new(WebServices::default());
+        let mut routes = Routes::new(WebServices::default(), crate::iptables::SYSTEM_TOOL);
         assert!(routes.frontend_port.is_none());
         routes.frontend_port = Some(51347);
         for (pin, native, expected) in [

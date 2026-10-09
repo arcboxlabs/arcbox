@@ -25,7 +25,7 @@ impl Publisher {
             dns,
             apex,
             gateway,
-            rules: TaggedRules::new(RULE_OWNER),
+            rules: TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL),
         }
     }
 
@@ -46,15 +46,15 @@ impl Publisher {
 
     pub(in crate::domains) async fn reconcile(&mut self, frontend_port: u16) -> Result<()> {
         let wanted = self.redirect_rules(frontend_port);
-        match iptables::list_prerouting().await {
+        match self.rules.list_prerouting().await {
             Ok(listing) if precede_docker(&listing, &wanted) => {}
             result => {
                 self.withdraw();
                 result?;
-                iptables::sweep(RULE_OWNER).await?;
+                self.rules.sweep().await?;
                 self.rules.replace("gateway", wanted.clone()).await?;
                 ensure!(
-                    precede_docker(&iptables::list_prerouting().await?, &wanted),
+                    precede_docker(&self.rules.list_prerouting().await?, &wanted),
                     "index redirects do not precede Docker"
                 );
             }
@@ -83,7 +83,7 @@ impl Publisher {
 
     pub(in crate::domains) async fn cleanup(&self) -> Result<()> {
         self.withdraw();
-        iptables::sweep(RULE_OWNER).await?;
+        self.rules.sweep().await?;
         Ok(())
     }
 }

@@ -76,3 +76,17 @@ The guest validates the public root and both policies before changing accepted s
 The full `buf breaking` comparison against `origin/master` still reports the existing `MachineService.Import` to `ImportMachine` rename. The unchanged preceding source produces the same finding. No compatibility RPC, protocol bump, or gate suppression was added.
 
 Machine frontend consumption of the session root, route activation, signing listeners, and boot tool delivery remain pending. These results establish authenticated root delivery and withdrawal, not machine HTTPS. The signed App and DMG above predate this production change and must be rebuilt before native acceptance.
+
+## Machine network tool ownership
+
+Boot-assets commit `6a6d971` installs the static boot tool at `/usr/lib/arcbox/iptables` before user mounts and distro processes start. The helper rejects symbolic path components and insecure ancestor ownership or permissions. Installation uses a temporary file in the destination directory, assigns root ownership and executable permissions, and atomically replaces the previous file. A missing source or failed copy preserves the installed tool. The distro's own iptables remains unchanged.
+
+Every user mount now validates its destination before directory creation or mount. The helper rejects dot components, symbolic links, and paths that cover or enter the product directory. Invalid shares retain the existing console-report-and-skip behavior. The machine shim stops if tool installation fails.
+
+Boot-assets formatting, strict Clippy, CLI build, 15 unit tests, and the local release-asset E2E passed. The live CDN and QEMU tests remained ignored. The actual helper passed behavior checks with Alpine 3.19 BusyBox in a disposable container with no network or host mounts and only `CHOWN` capability. The checks cover repeated replacement, old file descriptor contents, absolute execution, ownership, source-copy failure cleanup, distro-tool preservation, and mount path rejection. These checks do not build or boot the new EROFS image. The boot release and runtime asset pin remain unchanged.
+
+Guest NAT owners now retain the selected executable for check, insert, delete, list, and sweep operations. System owners continue to select `/sbin/iptables`. Machine route activation must select the new product path after boot delivery is available; no PATH lookup or distro-tool fallback was added.
+
+The fresh Linux guest test binary passed 95 domain tests, three iptables tests, and four publish-mirror tests in a container without extra capabilities. The two opt-in kernel tests each passed in separate loopback-only containers with `NET_ADMIN` and `NET_RAW`. The machine regression records calls through its selected executable separately during installation, removal, and shutdown. Temporarily removing that executable makes shutdown fail and leaves the NAT table unchanged; restoring it permits cleanup. The index regression still preserves unrelated rules and repairs ordering. Linux all-target Clippy with `-D warnings` and workspace formatting passed; only the existing dependency future-incompatibility notice remains.
+
+These kernel checks exercise the selected tool and cleanup through production rule objects. They do not activate a machine session, bind its signing listener, or verify a boot image. The next machine slice must connect those consumers before the new tool path can serve installed machine HTTPS.
