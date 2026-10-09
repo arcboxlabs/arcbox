@@ -27,7 +27,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - Validate the sandbox DNS name before Create or Restore dials the guest. Reject invalid IDs before provisioning; preserve the supplied identity without lossy replacement.
 - HTTPS authorization must not block VM or Docker startup. The daemon owns the Keychain identity and reports `SetupStatus.local_https` independently. The daemon disables Keychain UI for its lifetime. Desktop runs `abctl tls trust` only for a deliberate HTTPS action in the login session. The helper stores public certificates and verifies TLS-only Admin trust. Remove legacy User trust during explicit authorization. Revoke the previous root before replacing `tls/ca.pem`; background publication preserves a trusted previous root. CA preparation errors affect HTTPS status, but failure to remove an exposed private key still blocks sharing the data directory. Development profiles and isolated data directories must not change host trust automatically.
 - Register the CA worker independently of Linux VM startup, including in `--no-linux-vm` mode. CA preparation runs in the background and retries after failure. The signing service selects the current published identity when a CSR arrives. Preserve the same authority handle while the root DER is unchanged; reject signatures if that handle changes before delivery.
-- `runtime/initialization.rs` removes the legacy shared CA key before System VM autostart and storage-hold branches. Distro machines share the data directory too. Keep removal failure fatal in VM-host-only mode; background CA preparation does not replace this barrier.
+- `Runtime::prepare_host` in `runtime/initialization.rs` removes the legacy shared CA key before Machine admission. `Runtime::init_system` handles optional System VM initialization after host preparation. `Runtime::init` runs both stages in order for direct callers. Distro machines share the data directory too. Keep removal failure fatal in VM-host-only mode; background CA preparation does not replace this barrier.
 - Use `guest_workers` for retained guest service joins and machine worker supervision. Keep cancelled machine names occupied until each worker joins. Subscribe before the initial scan and rescan after lagged events.
 - Start TLS signing independently of System VM autostart. Keep System and machine workers independent. Pin each connection to the captured physical VM. Cancel parked sessions on lifecycle changes or rescan. Hold each machine until native connection and signing work join. Recheck guest authority before signing and delivery. Retain the service in `BackgroundTask` through shutdown.
 - The guest trust service starts before System VM boot, including in `--no-linux-vm` mode, and retains its `BackgroundTask` through all shutdown paths. Keep System VM and machine delivery workers independent. Subscribe to the active CA watch. Reconcile by certificate fingerprint and physical VM identity. Unavailable CA state preserves guest trust. Acquire an expected machine host hold only while the machine is `Running`. Cancel and join each request before releasing the hold or replacing the worker. Drain every worker on service failure and shutdown.
@@ -35,27 +35,15 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - Start browser HTTPS observation before Runtime initialization, including with System VM autostart disabled. Keep System and machine workers independent. Supervise Running distro machines and rescan each second. Observe only while the captured guest is ready and a Desktop client watches an untrusted root. Match exact host source addresses and current DNS ownership. Capture the web guest before reading host addresses. Read the bridge under the canonical machine and physical VM guards. Pin enable and disable requests to that guest. Retain the expected VM hold through native connection and RPC cleanup. Use `with_web_guest_claim` for DNS validation and prompt publication; do not nest VM or DNS guards. Reject cancellation before opening a connection. Cancel on VM changes and join each started connection or observation RPC before disabling its lease or starting another request. Retain the observer in `BackgroundTask`; all three shutdown paths must join the observer before Runtime stops.
 - Startup is a phased, typed pipeline and the order is load-bearing — see
   root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`
-  before reordering. The current chain is 8 steps
+  before reordering. The host chain is 8 steps
   (`prepare_host → acquire_daemon_lease → start_control_plane →
   release_stale_resources → prepare_assets → boot_runtime →
   start_runtime_services → mark_ready`, `arcbox-daemon/src/main.rs`), each
   producing a richer context type so skipping a phase is a compile error
   (`context.rs`). gRPC (`start_control_plane`) must come before the slow
-  boot phases so clients can watch progress.
-- Two runtime handles, do not conflate them (`context.rs`): `shared_runtime`
-  is filled only after full init and gates normal RPCs with `UNAVAILABLE`
-  via `runtime.ready()`; `early_runtime` is filled the moment `Runtime` is
-  constructed, before the VM boots. Diagnostics, `ListWebServices` /
-  `WatchWebServices`, and `MachineService.List` / `Inspect` / `Events` use
-  `early_runtime`. Machine directory reads expose loaded metadata; operations
-  retain their existing readiness and storage-recovery gates. Core checks each
-  web guest's readiness; machine discovery must not wait for System VM startup.
-  A stuck boot never fills `shared_runtime`, so `GetVirtioDebug` also reads
-  `early_runtime`. Keep normal RPCs on `shared_runtime`. Never gate a
-  diagnostic on `shared_runtime`; gate on `early_runtime.ready()` instead —
-  `ready()` is the `ConnectRuntimeExt` method (`connect/mod.rs`) that returns
-  `UNAVAILABLE` only while the handle's `OnceLock` is empty, and
-  `early_runtime` fills the moment `Runtime` is constructed.
+  preparation phases so clients can watch progress. Seed bundle assets before host admission; download System assets in the retained System task.
+- Keep three Runtime handles distinct. `early_runtime` serves diagnostics and read-only directories after construction. `host_runtime` admits Machine and macOS guest operations after host preparation and listener startup. `shared_runtime` admits System services after System initialization and endpoint binding. System settings and recovery use host admission. Machine mutations must reject the reserved System name `default`.
+- `SetupStatus.phase` describes host startup. `system_runtime.state` independently reports disabled, preparing, VM boot, agent ready, Docker ready, or failed. Publish host admission and `READY` before starting the retained System task. System failure must preserve the Machine host. Retain System startup in `BackgroundTask` and join it before dependent services on every shutdown path. Await `Runtime::reserve_system_startup` with shutdown cancellation, then hold the reservation through initialization and System readiness publication. Configuration contention must delay System startup rather than fail it. Publish recovery completion only after releasing maintenance and operation guards. Capture the recovery operation ID under the startup reservation. Ignore delayed completion for that operation when waiting to retry startup.
 - `WatchSetupStatus` is the sole readiness/failure signal clients (desktop,
   e2e) may use — never log-grep or sleep. Fatal startup failures MUST call
   `SetupState::set_failed` before exit (200ms flush grace, `main.rs`) so
@@ -73,18 +61,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `docs/daemon-lifecycle.md`, and must be updated with any change. This
   was CORE-67: `VM_STARTING`/`VM_READY`/`NETWORK_READY` sat declared and
   unpublished, leaving the slowest stretch of startup silent.
-- **The VM phases are reported from inside `Runtime::init`, not derived
-  from pipeline order** (`InitProgress` → `SetupPhase` in
-  `startup/mod.rs::init_runtime`). WHY: `boot_runtime` is one stage that
-  stages guest binaries, boots the VM, waits for the agent, then waits for
-  dockerd. Publishing at the stage boundaries would bill the binary
-  download to `VM_STARTING` and make `VM_READY` mean "dockerd answered" —
-  the span ABX-309 budgets would measure the wrong thing. `init` reports
-  `SystemVmStarting` after the binaries are staged and `SystemVmReady` when
-  `vm_lifecycle.ensure_ready` returns (readiness level 2 below); the
-  dockerd wait lands in the `VM_READY → NETWORK_READY` window. `init`
-  reports nothing under `--no-linux-vm`, which is what keeps the VM pair
-  off the wire when no guest boots.
+- Report System VM milestones from `Runtime::init_system` through `SystemRuntimeStatus.State::VmStarting` and `VmReady`. Asset preparation uses `Starting`; host phase must not change during System startup. Preserve the structured guest boot interval in E2E timing checks.
 - **`SetupState` streams every update, not the newest snapshot**
   (`arcbox-api/src/system.rs`: a `watch` for `GetSetupStatus`, a `broadcast`
   for `WatchSetupStatus`). WHY: `NETWORK_READY` and `READY` are published
@@ -99,28 +76,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   into the snapshot, walking a client's phase backwards. Regressions:
   `back_to_back_phases_are_all_delivered`,
   `the_snapshot_is_not_replayed_as_an_update`.
-- **A listener the phase promises is bound before `start_services` returns,
-  never inside its spawned task** (`DnsService::bind_requested` in
-  `start_control_plane`, then `DockerApiServer::bind` + `serve` — CORE-71).
-  WHY: a task that binds and only logs its error cannot fail startup, so the
-  pipeline publishes `NETWORK_READY` and `READY` for a daemon whose primary
-  API no client can reach. `NETWORK_READY` therefore covers whichever
-  services this daemon runs — `--no-linux-vm` reaches it with DNS alone —
-  and the Kubernetes proxy is the deliberate exception: a taken 16443 is
-  tolerated, so it is started here but not promised. Adding a listener means
-  deciding which of those two it is. DNS is promised yet never fails on a
-  taken default: it binds the profile's port (`ArcboxProfile::dns_host_port`,
-  5553 production / 5554 development) and falls back to an OS-allocated one,
-  which self-setup publishes through `/etc/resolver/<domain>` and `abctl dns
-  status` reads back from that file; only an explicit `--dns-port` /
-  `ARCBOX_DNS_PORT` must bind. The DNS socket is bound in
-  `start_control_plane`, right after the lease is held, and served from
-  `start_services` once the runtime's `NetworkManager` exists (`ControlPlane`
-  in `context.rs` carries it across). WHY: both profiles' daemons run on one
-  machine, and a development build that shared 5553 with production
-  crash-looped under launchd for three days, a full VM boot per 5 s cycle,
-  because the bind then sat after `boot_runtime`; a bind failure now costs
-  no boot.
+- Bind promised listeners before publishing their admission. Host startup serves DNS and SSH before Machine admission. System startup binds Docker and Kubernetes endpoints before System admission. Explicit endpoint conflicts fail their owning stage; canonical Kubernetes and SSH ports remain best-effort. Bind DNS in `start_control_plane` before slow preparation and serve it from `start_host_services`.
 - **An unknown name under the local domain is answered NODATA, never
   NXDOMAIN** (`DnsForwarder::try_resolve_locally_or_nodata`). WHY: the
   domain ends in `.local`, which RFC 6762 gives to mDNS, so mDNSResponder
@@ -134,9 +90,9 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   "not ready" answer either. The guest agent's own DNS server
   (`guest/arcbox-agent/src/dns_server.rs`) keeps NXDOMAIN: its clients are
   Linux resolvers, which have no mDNS leg.
-- Retain resolver publication in `BackgroundTask`, shared through `StartupHandles` and `DaemonContext`. Use the same task owner for services that must finish cleanup before Runtime stops. Shutdown and startup cancellation must join the retained task before stopping Runtime. A cancelled join must leave the task in the shared slot. Recovery separates container snapshot replay (`recovery/container_network.rs`) from Docker CLI installation (`recovery/docker_tools.rs`).
+- Retain resolver publication in `BackgroundTask`, shared through `StartupHandles` and `DaemonContext`. Use the same task owner for services that must finish cleanup before Runtime stops. Shutdown and startup cancellation must join the retained task before stopping Runtime. A cancelled join must leave the task in the shared slot. Recovery separates host resolver publication (`recovery::prepare_host`) from System VM networking and Docker integration (`recovery::run_system`). Container snapshot replay remains in `recovery/container_network.rs`; Docker CLI installation remains in `recovery/docker_tools.rs`.
 - `DnsService` owns its UDP listener. Retain upstream queries in a `JoinSet`; workers must not hold the listener. On shutdown, cancel queued work and join running queries without sending replies. Preserve task panics and listener errors after cleanup. Retain the service in a shared `BackgroundTask`. All three shutdown paths must join DNS before Runtime stops, outside the five-second server drain. Socket regressions live in `dns_service/tests/lifecycle.rs` and `shutdown/tests/dns.rs`.
-- `services/control_plane.rs` starts gRPC and binds DNS before slow runtime preparation. `services/mod.rs` starts runtime services. Preserve gRPC-before-DNS ordering so setup watchers can receive a DNS bind failure.
+- `services/control_plane.rs` starts gRPC and binds DNS before slow runtime preparation. `services/mod.rs` separates host listeners from System listeners. Preserve gRPC-before-DNS ordering so setup watchers can receive a DNS bind failure.
 - Share `control_plane::Calls` through startup and daemon contexts. Close RPC admission before cleanup. Pass the shutdown token through `RequestContext` for cooperative preparation cancellation. Fail pending input with `Unavailable`, not successful EOF. Close operational agent sockets before joining services; normal exit must unmount NFS first. Retain admitted handlers through client disconnects and join handlers before Runtime stops. A handler count does not prove completion of detached native workers or response-stream producers.
 - `arcbox-daemon/src/resolver_service/publication.rs` owns the helper connection, complete resolver lease, authority watch, and mDNS mirror. Before closing the connection, mark DNS authority unavailable, clear setup readiness, then cancel and join the mirror. Reconnect with a fresh transport and the same service nonce.
 - `resolver_service/guest.rs` sends complete authority snapshots for the captured physical VM. Recheck that VM after Open and each acknowledgment. Send only changed authority revisions; retain the coordinator through cancellation and join before reconnecting. Run empty-authority delivery without activating the helper when the daemon does not own host DNS.

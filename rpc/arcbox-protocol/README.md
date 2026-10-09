@@ -44,6 +44,8 @@ The daemon and the in-VM `arcbox-agent` ship together. Update paired callers and
 
 ## Usage
 
+`SetupStatus.phase` reports host preparation and daemon failure. `SetupStatus.system_runtime` reports System VM service admission independently: `DISABLED`, `STARTING`, `VM_STARTING`, `VM_READY`, `READY`, or `FAILED` with a reason. `STARTING` covers binary preparation, `VM_STARTING` marks the start of guest boot, and `VM_READY` marks the guest agent answering before Docker becomes ready. `STATE_UNSPECIFIED` means the daemon has not established System state. Host `READY` admits machine operations; only System `READY` admits Docker, Kubernetes, sandbox, migration, and System filesystem requests. System VM configuration and storage recovery remain available through host admission when System startup fails. Local HTTPS and storage observations remain independent of both lifecycles.
+
 `ListGuestWebServices` uses typed container, index, and machine endpoints. A machine endpoint names one canonical host-assigned DNS name and its bridge IPv4 address. The System VM consumer rejects machine routes; the schema addition does not enable machine routing.
 
 `MachineService.SetWebPorts` saves per-machine HTTP and HTTPS backend policies. The shared `common.proto` defines `WebPortPolicy` and `MachineWebPorts` for host and guest consumers. Each policy selects automatic discovery, disabled routing, or a port from 1 through 65535. An explicit HTTPS port selects native TLS. Omitted update fields preserve their values. `MachineInfo.web_ports` and the setter response report saved configuration; neither reports installed routes.

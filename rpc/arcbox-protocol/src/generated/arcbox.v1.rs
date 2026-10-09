@@ -1370,12 +1370,12 @@ pub struct TerminalSize {
     #[prost(uint32, tag = "2")]
     pub height: u32,
 }
-/// Daemon startup progress and infrastructure health.
+/// Host startup progress and independent infrastructure health.
 /// Allows the desktop app (or any gRPC client) to observe daemon readiness
 /// without managing its lifecycle.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupStatus {
-    /// Current daemon phase.
+    /// Current host phase. READY does not imply System runtime readiness.
     #[prost(enumeration = "setup_status::Phase", tag = "1")]
     pub phase: i32,
     /// Whether the DNS resolver file is installed.
@@ -1423,20 +1423,16 @@ pub struct SetupStatus {
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
-    /// Daemon startup phases.
+    /// Host startup phases. System runtime state is reported separately.
     ///
-    /// Numbers follow the order phases were introduced, NOT the order they
-    /// occur in (DOWNLOADING_ASSETS = 8 precedes READY = 6), so match on the
-    /// value and never compare ordinals. The happy path is:
+    /// Numbers follow the order phases were introduced, not startup order.
+    /// Match on the enum; never compare numeric values. Happy-path sequence:
     ///
-    ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> \[DOWNLOADING_ASSETS\]
-    ///    -> ASSETS_READY
-    ///    -> \[VM_STARTING -> VM_READY\] -> NETWORK_READY -> READY
+    ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> ASSETS_READY
+    ///    -> NETWORK_READY -> READY
     ///
-    /// Bracketed steps are conditional: CLEANING_UP only when a displaced
-    /// daemon's resources must be released, DOWNLOADING_ASSETS only when boot
-    /// assets are missing, and the VM pair only when the Linux VM is enabled
-    /// (a --no-linux-vm daemon boots no guest and publishes neither). FAILED
+    /// CLEANING_UP applies when a displaced daemon's resources must be released.
+    /// System asset downloads and VM phases are not published here. FAILED
     /// can replace any of them. A phase already passed before a client
     /// subscribes is simply never seen, so treat an unobserved phase as
     /// unknown rather than waiting for it.
@@ -1446,24 +1442,19 @@ pub mod setup_status {
         Unspecified = 0,
         /// Host directories, config, and sockets are being prepared.
         Initializing = 1,
-        /// Kernel, rootfs, and guest binaries are present and verified.
+        /// Available bundle and cached assets are staged for host admission.
         AssetsReady = 2,
-        /// The System VM is booting. Guest binaries are already staged by
-        /// this point, so the phase covers the guest boot and nothing else.
+        /// Unused. Observe system_runtime for System VM startup.
         VmStarting = 3,
-        /// The System VM booted and its guest agent answered, so the VM
-        /// accepts commands. Its container runtime may still be starting.
+        /// Unused. Observe system_runtime for System VM readiness.
         VmReady = 4,
-        /// The host services this daemon promises are up: DNS and, with a Linux
-        /// VM, Docker plus any explicitly requested Kubernetes proxy are bound.
-        /// The canonical best-effort 16443 proxy remains the exception: a port
-        /// conflict leaves Kubernetes RPCs unavailable but does not fail startup.
+        /// Host networking services are bound. System services may still be starting.
         NetworkReady = 5,
-        /// Startup complete.
+        /// Host preparation is complete. Machine operations are available.
         Ready = 6,
         /// Reserved; never published.
         Degraded = 7,
-        /// Boot assets are being downloaded.
+        /// Unused. Observe system_runtime for System asset preparation.
         DownloadingAssets = 8,
         /// Waiting for a displaced daemon to release its disk images.
         CleaningUp = 9,

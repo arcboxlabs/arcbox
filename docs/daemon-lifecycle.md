@@ -2,107 +2,48 @@
 
 ## Startup Sequence
 
-Startup is a typed pipeline of eight ordered steps
-(`app/arcbox-daemon/src/main.rs::start` → `startup/pipeline.rs`). Each step
-consumes the previous step's context type, so skipping or reordering a step
-is a compile error.
+The host starts through eight typed stages in `app/arcbox-daemon/src/main.rs::start`:
 
 ```
-prepare_host             Create directories, resolve config      ~instant
-    │
-acquire_daemon_lease     flock(daemon.lock), terminate stale     ~instant or ≤30 s
-    │                    daemon
-    │
-start_control_plane      Bind arcbox.sock, SystemService up;     ~instant
-    │                    bind the DNS socket. Desktop can
-    │                    connect from this point on, and a taken
-    │                    explicit --dns-port fails here, before
-    │                    any VM boots.
-    │
-release_stale_resources  Wait for disk-image holders to release  0–10 s
-    │                    Reported as CLEANING_UP via gRPC.
-    │                    Then release the mounts a previous daemon
-    │                    left under ~/ArcBox (forced; the servers
-    │                    died with it) and create its directories.
-    │
-prepare_assets           Seed/download boot assets               variable
-    │                    Reported as DOWNLOADING_ASSETS →
-    │                    ASSETS_READY.
-    │
-boot_runtime             Construct Runtime, boot the System VM   variable
-    │                    Prepare the local CA without authorization.
-    │                    HTTPS trust has independent status;
-    │                    missing trust does not block VM boot.
-    │                    Reported as VM_STARTING → VM_READY,
-    │                    published from inside Runtime::init so
-    │                    the span covers the guest boot alone.
-    │
-start_runtime_services   Serve DNS, Docker API, critical         ~instant
-    │                    recovery. Then optional production
-    │                    Docker context; reported as
-    │                    NETWORK_READY.
-    │
-mark_ready               SetupPhase::Ready
+prepare_host             Resolve profile, directories, and socket paths
+acquire_daemon_lease      Hold daemon.lock before binding endpoints
+start_control_plane      Serve setup RPCs and bind the DNS socket
+release_stale_resources  Release previous image holders and host mounts
+prepare_assets           Seed coherent bundle and cached agent files, without downloads
+boot_runtime             Construct Runtime and await shared CA private-key removal
+start_runtime_services   Serve DNS and SSH; publish the host resolver and start TLS signing
+mark_ready               Admit Machine operations and publish host READY
 ```
 
-If any step fails, the daemon publishes `SetupPhase::Failed` with the
-error text in `SetupStatus.error`, waits ~200 ms so connected
-`WatchSetupStatus` streams flush the final event, and exits non-zero.
-Clients should treat FAILED (or stream EOF plus daemon exit) as
-startup failure.
+`mark_ready` publishes Machine admission and host `READY` before starting the retained optional System VM task. System asset downloads, guest boot, Docker readiness, sandbox replay, and container networking run independently of the Machine host. Docker and Kubernetes endpoints bind before System admission opens. A failed System startup preserves the Runtime and guest for diagnostics, reports its cause, and leaves Machine management and HTTPS available. Restart the daemon after fixing an ordinary System startup failure. A successful storage recovery retries System initialization in the same daemon.
 
-A paired storage validation failure enters protected startup after the boot assets and guest binaries are staged. The storage boundary writes `storage-recovery/hold`, and the runtime records `SetupStatus.storage_recovery` with phase `FAILED`, the original cause, and `storage_protected = true`. The daemon continues binding its host services and publishes `READY` with `vm_running = false`, so Desktop and `abctl disk check` / `abctl disk recover` can reach the recovery API. Protection blocks ordinary System VM starts, Docker mutations and interactive attach, mutating Connect RPCs, and new SSH execution or TCP channels to the System VM. Existing interactive sessions reject further input when storage protection starts. Diagnostic RPCs and other machines remain available. Missing image members remain missing; recovery must report the failure without recreating them. A VM, network, or asset failure without a storage hold still follows the fatal startup path above.
+A host-stage failure publishes `SetupStatus.phase = FAILED`, includes the cause in `error`, allows 200 ms for connected status streams, and exits. Host readiness requires removal of the legacy shared `tls/ca-key.pem`; System VM disablement and storage protection do not bypass this security barrier. Local CA preparation and login-session authorization remain independent of both host and System readiness.
 
-If Docker runtime startup fails after the agent becomes ready, the host queries a fresh `RuntimeStatus` from that agent. An explicit `READ_ONLY` or `UNAVAILABLE` state for a configured data or metadata volume also enters protected startup. The host writes the hold, preserves the original error and the complete status response in `storage-recovery/<operation>/startup-runtime-status.txt`, and stops the VM before continuing host services. These observations establish that required storage was unavailable for writes; they do not identify filesystem corruption or authorize repair. A failed probe, unknown observation, or read-write observation preserves the ordinary fatal startup behavior.
+### Independent readiness
 
-When protected startup has no System VM record, recovery rebuilds that record from verified cached boot assets and the existing validated disk pair. Recovery does not download assets, update the asset cache, provision images, or clear the hold during this step. Missing assets or an invalid pair keep recovery blocked. An existing record remains available for offline checks even when its pair is damaged.
+- `SetupStatus.phase` describes host startup: `INITIALIZING → [CLEANING_UP → INITIALIZING] → ASSETS_READY → NETWORK_READY → READY`, or `FAILED`. `DOWNLOADING_ASSETS`, `VM_STARTING`, `VM_READY`, and `DEGRADED` are not emitted by this host sequence.
+- `SetupStatus.system_runtime.state` describes the optional System VM: `DISABLED`, or `STARTING → VM_STARTING → VM_READY → READY`, with `FAILED` and a reason on error. `STARTING` includes asset preparation. The `VM_STARTING → VM_READY` interval measures guest boot through agent readiness; the container runtime may still be starting after `VM_READY`.
+- Machine controls require host `READY`. Docker, Kubernetes, and sandbox controls require System `READY`. A host-only daemon reaches host `READY` with System `DISABLED`.
+- `WatchSetupStatus` delivers every update in order. A late subscriber receives the current snapshot, not historical transitions. Missing timestamps remain unknown; enum ordinal values do not define progression order.
+- `NETWORK_READY` promises the bound DNS listener and an explicitly requested SSH listener. The default SSH port remains best-effort. An explicitly requested Kubernetes port is required only by System startup; a conflict fails System readiness without stopping Machines.
+- A non-default container CIDR lease and route belong to System startup. A route ownership conflict fails that System startup. Production retains best-effort route recovery. Host resolver publication is independent of container recovery.
+- `vm_running` mirrors `VmLifecycleState::is_ready`, which means the lifecycle actor considers the guest agent ready. It does not establish Docker readiness or provide a fresh liveness probe. `route_installed` and resolver flags describe their own current integrations.
+- `early_runtime` exposes diagnostics and read-only directories after Runtime construction. `host_runtime` admits Machine and macOS guest operations only after host preparation and listener startup. `shared_runtime` admits System services only after System initialization and endpoint binding. System settings and storage recovery use host admission so failures remain repairable.
+- The System startup task waits for the existing System operation reservation and holds the reservation through initialization and readiness publication. Shutdown cancels the lock wait. A concurrent configuration operation delays startup without publishing a failure. Storage recovery and System configuration changes cannot race readiness publication. Generic Machine mutations reject the reserved System name `default`.
 
-### Phase enum caveats
+### Storage protection and recovery
 
-- The observable progression is `INITIALIZING → [CLEANING_UP →
-  INITIALIZING] → [DOWNLOADING_ASSETS] → ASSETS_READY → [VM_STARTING →
-  VM_READY] → NETWORK_READY → READY` (or `FAILED`). Bracketed phases are
-  conditional; the VM pair is skipped entirely by a `--no-linux-vm`
-  daemon, which boots no guest. `DEGRADED` is reserved and never emitted.
-- A phase the daemon had already left before a client subscribed is never
-  observed. Treat a missing phase as unknown, not as zero elapsed and not
-  as a reason to keep waiting — the stream never replays it. Once
-  subscribed, though, no transition is dropped: `WatchSetupStatus` streams
-  every update rather than the newest snapshot, because `NETWORK_READY` and
-  `READY` are published ~300 µs apart with no await point between them and
-  a snapshot channel would collapse them (see `SetupState` in
-  `arcbox-api/src/system.rs`).
-- `NETWORK_READY` covers whichever host services this daemon promises. A
-  `--no-linux-vm` daemon reaches it with DNS alone. DNS, Docker, and an
-  explicitly requested Kubernetes proxy or SSH server (`--kubernetes-port`,
-  `--ssh-port`) are *bound* by then; a bind failure becomes `FAILED`. The
-  canonical best-effort ports 16443 and 16022 remain the exception: a
-  conflict leaves Kubernetes RPCs, or `ssh <machine>@arcbox`, unavailable
-  without failing startup. The SSH server runs with or without the Linux VM:
-  machines are VMs of their own.
-- A non-default container CIDR is reconciled before runtime services start;
-  an existing route owned by another interface fails startup. The canonical
-  production CIDR keeps its existing background recovery behavior.
-- `--docker-integration` is production-only. Its global Docker context switch
-  runs after startup-critical recovery, so a resolver failure cannot leave a
-  dead ArcBox context selected.
-- Local HTTPS trust is independent of startup. The daemon prepares its private Keychain identity without Keychain UI and reports trust through `SetupStatus.local_https`, including in `--no-linux-vm` mode. A CA error leaves Docker startup available. Removing an exposed `tls/ca-key.pem` remains a required security barrier before sharing the data directory. Background publication preserves a trusted previous root. The login-session `abctl tls trust` command revokes the previous root, requests native authorization, and publishes the current public certificate. Cancellation and `abctl tls untrust` do not stop containers. The daemon refreshes read-only trust status every five seconds and publishes changes only. CA rotation runs through the same worker without requiring a VM. See [ADR 0007](adr/0007-local-https-independent-of-startup.md).
-- Enum ordinal ≠ progression order (`DOWNLOADING_ASSETS = 8` occurs before
-  `READY = 6`). Clients must match on the value, never compare ordinals.
-  New phases are appended with the next free number regardless of where
-  they sit in the progression — values are additive-only.
-- Phases mark the transitions; the boolean `SetupStatus` fields
-  (`vm_running`, `route_installed`, `dns_resolver_installed`, …) carry the
-  state that outlives startup, including work `recovery::run` spawns in
-  the background and anything `route_status_loop` reconciles afterwards.
-  A client wanting "is the route up *now*" reads the flag, not a phase.
-  `vm_running` and `route_installed` both track the VM across restarts —
-  `services::vm_running_loop` mirrors `VmLifecycleState::is_ready`, and
-  `route_status_loop` mirrors the route events — so both fall on a
-  lifecycle-managed stop and rise again on the next boot rather than
-  reporting one cold-start observation forever. Neither is a liveness probe:
-  a guest that dies without the lifecycle noticing leaves `vm_running` true,
-  because crash detection is unimplemented (ABX-414).
+A storage validation failure retains a durable hold, reports `storage_recovery` with the original cause, and leaves host readiness available. Ordinary System VM starts and protected writes remain rejected. Diagnostic RPCs and other machines remain available. Missing image members remain missing; recovery must report the failure without recreating them.
+
+If Docker runtime startup fails after the agent becomes ready, the host queries a fresh `RuntimeStatus`. An explicit `READ_ONLY` or `UNAVAILABLE` state for a required volume preserves the status and original error before stopping the System VM. These observations establish unavailable writes, not filesystem corruption or authorization to repair.
+
+When protected startup has no System VM record, recovery rebuilds that record from verified cached assets and the existing validated disk pair. Recovery does not download assets, provision images, or clear protection during this step. A missing cache or invalid pair keeps recovery blocked.
+
+Recovery persists its terminal result before releasing ownership. Live completion is published only after the maintenance reservation and operation guards are released. `COMPLETE` with `storage_protected = false` from a new recovery operation permits retained System startup to retry. Startup records the preceding recovery operation ID while holding the System reservation, so a delayed completion from that operation cannot retry a later startup failure. A check-only completion that preserves protection does not permit retry.
+
+### Shutdown during System startup
+
+All shutdown paths close RPC admission, interrupt operational guest sockets, cancel service work, and join retained System startup before joining the services that startup can create. Runtime ownership survives a canceled join. Normal shutdown reaches the Runtime through `early_runtime`, including when System admission never opened. Initialization retains local file and native work through completion; existing bounded boot or asset waits can delay this join. The shutdown grace and second-signal VM stop begin after retained work drains.
 
 ### Why gRPC starts before resource cleanup
 

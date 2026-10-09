@@ -73,7 +73,11 @@ docker run hello-world
 
 Run TLS commands as the logged-in user. `tls rotate` requires a running daemon and resumes any pending rotation. The command authorizes the replacement before revoking the old CA, then asks the daemon to publish the replacement. Cancelling authorization before old-CA revocation preserves the original public certificate. `tls trust`, `tls repair`, and `tls rotate` accept `--expected-fingerprint` to pin the current certificate shown by `tls status`.
 
+`daemon start` returns after the daemon takes process ownership. Use `daemon status` to inspect host services and the System runtime separately. Host readiness permits machine operations; Docker requires the System runtime to report `ready`. System startup failure leaves host services available, and status prints the failure cause.
+
 ## Machine web configuration
+
+The machine name `default` is reserved for the daemon-managed System VM. Machine create, start, stop, remove, clone targets, and import targets reject that name. Use `abctl system resources`, `abctl system backend`, and `abctl disk` for System VM configuration and recovery. User machine operations remain available when the System VM is disabled, starting, or failed.
 
 `abctl machine web NAME` shows the saved HTTP and HTTPS backend selection. Set `--http-port` or `--https-port` to `auto`, `off`, or a port from 1 through 65535. Omitted options preserve their values. Both protocols default to `auto`; an explicit HTTPS port selects native TLS. These settings persist across daemon restarts, clones, and archives. `machine inspect` includes the saved `web_ports` object. This command saves configuration only; machine web routing is not yet available.
 
