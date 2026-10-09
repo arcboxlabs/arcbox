@@ -5,12 +5,12 @@ fail() {
     printf 'trace-clickhouse-pc: %s\n' "$*" >&2
     exit 1
 }
-[[ $# -ge 2 ]] || fail 'Usage: prepare INSTANCE GUEST_PID_NAMESPACE; freeze INSTANCE REASON; export INSTANCE'
+[[ $# -ge 2 ]] || fail 'Usage: prepare INSTANCE GUEST_PID_NAMESPACE; identity INSTANCE LABEL GUEST_MAIN_PID [TOTAL_BUDGET_SECONDS]; freeze INSTANCE REASON; export INSTANCE'
 action=$1
 instance=$2
 [[ $instance =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail 'Use alphanumerics, underscores, and hyphens for INSTANCE.'
 [[ $EUID == 0 ]] || fail 'Run the helper as root in the privileged guest sidecar.'
-for tool in awk cat date getconf mkdir readlink rmdir sha256sum uname; do
+for tool in awk cat date getconf mkdir readlink rmdir sha256sum sleep stat timeout uname; do
     command -v "$tool" >/dev/null || fail "Required tool is missing: $tool. Install the tool before capture."
 done
 capture=/capture/pc
@@ -127,6 +127,85 @@ failure_cleanup() {
     exit "$code"
 }
 
+start_ticks() {
+    local rest
+    rest=$(<"$1")
+    rest=${rest##*) }
+    read -r -a stat_fields <<<"$rest"
+    [[ ${#stat_fields[@]} -ge 20 ]] || fail 'The process stat record is incomplete.'
+    printf '%s\n' "${stat_fields[19]}"
+}
+
+read_program() {
+    local pid=$1 destination=$2 argument
+    readlink "/proc/$pid/exe" >"$destination/exe"
+    cat "/proc/$pid/cmdline" >"$destination/cmdline"
+    cat "/proc/$pid/comm" >"$destination/comm"
+    argv=()
+    while IFS= read -r -d '' argument; do argv+=("$argument"); done <"$destination/cmdline"
+    executable=$(<"$destination/exe")
+}
+
+is_server() {
+    [[ $executable == /usr/bin/clickhouse ]] || return 1
+    case ${argv[0]-} in
+    /usr/bin/clickhouse-server | clickhouse-server) return 0 ;;
+    /usr/bin/clickhouse | clickhouse) [[ ${argv[1]-} == server ]] ;;
+    *) return 1 ;;
+    esac
+}
+
+identity_snapshot() {
+    local destination=$1 pid=$2 original range perms offset device inode path backing_device backing_inode major minor map_major map_minor map_count
+    local executable
+    local -a argv stat_fields
+    mark "IDENTITY_BEGIN ${destination##*/} $pid"
+    cat "/proc/$pid/stat" >"$destination/stat-entry"
+    original=$(start_ticks "$destination/stat-entry")
+    printf '%s\n' "$original" >"$destination/start-ticks"
+    while :; do
+        cat "/proc/$pid/stat" >"$destination/stat-before"
+        [[ $(start_ticks "$destination/stat-before") == "$original" ]] || fail 'The main PID was reused during identity capture.'
+        read_program "$pid" "$destination"
+        if is_server; then
+            cat "/proc/$pid/maps" >"$destination/maps"
+            awk '$2 ~ /x/ && $6 ~ /\/libc\.so\.6$/ {print}' "$destination/maps" >"$destination/libc-map"
+            map_count=$(awk 'END {print NR}' "$destination/libc-map")
+            ((map_count <= 1)) || fail 'The main PID has multiple executable libc mappings.'
+            if ((map_count == 1)); then break; fi
+        fi
+        [[ $(<"$trace/tracing_on") == 1 && ! -f $capture/freeze-complete ]] || fail 'The frozen main PID is not the final ClickHouse server.'
+        printf '%s\t%q\t%q\t%q\n' "$(</proc/uptime)" "$executable" "${argv[0]-}" "${argv[1]-}" >>"$destination/wait.tsv"
+        sleep 0.05
+    done
+    printf '%q\n' "${argv[@]}" >"$destination/argv"
+    cat "/proc/$pid/status" >"$destination/status"
+    awk -v pid="$pid" '$1 == "Tgid:" {tgid=$2} $1 == "Pid:" {tid=$2} END {exit tgid!=pid || tid!=pid}' "$destination/status" || fail 'Identity requires the main thread PID.'
+    readlink "/proc/$pid/ns/pid" >"$destination/pid-namespace"
+    cat "/proc/$pid/cgroup" >"$destination/cgroup"
+    read -r range perms offset device inode path <"$destination/libc-map"
+    printf 'range\t%s\npermissions\t%s\noffset\t%s\ndevice\t%s\ninode\t%s\npath\t%s\n' "$range" "$perms" "$offset" "$device" "$inode" "$path" >"$destination/libc-mapping.tsv"
+    readlink "/proc/$pid/map_files/$range" >"$destination/libc-backing-path"
+    stat -L -c '%d %i %s' "/proc/$pid/map_files/$range" >"$destination/libc-backing-stat"
+    read -r backing_device backing_inode _ <"$destination/libc-backing-stat"
+    major=$(((backing_device >> 8 & 0xfff) | (backing_device >> 32 & 0xfffff000)))
+    minor=$(((backing_device & 0xff) | (backing_device >> 12 & 0xffffff00)))
+    IFS=: read -r map_major map_minor <<<"$device"
+    [[ $backing_inode == "$inode" ]] || fail 'The mapped libc inode changed.'
+    ((major == 16#$map_major && minor == 16#$map_minor)) || fail 'The mapped libc device changed.'
+    sha256sum "/proc/$pid/map_files/$range" >"$destination/libc-sha256"
+    cat "/proc/$pid/maps" >"$destination/maps-after"
+    awk '$2 ~ /x/ && $6 ~ /\/libc\.so\.6$/ {print; n++} END {exit n!=1}' "$destination/maps-after" >"$destination/libc-map-after"
+    [[ $(<"$destination/libc-map") == "$(<"$destination/libc-map-after")" ]] || fail 'The executable libc mapping changed during identity capture.'
+    [[ $(readlink "/proc/$pid/exe") == "$executable" ]] || fail 'The main executable changed during identity capture.'
+    cat "/proc/$pid/cmdline" >"$destination/cmdline-after"
+    [[ $(sha256sum "$destination/cmdline" | awk '{print $1}') == "$(sha256sum "$destination/cmdline-after" | awk '{print $1}')" ]] || fail 'The main argv changed during identity capture.'
+    cat "/proc/$pid/stat" >"$destination/stat-after"
+    [[ $(start_ticks "$destination/stat-after") == "$original" ]] || fail 'The main PID changed during identity capture.'
+    mark "IDENTITY_END ${destination##*/} $pid"
+    printf 'complete\n' >"$destination/completeness"
+}
+
 if [[ $action == prepare ]]; then
     [[ $# == 3 ]] || fail 'prepare requires INSTANCE GUEST_PID_NAMESPACE.'
     namespace "$3"
@@ -199,6 +278,25 @@ prepare)
     [[ $(<"$trace/trace_clock") == *'[mono]'* ]] || fail 'The PC clock is not mono.'
     printf '1\n' >"$trace/tracing_on"
     mark "ARM $group"
+    ;;
+identity)
+    [[ $# == 4 || $# == 5 ]] || fail 'identity requires INSTANCE LABEL GUEST_MAIN_PID [TOTAL_BUDGET_SECONDS].'
+    [[ $3 =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ && $4 =~ ^[1-9][0-9]*$ ]] || fail 'The identity label or main PID is invalid.'
+    budget=${5:-20}
+    [[ $budget =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'The total identity budget must be numeric.'
+    soft_budget=$(awk -v budget="$budget" 'BEGIN {if (budget<1 || budget>20) exit 1; printf "%.6f", budget-0.5}') || fail 'The total identity budget must be 1–20 seconds.'
+    destination=$capture/identity-$3
+    mkdir "$destination"
+    printf 'incomplete\n' >"$destination/completeness"
+    printf 'total_seconds\t%s\nterm_seconds\t%s\nkill_grace_seconds\t0.25\n' "$budget" "$soft_budget" >"$destination/budget.tsv"
+    # Bound the entire guest snapshot; Docker client timeouts do not stop exec.
+    if ARCBOX_PC_IDENTITY="$instance:$4" timeout --signal=TERM --kill-after=0.25 "${soft_budget}s" /bin/bash "$0" identity-snapshot "$instance" "$3" "$4"; then result=0; else result=$?; fi
+    printf '%s\n' "$result" >"$destination/timeout-exit"
+    ((result == 0)) || fail "The guest identity snapshot failed or exceeded its total budget (status $result)."
+    ;;
+identity-snapshot)
+    [[ $# == 4 && ${ARCBOX_PC_IDENTITY:-} == "$instance:$4" ]] || fail 'Invoke identity-snapshot through the bounded identity command.'
+    identity_snapshot "$capture/identity-$3" "$4"
     ;;
 freeze)
     [[ $# == 3 && -n $3 && $3 != *$'\n'* && $3 != *$'\r'* ]] || fail 'freeze requires INSTANCE and a single-line REASON.'

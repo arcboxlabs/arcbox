@@ -207,6 +207,8 @@ def inspect_reusable_network(output, identifier, label):
 
 
 def run(args):
+    if args.futex_pc is not None and args.kernel_trace != "on":
+        raise ValueError("--futex-pc requires --kernel-trace on.")
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
     if args.kernel_trace is None:
@@ -223,7 +225,7 @@ def run(args):
     names = {kind: prefix + "-" + kind for kind in SEEDS}
     volumes = {kind: name + "-data" for kind, name in names.items()}
     network = inspect_reusable_network(output, args.network, "network-initial")["Name"] if args.network else prefix
-    trace = KernelTrace(sys.modules[__name__], output, prefix, args.kernel_trace) if args.kernel_trace is not None else None
+    trace = KernelTrace(sys.modules[__name__], output, prefix, args.kernel_trace, args.futex_pc) if args.kernel_trace is not None else None
     resources = {"socket": SOCKET, "prefix": prefix, "containers": names, "volumes": volumes, "network": network, "case": args.case}
     if args.network:
         resources["reused_network_id"] = args.network
@@ -320,6 +322,7 @@ def run(args):
                 inspection = api("GET", f"/containers/{names['ch']}/json")
                 guest_pid = inspection["State"]["Pid"]
                 (output / "ch-started.json").write_text(json.dumps(inspection, indent=2) + "\n")
+                trace.early_identity(guest_pid, started)
             wait_for_clickhouse(output, names["ch"], started)
             libc = cli(output, "libc-hash", ["exec", names["ch"], "sha256sum", "/lib/aarch64-linux-gnu/libc.so.6"])
             if libc["stdout"].split()[0] != LIBC_HASH:
@@ -405,6 +408,7 @@ if __name__ == "__main__":
         observer_mode = parser.add_mutually_exclusive_group()
         observer_mode.add_argument("--native-observer", type=Path, help="Static Linux observe_clickhouse binary; adds SYS_NICE for FIFO sampling")
         observer_mode.add_argument("--kernel-trace", choices=("off", "on"), help="Replace proc polling with an isolated tracefs recorder; off records markers only")
+        parser.add_argument("--futex-pc", metavar="GUEST_PID_NAMESPACE", help="Capture futex user PCs; requires --kernel-trace on and a PID namespace token from guest preflight")
         parser.add_argument("--observer-policy", choices=("fifo", "other"), default="fifo", help="Scheduling policy for the native observer")
         args = parser.parse_args()
         FIXTURE = json.loads(args.fixture.read_text())
