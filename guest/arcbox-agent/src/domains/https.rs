@@ -24,7 +24,7 @@ use tokio_rustls::{LazyConfigAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 
 use super::WebServices;
-use super::certificates::Certificates;
+use super::certificates::{Certificates, RootSource};
 use super::http_port::{HTTP_PORT, HTTPS_PORT};
 
 #[cfg(test)]
@@ -45,8 +45,8 @@ pub(super) struct Https {
 
 impl Https {
     /// Binds the host signing channel and returns the selected frontend port.
-    pub(super) async fn bind() -> Result<(Self, u16)> {
-        let certificates = Arc::new(Certificates::bind()?);
+    pub(super) async fn bind(root: RootSource) -> Result<(Self, u16)> {
+        let certificates = Arc::new(Certificates::bind(root)?);
         let (listener, port) = Self::bind_listener().await?;
         Ok((
             Self {

@@ -137,7 +137,7 @@ non-obvious invariants and failure signatures.
   `OWNED_KEYS` (`dns`, `bip`, `default-address-pools`, `allow-direct-routing`,
   `default-ulimits`, `features`) are refused with a warning; a key the runtime
   depends on goes there, or an operator can break it from config.
-- **A distro machine's agent serves RPC and nothing else.** The machine boot
+- **A distro machine must not start System VM services.** The machine boot
   shim starts the same `arcbox-agent serve` as the System VM;
   `agent::Guest::detect` tells them apart by `arcbox.machine_rootfs=` on the
   kernel cmdline, and a `DistroMachine` returns into `agent::run` before any
@@ -158,8 +158,8 @@ non-obvious invariants and failure signatures.
   every running machine hourly; the agent issues the ioctl
   (`agent/linux/disk.rs`) and runs no loop of its own. The rootfs ships no
   `fstrim` binary — never shell out to it.
-  The one service a distro machine's agent does run is its root export,
-  and only on request: `EnsureMachineExport` starts an `nfs3_server` on
+  A distro machine also serves its root export on request:
+  `EnsureMachineExport` starts an `nfs3_server` on
   `127.0.0.1:0` and a relay on `<bridge ip>:0` that admits the host
   addresses named in the request and drops every other peer
   (`machine_export/server.rs`). It takes no well-known port and no file a
@@ -167,7 +167,7 @@ non-obvious invariants and failure signatures.
   `/etc/exports`); the System VM answers the RPC with `EINVAL`, and a
   machine whose bridge NIC has no address yet answers `EAGAIN` so the host
   retries.
-- Machine web configuration uses an exclusive host-only connection in `agent/machine_web.rs`. Reject other peers and guest kinds before decoding. Compare the supplied IPv4 with the live bridge interface before admission. Trust the host-assigned exact canonical hostname; Core derives and checks its exact DNS claim. Store the fixed identity and complete validated policy as EndpointFacts; preserve the raw machine name and canonical Domain without retaining duplicate wire requests. Typed machine snapshots require the exact current owner and address, independent of Docker directory availability. Keep the exact claim in a private Registry; do not start System VM DNS, Docker watchers, listeners, or NAT. Require positive, increasing source revisions within the session. Withdraw configuration, private ownership, and installed publication on EOF or Drop. Retain exclusivity through stream shutdown. Ack confirms stored configuration, not installed routes.
+- Machine web configuration uses an exclusive host-only connection in `agent/machine_web.rs`. Reject other peers and guest kinds before decoding. Compare the supplied IPv4 with the live bridge interface before admission. Trust the host-assigned exact canonical hostname; Core derives and checks its exact DNS claim. Store the fixed identity and complete validated policy as EndpointFacts. Keep the exact claim in a private Registry. Publish the claim and acknowledge Open only after the owned-rule sweep and frontend/signing listener binds succeed. Use `/usr/lib/arcbox/iptables`; do not start System VM DNS, Docker watchers, or the index. Require positive, increasing source revisions. Await route tracking replacement before Ack; Ack does not confirm installed NAT. Withdraw configuration, ownership, public-root authority, and publication on EOF or caller cancellation. Retain admission until both real stream shutdown and actor cleanup finish. Never abort in-flight iptables or the route actor. Initialization failures must also finish asynchronous cleanup and propagate errors.
 - **A distro machine's identity and second NIC are `machine-init`'s, set up
   before the distro's init runs** (`init.rs`, `machine_identity.rs`,
   `boot_done.rs`). The hostname arrives as `arcbox.machine_name=` on the
@@ -250,7 +250,7 @@ non-obvious invariants and failure signatures.
   Pin the owner, DNS resolution revision, and installed route identity across authorization, certificate configuration, TLS handshake, and upstream connection. Remove a failed upstream route only while its pinned identity still matches. Identical route publication preserves identity; removal and reinstallation replace it.
   `domains/certificates/cache.rs` bounds leaf reuse by the certificate's actual
   validity and serializes signing per name. Never evict an active signing slot.
-  Read `/arcbox/tls/ca.pem` before cache reuse. Bind each leaf to its verified
+  Read the active root before cache reuse. System frontends read `/arcbox/tls/ca.pem`; machine frontends use only their session's in-memory public root. A missing session root must fail without a file fallback. Bind each leaf to its verified
   root DER and reject a signing result if the public root changes before caching.
   `ReconcileHttpsAccess` leases observation for three seconds and requires the host CID. The host renews the lease only while Desktop can offer trust authorization. Only exact host source addresses report access or wait; siblings and unobserved handshakes proceed immediately. Record access after SNI ownership validation and before certificate cache lookup. Authorization waiting ends after 30 seconds, observer disable, or lease expiry. Recheck the pinned TLS route after waiting. Lease renewal must not wake every waiting handshake or replace the first access in an observation.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check

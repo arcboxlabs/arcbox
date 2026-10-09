@@ -158,7 +158,7 @@ fn a_new_revision_with_identical_policies_invalidates_installed_routes() {
     session.replace(request.clone()).unwrap();
     publish_cleanup_witness(&receiver);
     request.source_revision = 2;
-    assert_eq!(session.replace(request.clone()).unwrap(), 2);
+    assert_eq!(session.replace(request.clone()).unwrap().source_revision, 2);
     assert_eq!(
         receiver.web.snapshot(None),
         [] as [arcbox_connect::v1::GuestWebService; 0]
@@ -205,7 +205,9 @@ async fn check_shutdown(phase: &str) {
                 resume: Some(released),
                 closed: Some(closed),
             };
-            serving.serve(stream, "open", open(), Some(bridge())).await
+            serving
+                .serve_with(stream, "open", open(), Some(bridge()), test_routes)
+                .await
         });
         let (kind, trace, _) = read_message(&mut client).await.unwrap();
         assert_eq!(kind, MessageType::OpenMachineWebResponse);

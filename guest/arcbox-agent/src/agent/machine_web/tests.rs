@@ -3,6 +3,7 @@
 use super::*;
 use arcbox_connect::v1::{MachineWebPorts, WebPortPolicy, web_port_policy::Selection};
 use arcbox_dns::registry::Lookup;
+use arcbox_dns::{NamePattern, claims::Claim};
 
 const CA_PEM: &[u8] = include_bytes!("../linux/rpc/guest_trust_ca.pem");
 
@@ -48,6 +49,15 @@ fn exact_raw_identity_and_complete_policy_belong_to_one_session() {
     directory.ready();
     let session = receiver.open(open(), Some(bridge())).unwrap().unwrap();
     assert!(receiver.open(open(), Some(bridge())).unwrap().is_none());
+    assert!(
+        receiver
+            .registry
+            .read()
+            .unwrap()
+            .get("machine:my_vm")
+            .is_none()
+    );
+    session.publish().unwrap();
     {
         let registry = receiver.registry.read().unwrap();
         let Lookup::Matched { claim, address, .. } =
@@ -68,7 +78,7 @@ fn exact_raw_identity_and_complete_policy_belong_to_one_session() {
         Selection::Auto(Box::default()),
         Selection::Off(Box::default()),
     );
-    assert_eq!(session.replace(request.clone()).unwrap(), 1);
+    assert_eq!(session.replace(request.clone()).unwrap().source_revision, 1);
     {
         let state = receiver.state.lock().unwrap();
         let configuration = state.configuration.as_ref().unwrap();
@@ -93,3 +103,27 @@ fn exact_raw_identity_and_complete_policy_belong_to_one_session() {
 }
 
 mod shutdown;
+
+fn test_routes(
+    session: &Session,
+    ready: oneshot::Sender<()>,
+) -> (
+    DomainRoutes,
+    impl Future<Output = Result<()>> + Send + use<>,
+) {
+    let (routes, mut commands) =
+        DomainRoutes::test_channel_with_services(session.receiver.web.clone());
+    let cancel = session.cancel.clone();
+    (routes, async move {
+        ready.send(()).unwrap();
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                command = commands.recv() => match command.unwrap() {
+                    crate::domains::Command::Update(_, _, reply) => reply.send(()).unwrap(),
+                    _ => panic!("expected machine tracking update"),
+                }
+            }
+        }
+    })
+}

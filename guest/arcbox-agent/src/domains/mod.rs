@@ -72,6 +72,28 @@ pub enum Command {
 }
 
 impl DomainRoutes {
+    /// Prepares a machine frontend; the caller must retain and join the returned worker.
+    pub(crate) fn machine(
+        services: WebServices,
+        authority: tokio::sync::watch::Receiver<
+            Option<std::sync::Arc<arcbox_local_ca::PublicAuthority>>,
+        >,
+        cancel: CancellationToken,
+        ready: oneshot::Sender<()>,
+    ) -> (Self, impl Future<Output = anyhow::Result<()>> + Send) {
+        let (commands, inbox) = mpsc::unbounded_channel();
+        let routes = Routes::new(services.clone(), "/usr/lib/arcbox/iptables");
+        (
+            Self { commands, services },
+            routes.run_machine(
+                inbox,
+                certificates::RootSource::Session(authority),
+                cancel,
+                ready,
+            ),
+        )
+    }
+
     /// Starts the task. It sweeps a previous agent's rules, starts the HTTPS
     /// proxy with the host signing channel, then follows the containers
     /// it is told about until `cancel`. The task joins its frontend and removes

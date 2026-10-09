@@ -135,6 +135,49 @@ mod tests {
         std::future::ready(Ok(b"root".to_vec()))
     }
 
+    #[tokio::test]
+    async fn withdrawn_session_root_rejects_cached_leaves_without_waiting_for_signing() {
+        let authority = Arc::new(
+            arcbox_local_ca::PublicAuthority::from_pem(include_bytes!(
+                "../../agent/linux/rpc/guest_trust_ca.pem"
+            ))
+            .unwrap(),
+        );
+        let (published, receiver) = tokio::sync::watch::channel(Some(Arc::clone(&authority)));
+        let root = super::super::RootSource::Session(receiver);
+        let current = || async { Ok(root.authority().await?.der().to_vec()) };
+        let cache = Cache::default();
+        let mut issued = leaf(SystemTime::now());
+        issued.root = authority.der().to_vec();
+        let config = cache
+            .configuration("web.arcbox.local", async { Ok(issued) }, current)
+            .await
+            .unwrap();
+        published.send_replace(None);
+        let mut request =
+            Box::pin(cache.configuration("web.arcbox.local", std::future::pending(), current));
+        let std::task::Poll::Ready(result) = futures::poll!(&mut request) else {
+            panic!("withdrawn authority waited for a signature");
+        };
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("root is unavailable")
+        );
+        drop(request);
+        published.send_replace(Some(authority));
+        let restored = cache
+            .configuration(
+                "web.arcbox.local",
+                async { panic!("unchanged root requested a signature") },
+                current,
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&config, &restored));
+    }
+
     #[test]
     fn renewal_uses_actual_leaf_bounds_and_rejects_inactive_certificates() {
         let validity =

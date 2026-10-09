@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::certificates::RootSource;
 use super::http_port::HTTPS_PORT;
 use super::https::Https;
 use super::index::Publisher;
@@ -89,7 +90,7 @@ impl Routes {
             }
         }
         warn_unless_bridged_traffic_is_filtered();
-        match Https::bind().await {
+        match Https::bind(RootSource::system()).await {
             Ok((https, port)) => {
                 self.frontend_port = Some(port);
                 self.frontend
@@ -101,6 +102,36 @@ impl Routes {
             }
         }
         let result = self.follow(inbox, cancel).await;
+        self.finish(result).await
+    }
+
+    pub(super) async fn run_machine(
+        mut self,
+        inbox: mpsc::UnboundedReceiver<Command>,
+        root: RootSource,
+        cancel: CancellationToken,
+        ready: oneshot::Sender<()>,
+    ) -> anyhow::Result<()> {
+        let result = async {
+            self.rules
+                .sweep()
+                .await
+                .context("sweep machine web redirects")?;
+            let (https, port) = Https::bind(root).await?;
+            self.frontend_port = Some(port);
+            self.frontend
+                .spawn(https.serve(self.services.clone(), self.frontend_cancel.clone()));
+            ready
+                .send(())
+                .map_err(|()| anyhow::anyhow!("machine web connection ended before readiness"))?;
+            self.follow(inbox, cancel.clone()).await
+        }
+        .await;
+        cancel.cancel();
+        self.finish(result).await
+    }
+
+    async fn finish(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         let cleanup = self.shutdown().await;
         match (result, cleanup) {
             (Ok(()), cleanup) => cleanup,

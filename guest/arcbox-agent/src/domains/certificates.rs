@@ -7,6 +7,7 @@ use std::{path::PathBuf, sync::Arc, time::SystemTime};
 use anyhow::{Context, Result, ensure};
 use arcbox_constants::paths::guest::{MOUNT, TLS, TLS_CA_CERT};
 use arcbox_local_ca::{CertificateRequest, CertificateValidity, PublicAuthority};
+use tokio::sync::watch;
 use tokio_rustls::rustls::ServerConfig;
 
 use self::cache::{Cache, Cached};
@@ -15,11 +16,45 @@ pub(super) struct Certificates {
     #[cfg(target_os = "linux")]
     listener: tokio::sync::Mutex<tokio_vsock::VsockListener>,
     cache: Cache,
-    root: PathBuf,
+    root: RootSource,
+}
+
+pub(super) enum RootSource {
+    PublishedFile(PathBuf),
+    Session(watch::Receiver<Option<Arc<PublicAuthority>>>),
+}
+
+impl RootSource {
+    pub(super) fn system() -> Self {
+        Self::PublishedFile(PathBuf::from(MOUNT).join(TLS).join(TLS_CA_CERT))
+    }
+
+    async fn authority(&self) -> Result<Arc<PublicAuthority>> {
+        let authority = match self {
+            Self::PublishedFile(path) => {
+                let pem = tokio::fs::read(path).await.with_context(|| {
+                    format!("read published local HTTPS root {}", path.display())
+                })?;
+                Arc::new(
+                    PublicAuthority::from_pem(&pem)
+                        .with_context(|| format!("invalid local HTTPS root {}", path.display()))?,
+                )
+            }
+            Self::Session(root) => root
+                .borrow()
+                .clone()
+                .context("machine HTTPS root is unavailable")?,
+        };
+        ensure!(
+            authority.validity().is_valid_at(SystemTime::now().into()),
+            "local HTTPS root is not currently valid"
+        );
+        Ok(authority)
+    }
 }
 
 impl Certificates {
-    pub(super) fn bind() -> Result<Self> {
+    pub(super) fn bind(root: RootSource) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let listener = tokio_vsock::VsockListener::bind(tokio_vsock::VsockAddr::new(
             tokio_vsock::VMADDR_CID_ANY,
@@ -29,7 +64,7 @@ impl Certificates {
             #[cfg(target_os = "linux")]
             listener: tokio::sync::Mutex::new(listener),
             cache: Cache::default(),
-            root: PathBuf::from(MOUNT).join(TLS).join(TLS_CA_CERT),
+            root,
         })
     }
 
@@ -37,28 +72,15 @@ impl Certificates {
         let name = name.to_ascii_lowercase();
         self.cache
             .configuration(&name, self.issue(&name), || async {
-                Ok(self.authority().await?.der().to_vec())
+                Ok(self.root.authority().await?.der().to_vec())
             })
             .await
-    }
-
-    async fn authority(&self) -> Result<PublicAuthority> {
-        let pem = tokio::fs::read(&self.root)
-            .await
-            .with_context(|| format!("read published local HTTPS root {}", self.root.display()))?;
-        let authority = PublicAuthority::from_pem(&pem)
-            .with_context(|| format!("invalid local HTTPS root {}", self.root.display()))?;
-        ensure!(
-            authority.validity().is_valid_at(SystemTime::now().into()),
-            "published local HTTPS root is not currently valid"
-        );
-        Ok(authority)
     }
 
     async fn issue(&self, name: &str) -> Result<Cached> {
         let request = CertificateRequest::new(name)?;
         let certificate = self.sign(request.der()).await?;
-        let authority = self.authority().await?;
+        let authority = self.root.authority().await?;
         let validity = CertificateValidity::from_der(&certificate)?;
         let mut configuration = request.complete(certificate, &authority)?;
         configuration.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];

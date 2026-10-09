@@ -5,11 +5,29 @@ use std::net::Ipv4Addr;
 use anyhow::{Result, bail};
 use arcbox_connect::v1::{MachineWebPorts, WebPortPolicy, web_port_policy::Selection};
 use arcbox_constants::dns::Domain;
+use arcbox_dns::{NamePattern, claims::Claim, registry::Registry};
 
 use super::super::http_port::Pin;
 use super::{EndpointFacts, Resource};
 
 impl EndpointFacts {
+    /// Publishes the admitted machine identity after its frontend is ready.
+    pub(crate) fn register_machine(&self, registry: &mut Registry) -> Result<()> {
+        let Resource::Machine { hostname, .. } = &self.resource else {
+            bail!("machine web registration requires machine facts");
+        };
+        registry.replace(
+            self.id.clone(),
+            vec![Claim::exclusive(
+                NamePattern::Exact(hostname.clone()),
+                self.id.clone(),
+                "machine".into(),
+            )],
+            Some(self.primary_ip.into()),
+        )?;
+        Ok(())
+    }
+
     /// Stores the admitted identity with both protocols disabled until a replacement arrives.
     pub(crate) fn machine(name: String, hostname: Domain, address: Ipv4Addr) -> Self {
         Self {
