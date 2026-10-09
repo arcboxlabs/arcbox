@@ -420,6 +420,9 @@ fn warn_unless_bridged_traffic_is_filtered() {
 #[cfg(target_os = "linux")]
 mod kernel_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+mod machine_tests;
+
 #[cfg(test)]
 mod tests {
     use super::super::http_port::Pin;

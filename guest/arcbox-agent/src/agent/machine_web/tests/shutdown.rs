@@ -50,6 +50,7 @@ struct ShutdownGate {
     stream: UnixStream,
     entered: Option<oneshot::Sender<()>>,
     resume: Option<oneshot::Receiver<()>>,
+    completed: Option<oneshot::Sender<()>>,
     closed: Option<oneshot::Sender<()>>,
 }
 
@@ -92,7 +93,11 @@ impl AsyncWrite for ShutdownGate {
             std::task::ready!(Pin::new(resume).poll(cx)).unwrap();
             self.resume = None;
         }
-        Pin::new(&mut self.stream).poll_shutdown(cx)
+        let result = std::task::ready!(Pin::new(&mut self.stream).poll_shutdown(cx));
+        if let Some(completed) = self.completed.take() {
+            completed.send(()).unwrap();
+        }
+        Poll::Ready(result)
     }
 }
 
@@ -178,17 +183,22 @@ fn a_new_revision_with_identical_policies_invalidates_installed_routes() {
 
 #[tokio::test]
 async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_finishes() {
-    check_shutdown("eof").await;
+    check_shutdown("eof", "actor").await;
 }
 
 #[tokio::test]
 async fn canceled_caller_withdraws_but_retains_admission_until_owned_shutdown_finishes() {
-    for phase in ["read", "shutdown"] {
-        check_shutdown(phase).await;
+    for (phase, first) in [
+        ("read", "actor"),
+        ("read", "stream"),
+        ("shutdown", "actor"),
+        ("shutdown", "stream"),
+    ] {
+        check_shutdown(phase, first).await;
     }
 }
 
-async fn check_shutdown(phase: &str) {
+async fn check_shutdown(phase: &str, first: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         let receiver = receiver();
         let directory = receiver.web.directory_source();
@@ -196,17 +206,31 @@ async fn check_shutdown(phase: &str) {
         let (mut client, stream) = UnixStream::pair().unwrap();
         let (entered, waiting) = oneshot::channel();
         let (resume, released) = oneshot::channel();
+        let (completed, completion) = oneshot::channel();
         let (closed, closure) = oneshot::channel();
+        let (cleaning, cleanup_started) = oneshot::channel();
+        let (finish_cleanup, cleanup_gate) = oneshot::channel();
+        let (cleaned, cleanup_finished) = oneshot::channel();
         let serving = receiver.clone();
         let mut task = tokio::spawn(async move {
             let stream = ShutdownGate {
                 stream,
                 entered: Some(entered),
                 resume: Some(released),
+                completed: Some(completed),
                 closed: Some(closed),
             };
             serving
-                .serve_with(stream, "open", open(), Some(bridge()), test_routes)
+                .serve_with(stream, "open", open(), Some(bridge()), |session, ready| {
+                    let (routes, work) = test_routes(session, ready);
+                    (routes, async move {
+                        work.await?;
+                        cleaning.send(()).unwrap();
+                        cleanup_gate.await.unwrap();
+                        cleaned.send(()).unwrap();
+                        Ok(())
+                    })
+                })
                 .await
         });
         let (kind, trace, _) = read_message(&mut client).await.unwrap();
@@ -244,6 +268,7 @@ async fn check_shutdown(phase: &str) {
             client.shutdown().await.unwrap();
         }
         waiting.await.unwrap();
+        cleanup_started.await.unwrap();
         if phase == "shutdown" {
             task.abort();
             assert!((&mut task).await.unwrap_err().is_cancelled());
@@ -261,7 +286,19 @@ async fn check_shutdown(phase: &str) {
             [] as [arcbox_connect::v1::GuestWebService; 0]
         );
         assert!(receiver.open(open(), Some(bridge())).unwrap().is_none());
-        resume.send(()).unwrap();
+        if first == "stream" {
+            resume.send(()).unwrap();
+            completion.await.unwrap();
+            assert!(receiver.open(open(), Some(bridge())).unwrap().is_none());
+            finish_cleanup.send(()).unwrap();
+            cleanup_finished.await.unwrap();
+        } else {
+            finish_cleanup.send(()).unwrap();
+            cleanup_finished.await.unwrap();
+            assert!(receiver.open(open(), Some(bridge())).unwrap().is_none());
+            resume.send(()).unwrap();
+            completion.await.unwrap();
+        }
         if phase == "eof" {
             assert!(task.await.unwrap().is_err());
         }

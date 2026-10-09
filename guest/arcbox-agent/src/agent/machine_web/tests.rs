@@ -102,6 +102,7 @@ fn exact_raw_identity_and_complete_policy_belong_to_one_session() {
     assert!(receiver.open(open(), Some(bridge())).unwrap().is_some());
 }
 
+mod lifecycle;
 mod shutdown;
 
 fn test_routes(
