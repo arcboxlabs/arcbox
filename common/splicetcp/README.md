@@ -10,6 +10,11 @@ guest TCP state. `splicetcp` only gates outbound SYNs, creates the host-side
 egress connection, mirrors the minimal sequence/ack state needed for frame
 construction, and splices bytes between the guest frames and the host socket.
 
+Both guest-facing handshake directions omit SACK-Permitted. The fast path
+uses cumulative ACKs and does not generate or consume SACK blocks. Keep SACK
+disabled until the fast path implements selective acknowledgment; peer loss
+recovery can otherwise wait for retransmission timers instead of duplicate ACKs.
+
 ## Architecture
 
 ```text
