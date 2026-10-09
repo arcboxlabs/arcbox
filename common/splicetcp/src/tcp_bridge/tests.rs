@@ -2,6 +2,7 @@ use super::*;
 use crate::ethernet::ETH_HEADER_LEN;
 
 mod upload_backpressure;
+mod upload_errors;
 
 const GW_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 1);
 const GW_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];

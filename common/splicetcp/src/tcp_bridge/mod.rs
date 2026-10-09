@@ -537,15 +537,6 @@ impl FastPathConn {
                     self.up_would_block += 1;
                     break;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                    // Peer closed — drain at the TCP layer like the in-order
-                    // path so the guest stops retransmitting.
-                    self.set_last_ack(seg_end);
-                    if let Some((_, old)) = self.ooo_segs.pop_front() {
-                        self.ooo_bytes -= old.len();
-                    }
-                    continue;
-                }
                 Err(e) => return Err(e),
             };
             self.up_bytes += take as u64;
