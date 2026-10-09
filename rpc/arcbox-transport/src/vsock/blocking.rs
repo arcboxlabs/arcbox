@@ -10,11 +10,15 @@
 
 use bytes::Bytes;
 use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::{Result, TransportError};
+
+use super::SocketScope;
 
 /// Maximum frame size (must match async transport).
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
@@ -26,27 +30,34 @@ const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// transfers and `EAGAIN`.
 pub struct BlockingVsockTransport {
     stream: Option<UnixStream>,
+    socket_lease: Option<Arc<OwnedFd>>,
 }
 
 /// Sole writer of a split blocking transport, with a deadline for each send.
-pub struct BlockingVsockSender(UnixStream);
+pub struct BlockingVsockSender {
+    stream: UnixStream,
+    _socket_lease: Option<Arc<OwnedFd>>,
+}
 
 impl BlockingVsockSender {
     /// Sends bytes that already include the frame's length prefix.
     pub fn send(&mut self, data: &[u8], deadline: Instant) -> Result<()> {
-        BlockingVsockTransport::send_to(&mut self.0, data, deadline)
+        BlockingVsockTransport::send_to(&mut self.stream, data, deadline)
     }
 }
 
 /// Sole reader of a split blocking transport, with no idle deadline.
-pub struct BlockingVsockReceiver(UnixStream);
+pub struct BlockingVsockReceiver {
+    stream: UnixStream,
+    _socket_lease: Option<Arc<OwnedFd>>,
+}
 
 impl BlockingVsockReceiver {
     /// Receives one full frame, including its length prefix.
     ///
     /// Retain a shutdown handle to cancel an idle or incomplete read.
     pub fn recv(&mut self) -> Result<Bytes> {
-        BlockingVsockTransport::recv_from(&mut self.0, None)
+        BlockingVsockTransport::recv_from(&mut self.stream, None)
     }
 }
 
@@ -71,6 +82,16 @@ impl Drop for BlockingVsockShutdown {
 }
 
 impl BlockingVsockTransport {
+    /// Registers the connected socket with the scope.
+    pub fn with_scope(mut self, scope: &SocketScope) -> io::Result<Self> {
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
+        self.socket_lease = Some(scope.register(stream.as_fd())?);
+        Ok(self)
+    }
+
     /// Returns a handle whose drop interrupts blocking send/receive operations.
     pub fn shutdown_handle(&self) -> io::Result<BlockingVsockShutdown> {
         self.stream
@@ -83,6 +104,7 @@ impl BlockingVsockTransport {
     /// Closes the owned stream. A closed transport cannot reconnect.
     pub fn close(&mut self) {
         self.stream.take();
+        self.socket_lease.take();
     }
 
     /// Consumes the transport into independent blocking send and receive halves.
@@ -94,7 +116,16 @@ impl BlockingVsockTransport {
     pub fn into_split(self) -> Result<(BlockingVsockSender, BlockingVsockReceiver)> {
         let reader = self.stream.ok_or(TransportError::NotConnected)?;
         let writer = reader.try_clone()?;
-        Ok((BlockingVsockSender(writer), BlockingVsockReceiver(reader)))
+        Ok((
+            BlockingVsockSender {
+                stream: writer,
+                _socket_lease: self.socket_lease.clone(),
+            },
+            BlockingVsockReceiver {
+                stream: reader,
+                _socket_lease: self.socket_lease,
+            },
+        ))
     }
 
     /// Creates a transport from a raw fd (takes ownership).
@@ -107,6 +138,7 @@ impl BlockingVsockTransport {
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream: Some(stream),
+            socket_lease: None,
         })
     }
 

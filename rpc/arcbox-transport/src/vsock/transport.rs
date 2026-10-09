@@ -1,10 +1,10 @@
+use super::SocketScope;
 use super::addr::{DEFAULT_AGENT_PORT, VsockAddr};
 use super::stream::VsockStream;
 use crate::Transport;
 use crate::error::{Result, TransportError};
 use async_trait::async_trait;
 use bytes::Bytes;
-#[cfg(target_os = "macos")]
 use std::io;
 #[cfg(target_os = "macos")]
 use std::os::fd::RawFd;
@@ -95,13 +95,29 @@ impl VsockReceiver {
 pub struct VsockTransport {
     addr: VsockAddr,
     stream: Option<VsockStream>,
+    scope: Option<SocketScope>,
 }
 
 impl VsockTransport {
     /// Creates a new vsock transport for the given address.
     #[must_use]
     pub const fn new(addr: VsockAddr) -> Self {
-        Self { addr, stream: None }
+        Self {
+            addr,
+            stream: None,
+            scope: None,
+        }
+    }
+
+    /// Registers this transport and any later connection with the scope.
+    pub fn with_scope(mut self, scope: &SocketScope) -> io::Result<Self> {
+        if let Some(stream) = &mut self.stream {
+            stream.attach_scope(scope)?;
+        } else {
+            scope.check_open()?;
+        }
+        self.scope = Some(scope.clone());
+        Ok(self)
     }
 
     /// Creates a transport to the host on the default agent port.
@@ -127,6 +143,7 @@ impl VsockTransport {
         Self {
             addr,
             stream: Some(stream),
+            scope: None,
         }
     }
 
@@ -166,6 +183,7 @@ impl VsockTransport {
         Ok(Self {
             addr,
             stream: Some(stream),
+            scope: None,
         })
     }
 
@@ -192,19 +210,18 @@ impl Transport for VsockTransport {
         if self.stream.is_some() {
             return Err(TransportError::AlreadyConnected);
         }
+        if let Some(scope) = &self.scope {
+            scope.check_open()?;
+        }
 
         #[cfg(target_os = "linux")]
-        {
-            let stream = super::linux::connect_vsock(self.addr)?;
-            self.stream = Some(stream);
-        }
-
+        let mut stream = super::linux::connect_vsock(self.addr)?;
         #[cfg(target_os = "macos")]
-        {
-            let stream = super::darwin::connect_vsock(self.addr)?;
-            self.stream = Some(stream);
+        let mut stream = super::darwin::connect_vsock(self.addr)?;
+        if let Some(scope) = &self.scope {
+            stream.attach_scope(scope)?;
         }
-
+        self.stream = Some(stream);
         Ok(())
     }
 

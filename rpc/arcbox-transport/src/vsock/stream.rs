@@ -1,9 +1,12 @@
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use super::SocketScope;
 
 /// Async vsock stream.
 ///
@@ -16,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub struct VsockStream {
     inner: VsockStreamInner,
     shutdown: VsockShutdown,
+    socket_lease: Option<Arc<OwnedFd>>,
 }
 
 /// Shutdown behavior for [`VsockStream`].
@@ -64,6 +68,7 @@ impl VsockStream {
         Ok(Self {
             inner: VsockStreamInner::Fd(AsyncFd::new(fd)?),
             shutdown,
+            socket_lease: None,
         })
     }
 
@@ -102,7 +107,17 @@ impl VsockStream {
         Self {
             inner: VsockStreamInner::Unix(stream),
             shutdown,
+            socket_lease: None,
         }
+    }
+
+    pub(super) fn attach_scope(&mut self, scope: &SocketScope) -> io::Result<()> {
+        let socket = match &self.inner {
+            VsockStreamInner::Fd(fd) => fd.get_ref().as_fd(),
+            VsockStreamInner::Unix(stream) => stream.as_fd(),
+        };
+        self.socket_lease = Some(scope.register(socket)?);
+        Ok(())
     }
 
     /// Returns the raw file descriptor.

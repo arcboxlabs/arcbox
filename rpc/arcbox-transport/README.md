@@ -77,7 +77,11 @@ fn wrap_attach_channel(fd: OwnedFd) -> std::io::Result<HalfCloseStream<VsockStre
 Both peers must agree on the framing; the guest agent's Docker API proxy speaks
 it from agent protocol v5 (v4 had the half-close without the window).
 
-## Blocking Transport Cancellation
+## Transport Cancellation
+
+Use `vsock::SocketScope` to interrupt a group of dedicated guest connections. Register either transport with `with_scope(&scope)`. `SocketScope::close()` rejects new registrations and shuts down every live socket, including split transports. An unconnected async transport retains the scope and checks it before connecting and when registering the connected socket. Closing the scope does not join workers; callers must still await their cleanup.
+
+The scope holds weak references to socket leases. Dropping or closing a transport releases its lease, so retaining an open scope does not delay EOF. Both blocking halves share the lease; asynchronous halves retain the lease through their shared stream.
 
 `BlockingVsockTransport::shutdown_handle()` returns an owned `BlockingVsockShutdown` handle. Dropping the handle shuts down the connected socket and interrupts pending blocking I/O. Retain the handle for the full lifetime of a cancellable operation; aborting a `spawn_blocking` task alone does not interrupt the task's I/O.
 

@@ -130,3 +130,9 @@ DNS now uses the shared `BackgroundTask` retained by startup and daemon contexts
 Two new regressions first reproduced both startup exits returning while a real loopback upstream held a query. Both now pass. Each test cancels its first cleanup waiter, drops the original startup handles, and resumes cleanup through a clone. The tests verify the held listener, subsequent port reuse, released NetworkManager, and absence of late replies. The fixture has no Runtime or container-network lease.
 
 All 29 targeted daemon tests pass: nine DNS, six shutdown, nine service, and five control-plane tests. Daemon all-target Clippy with `-D warnings`, workspace formatting, and independent review pass. The existing `proc-macro-error2` future-incompatibility notice remains. Normal daemon exit was checked in source; no VM, native trust, resolver, or installed App acceptance ran. Retained RPC operations and complete control-plane shutdown remain prerequisites for independent machine startup.
+
+## Guest socket scope
+
+`vsock::SocketScope` closes admission and interrupts live dedicated sockets on both transports. Transport leases retain duplicate descriptors across split streams; the scope stores only weak references. Normal connection release still delivers EOF while the scope remains open. Registration and closure share one lock, so a connection that finishes after closure is rejected.
+
+All 33 transport tests pass, including real socket checks for idle async receivers, blocking readers, saturated blocking writers, normal EOF, explicit close, and rejected late registration. Transport all-target Clippy with `-D warnings` and workspace formatting pass. One existing documentation test remains ignored. The checks run on macOS Unix sockets; native AF_VSOCK and VM teardown remain unverified. Scope closure interrupts socket I/O but does not join native connectors or channel producers.

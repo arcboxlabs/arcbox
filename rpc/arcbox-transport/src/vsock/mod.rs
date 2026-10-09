@@ -48,6 +48,7 @@ mod half_close;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 mod listener;
+mod socket_scope;
 pub(crate) mod stream;
 mod transport;
 
@@ -60,6 +61,7 @@ pub use darwin::IncomingVsockConnection;
 pub use flow::Credit;
 pub use half_close::{HalfCloseStream, MAX_FRAME_PAYLOAD, WINDOW};
 pub use listener::VsockListener;
+pub use socket_scope::SocketScope;
 pub use stream::{VsockShutdown, VsockStream};
 pub use transport::{VsockReceiver, VsockSender, VsockTransport, read_framed};
 
