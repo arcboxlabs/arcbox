@@ -385,6 +385,10 @@ fn warn_unless_bridged_traffic_is_filtered() {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
+mod kernel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::http_port::Pin;
     use super::super::{HttpProtocol, HttpsBackend};

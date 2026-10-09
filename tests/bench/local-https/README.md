@@ -33,3 +33,7 @@ docker run --rm --pull never --network none --cap-drop ALL \
 ```
 
 The regression uses real `Publisher` and `TaggedRules` operations. It checks stale-port replacement, repeated publication, Docker jump reordering, duplicate removal during repair, DNS withdrawal, and preservation of unrelated rules. It does not establish packet forwarding, production-kernel behavior, or browser HTTPS acceptance.
+
+Run the same command with the exact test name `domains::routes::kernel_tests::kernel_machine_discovery_replaces_routes_and_cleans_up` to check machine discovery and route cleanup. This test uses real `/proc` listener discovery, HTTP probes, and `Routes` operations. It checks disappearance, rediscovery, replacement while the previous backend still listens, native port selection, disabled policies, explicit removal, and shutdown. The test restores the original NAT table and loopback addresses, preserves an unrelated rule, and verifies frontend release. Its 30-second deadline makes stalled discovery or cleanup fail.
+
+The machine test supplies a bound frontend socket without a TLS server and selects an explicit native port without probing it. The result does not establish packet forwarding, native TLS discovery, the signing channel, machine session activation, or distro boot-tool availability.

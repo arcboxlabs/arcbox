@@ -45,3 +45,13 @@ The App has not been installed or launched. Production ArcBox and a separate CPU
 The `local_https` harness header now states that startup can reconcile host routes through the helper. Its isolated data directory does not isolate host routes. Its guest-port requests do not authorize macOS CA trust and do not prove the Desktop browser prompt.
 
 Packet forwarding, production-kernel behavior, installation, browser authorization and cancellation, and the remaining acceptance-matrix rows are unverified. The optional `pstramp` terminal helper was absent during packaging; Docker terminal behavior was not checked. No release or notarization was performed. The previously canceled trusted-root cleanup remains excluded.
+
+## Machine route kernel validation
+
+The additional `kernel_machine_discovery_replaces_routes_and_cleans_up` regression passed in a fresh container from the same validation image: 1 passed, 448 filtered out. It exercises `EndpointFacts::machine`, actual `/proc` listeners, Host-checked HTTP discovery, and production `Routes` and `TaggedRules` operations.
+
+The test covers repeated scans, listener disappearance and rediscovery, changing the HTTP backend while its previous listener remains open, managed-to-native port selection, both protocols disabled, explicit removal, and shutdown. Shutdown must release its bound frontend. Unrelated NAT rules, the complete original NAT table, and loopback addresses remain byte-for-byte equal to their respective baselines. The whole test has a 30-second deadline. The [driver](../../tests/bench/local-https/README.md) records the exact test name and isolation requirements.
+
+The frontend is a held socket, and the explicit native TLS port has no server. This result proves rule management and discovery, not TLS or packet forwarding. The machine configuration receiver still needs a session-owned route actor and an authenticated public-root source. The old actor must finish cleanup before a new session can claim the same address.
+
+Source inspection also found a boot prerequisite: the boot shim moves `/arcbox` and copies BusyBox into a distro root, but does not retain the boot root's static `/sbin/iptables`. The routing code currently uses that absolute path. Product-owned tool delivery must be connected before enabling routes across supported distros; an arbitrary distro package is not a guaranteed substitute.
