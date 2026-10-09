@@ -148,3 +148,9 @@ Both engine cancellation tests pass. The new test performs the real Ping handsha
 The ARM64 rootfs build at boot-assets `6a6d971` completed successfully. The image has 6,041,600 bytes and SHA-256 `0612c68dd16b42ef4b59339c8df9be879a5dc88b24376217ccd5fb24bde4e2b0`. Boot-assets now includes `tests/rootfs-machine-tools.sh` and its rerun command in the README. The probe passed against this image in a disposable Colima ARM64 Alpine container with read-only source and image access.
 
 The probe extracts EROFS and compares the embedded machine init and helper scripts with source. The extracted helper installs the image's actual static iptables into a temporary distro tree. Installed bytes match, owner and mode are `0:0:755`, and absolute execution reports `iptables v1.8.13 (legacy)`. This evidence establishes image contents and tool installation, not boot, AF_VSOCK signing, packet forwarding, or client trust. The boot release and runtime asset pin remain unchanged.
+
+## Machine readiness after host cancellation
+
+A new regression reproduced readiness retrying after the operational socket scope had permanently closed. The readiness loop now checks admission before acquiring another host hold or connecting. Scope closure ends the loop with its original error instead of waiting for the 60-second readiness deadline.
+
+All six targeted readiness tests pass, including the new cancellation case, stale physical-run rejection, distro initialization, and VM lifecycle ordering. Engine all-target Clippy with `-D warnings` and formatting pass. The new fixture uses a modeled VM; it verifies released host holds and unchanged addresses without starting a guest. Native startup acceptance remains pending.

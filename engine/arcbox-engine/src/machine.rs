@@ -941,6 +941,7 @@ impl MachineManager {
         let mut attempt: u32 = 0;
 
         let (_hold, addresses) = loop {
+            self.agent_connections.check_open()?;
             attempt += 1;
             let hold = self.host_hold_expected(name, expected)?;
             let probed = match self.connect_agent_expected(name, expected) {

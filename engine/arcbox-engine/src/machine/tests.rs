@@ -1,6 +1,8 @@
 use super::*;
 use tempfile::tempdir;
 
+mod cancellation;
+
 fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
     test_machine_manager_with_bus(data_dir, crate::event::EventBus::new())
 }
