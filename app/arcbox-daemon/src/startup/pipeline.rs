@@ -250,3 +250,116 @@ where
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_api::SetupState;
+    use arcbox_connect::v1::system_runtime_status::State;
+    use arcbox_core::Config;
+    use clap::Parser as _;
+    use std::{pin::pin, task::Poll, time::Duration};
+    use tokio::sync::oneshot;
+
+    async fn fixture() -> (tempfile::TempDir, RuntimeServicesStarted) {
+        let directory = tempfile::tempdir().unwrap();
+        let args = DaemonArgs::parse_from([
+            "arcbox-daemon",
+            "--profile",
+            "development",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--no-linux-vm",
+            "--no-mount-nfs",
+        ]);
+        let handles = StartupHandles::new(Arc::new(SetupState::new()));
+        let early = init_early(args, handles).await.unwrap();
+        let ctx = Arc::new(acquire_lock(early).await.unwrap());
+        let mut config = Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        };
+        config.vm.autostart = false;
+        let assets = assets::prepare(&config).await.unwrap();
+        let runtime = Arc::new(Runtime::new(config).unwrap());
+        runtime.prepare_host().await.unwrap();
+        assert!(runtime.machine_manager().list().is_empty());
+        let stage = RuntimeServicesStarted {
+            ctx,
+            runtime,
+            assets,
+            handles: ServiceHandles {
+                dns_port: 0,
+                grpc: tokio::spawn(async {}),
+                ssh: None,
+            },
+        };
+        (directory, stage)
+    }
+
+    #[tokio::test]
+    async fn host_admission_precedes_pending_system_task_start() {
+        let (_directory, stage) = fixture().await;
+        let ctx = Arc::clone(&stage.ctx);
+        let (release, pending) = oneshot::channel();
+        ctx.system_service
+            .start(async move { pending.await.map_err(Into::into) })
+            .await;
+        {
+            let mut joining = pin!(ctx.system_service.join());
+            assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+            let mut admitting = pin!(stage.admit_host_and_start_system());
+            assert!(matches!(futures::poll!(&mut admitting), Poll::Pending));
+            assert!(Arc::ptr_eq(ctx.host_runtime.get().unwrap(), &stage.runtime));
+            assert_eq!(ctx.setup_state.current().phase, SetupPhase::Ready);
+            assert_eq!(
+                ctx.setup_state.current().system_runtime.state,
+                State::StateUnspecified
+            );
+
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                joining.await.unwrap();
+                admitting.await.unwrap();
+                ctx.system_service.join().await.unwrap();
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Disabled
+        );
+        ctx.shutdown.cancel();
+        stage.handles.grpc.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_host_admission_does_not_start_a_late_system_task() {
+        let (_directory, stage) = fixture().await;
+        let ctx = Arc::clone(&stage.ctx);
+        let (release, pending) = oneshot::channel();
+        ctx.system_service
+            .start(async move { pending.await.map_err(Into::into) })
+            .await;
+        let mut joining = pin!(ctx.system_service.join());
+        assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+        {
+            let mut admitting = pin!(stage.admit_host_and_start_system());
+            assert!(matches!(futures::poll!(&mut admitting), Poll::Pending));
+            assert!(ctx.host_runtime.get().is_some());
+            ctx.shutdown.cancel();
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), joining)
+            .await
+            .unwrap()
+            .unwrap();
+        ctx.system_service.join().await.unwrap();
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::StateUnspecified
+        );
+        stage.handles.grpc.await.unwrap();
+    }
+}

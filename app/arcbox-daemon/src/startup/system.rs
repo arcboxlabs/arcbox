@@ -151,3 +151,216 @@ async fn initialize(
     services::enable_docker_integration(ctx);
     Ok(handles)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_api::{SetupPhase, SetupState};
+    use arcbox_core::Config;
+    use clap::Parser as _;
+    use std::{pin::pin, task::Poll, time::Duration};
+    use tokio::sync::oneshot;
+
+    async fn fixture(autostart: bool) -> (tempfile::TempDir, Arc<DaemonContext>, Arc<Runtime>) {
+        let directory = tempfile::tempdir().unwrap();
+        let args = crate::DaemonArgs::parse_from([
+            "arcbox-daemon",
+            "--profile",
+            "development",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--no-mount-nfs",
+        ]);
+        let handles = crate::context::StartupHandles::new(Arc::new(SetupState::new()));
+        let early = super::super::init_early(args, handles).await.unwrap();
+        let ctx = Arc::new(super::super::acquire_lock(early).await.unwrap());
+        let mut config = Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        };
+        config.vm.autostart = autostart;
+        let runtime = Arc::new(Runtime::new(config).unwrap());
+        runtime.prepare_host().await.unwrap();
+        assert!(ctx.host_runtime.set(Arc::clone(&runtime)).is_ok());
+        ctx.setup_state
+            .set_phase(SetupPhase::Ready, "Machine host ready");
+        (directory, ctx, runtime)
+    }
+
+    #[tokio::test]
+    async fn disabled_system_preserves_host_admission() {
+        let (_directory, ctx, runtime) = fixture(false).await;
+        supervise(&ctx, &runtime, || async {
+            panic!("disabled System VM must not initialize")
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Disabled
+        );
+        assert_eq!(ctx.setup_state.current().phase, SetupPhase::Ready);
+        assert!(ctx.host_runtime.get().is_some());
+        assert!(ctx.shared_runtime.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_system_keeps_host_ready_and_reports_its_error() {
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let mut task = pin!(supervise(&ctx, &runtime, || async {
+            anyhow::bail!("injected System startup failure")
+        }));
+        assert!(matches!(futures::poll!(&mut task), Poll::Pending));
+        let status = ctx.setup_state.current();
+        assert_eq!(status.system_runtime.state, State::Failed);
+        assert!(
+            status
+                .system_runtime
+                .reason
+                .contains("injected System startup failure")
+        );
+        assert_eq!(status.phase, SetupPhase::Ready);
+        assert_eq!(status.error, "");
+        assert!(ctx.host_runtime.get().is_some());
+        assert!(ctx.shared_runtime.get().is_none());
+        ctx.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn system_waits_for_a_running_operation_before_initializing() {
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let operation = runtime.reserve_system_startup().await;
+        let mut task = pin!(supervise(&ctx, &runtime, || async {
+            Ok(SystemServiceHandles {
+                docker: None,
+                kubernetes_proxy: None,
+                route_guard: None,
+            })
+        }));
+        assert!(matches!(futures::poll!(&mut task), Poll::Pending));
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Starting
+        );
+        drop(operation);
+        assert!(matches!(futures::poll!(&mut task), Poll::Pending));
+        assert_eq!(ctx.setup_state.current().system_runtime.state, State::Ready);
+        assert_eq!(ctx.setup_state.current().phase, SetupPhase::Ready);
+        ctx.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_system_admission_without_releasing_another_operation() {
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let operation = runtime.reserve_system_startup().await;
+        let mut task = pin!(supervise(&ctx, &runtime, || async {
+            panic!("System startup must not acquire another operation's reservation")
+        }));
+        assert!(matches!(futures::poll!(&mut task), Poll::Pending));
+        ctx.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Starting
+        );
+        assert!(ctx.shared_runtime.get().is_none());
+        drop(operation);
+    }
+
+    #[tokio::test]
+    async fn only_a_new_successful_recovery_retries_system() {
+        use arcbox_connect::v1::StorageRecoveryProgress;
+        use storage_recovery_progress::Phase;
+
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let (sender, updates) = broadcast::channel(4);
+        let mut waiting = pin!(wait_for_recovery(
+            &ctx,
+            &runtime,
+            Some("previous".into()),
+            updates
+        ));
+        for progress in [
+            StorageRecoveryProgress {
+                operation_id: "previous".into(),
+                phase: Phase::Complete.into(),
+                ..Default::default()
+            },
+            StorageRecoveryProgress {
+                operation_id: "check-only".into(),
+                phase: Phase::Complete.into(),
+                storage_protected: true,
+                ..Default::default()
+            },
+            StorageRecoveryProgress {
+                operation_id: "failed".into(),
+                phase: Phase::Failed.into(),
+                ..Default::default()
+            },
+        ] {
+            sender.send(progress).unwrap();
+            assert!(matches!(futures::poll!(&mut waiting), Poll::Pending));
+        }
+        sender
+            .send(StorageRecoveryProgress {
+                operation_id: "new-recovery".into(),
+                phase: Phase::Complete.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_system_retains_cleanup_after_host_shutdown() {
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let task_ctx = Arc::clone(&ctx);
+        let (entered, started) = oneshot::channel();
+        let (release, cleanup) = oneshot::channel();
+        let mut input = Some((entered, cleanup));
+        ctx.system_service
+            .start(async move {
+                supervise(&task_ctx, &runtime, || {
+                    let (entered, cleanup) = input.take().unwrap();
+                    async move {
+                        entered.send(()).unwrap();
+                        cleanup.await.unwrap();
+                        anyhow::bail!("cancelled initialization")
+                    }
+                })
+                .await
+            })
+            .await;
+        started.await.unwrap();
+        assert_eq!(ctx.setup_state.current().phase, SetupPhase::Ready);
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Starting
+        );
+        assert!(ctx.host_runtime.get().is_some());
+        assert!(ctx.shared_runtime.get().is_none());
+        ctx.shutdown.cancel();
+        let mut joining = std::pin::pin!(ctx.system_service.join());
+        assert!(matches!(
+            futures::poll!(&mut joining),
+            std::task::Poll::Pending
+        ));
+        release.send(()).unwrap();
+        joining.await.unwrap();
+    }
+}
