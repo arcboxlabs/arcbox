@@ -169,6 +169,8 @@ signal received
 
 The daemon completes host cleanup before reporting a runtime shutdown error. A failed graceful stop returns the error to `main`; a failed forced stop exits with status 1. A shutdown task panic also remains a failure, even if the subsequent forced stop succeeds. Forced stops still use `process::exit` after cleanup because an abandoned graceful task can block Tokio runtime destruction.
 
+The DNS service owns its UDP listener and retains blocking upstream queries in a `JoinSet`. Cancellation stops admission and replies, cancels queued work, then joins running queries. A listener error or query panic follows the same cleanup path before returning an error. A running query can wait up to two seconds for each configured upstream. The outer daemon drain retains its five-second deadline: aborting the service releases the listener immediately, while running blocking queries finish on their network deadlines. DNS service completion alone does not prove that a forcibly aborted blocking query has finished.
+
 ### Residual state after graceful exit
 
 | File | State | Next startup |

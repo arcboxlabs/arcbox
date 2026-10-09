@@ -11,9 +11,10 @@
 use anyhow::{Context, Result};
 use arcbox_net::NetworkManager;
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// Async UDP DNS server backed by [`NetworkManager`]'s DNS forwarder.
@@ -88,64 +89,84 @@ impl DnsService {
     /// Runs the DNS event loop on the socket [`Self::bind_requested`] bound,
     /// resolving through `network_manager`.
     ///
-    /// This method never returns under normal operation. Each incoming UDP
-    /// packet is handled inline for local queries (fast path) or dispatched
-    /// to a blocking task for upstream forwarding (slow path).
+    /// Local queries run inline; upstream queries use retained blocking tasks.
+    /// Shutdown stops receiving and replying, then joins every upstream task.
+    /// Only this future owns the listener, including during task cleanup.
     pub async fn run(
         self,
         network_manager: Arc<NetworkManager>,
         shutdown: CancellationToken,
     ) -> Result<()> {
         let mut buf = [0u8; 512];
-        let socket = Arc::new(self.socket);
+        let socket = self.socket;
+        let mut queries: JoinSet<(SocketAddr, Option<Vec<u8>>)> = JoinSet::new();
 
-        loop {
-            let (len, src) = tokio::select! {
-                result = socket.recv_from(&mut buf) => result?,
+        let mut result = loop {
+            let response = tokio::select! {
+                biased;
                 () = shutdown.cancelled() => {
                     tracing::info!("DNS service shutting down");
-                    return Ok(());
+                    break Ok(());
+                }
+                Some(completed) = queries.join_next(), if !queries.is_empty() => {
+                    match completed {
+                        Ok((src, response)) => response.map(|response| (src, response)),
+                        Err(error) => break Err(error).context("DNS query task failed"),
+                    }
+                }
+                received = socket.recv_from(&mut buf) => {
+                    let (len, src) = match received {
+                        Ok(received) => received,
+                        Err(error) => break Err(error).context("DNS listener receive failed"),
+                    };
+                    if let Some(response) = network_manager.try_resolve_dns_or_nodata(&buf[..len]) {
+                        Some((src, response))
+                    } else {
+                        let query = buf[..len].to_vec();
+                        let nm = Arc::clone(&network_manager);
+                        queries.spawn_blocking(move || {
+                            let response = match nm.handle_dns_query(&query) {
+                                Ok(response) => Some(response),
+                                Err(error) => {
+                                    tracing::debug!(%error, %src, "Upstream DNS forwarding failed");
+                                    build_servfail(&query)
+                                }
+                            };
+                            (src, response)
+                        });
+                        None
+                    }
                 }
             };
-
-            // Fast path: local resolution or NODATA for the configured domain.
-            // Operates on a borrowed slice to avoid allocation.
-            if let Some(response) = network_manager.try_resolve_dns_or_nodata(&buf[..len]) {
-                if let Err(e) = socket.send_to(&response, src).await {
-                    tracing::debug!("Failed to send DNS response to {}: {}", src, e);
+            if let Some((src, response)) = response {
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => break Ok(()),
+                    sent = socket.send_to(&response, src) => {
+                        if let Err(error) = sent {
+                            tracing::debug!(%error, %src, "Failed to send DNS response");
+                        }
+                    }
                 }
-                continue;
             }
+        };
 
-            // Slow path: forward to upstream DNS via blocking I/O.
-            // Only clone into owned buffer when actually needed.
-            let query = buf[..len].to_vec();
-            let nm = Arc::clone(&network_manager);
-            let sock = Arc::clone(&socket);
-            tokio::spawn(async move {
-                // Pre-build SERVFAIL before query is moved into spawn_blocking.
-                let servfail = build_servfail(&query);
-                let result = tokio::task::spawn_blocking(move || nm.handle_dns_query(&query))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok());
-
-                match result {
-                    Some(response) => {
-                        if let Err(e) = sock.send_to(&response, src).await {
-                            tracing::debug!("Failed to send DNS response to {}: {}", src, e);
-                        }
-                    }
-                    None => {
-                        // Send SERVFAIL so the client fails fast instead of timing out.
-                        if let Some(servfail) = servfail {
-                            let _ = sock.send_to(&servfail, src).await;
-                        }
-                        tracing::debug!("Upstream DNS forwarding failed for query from {}", src);
-                    }
+        // Cancel queued jobs; running blocking I/O must reach its upstream timeout or response.
+        queries.abort_all();
+        while let Some(completed) = queries.join_next().await {
+            if let Err(error) = completed {
+                if error.is_cancelled() {
+                    continue;
                 }
-            });
+                result = match result {
+                    Ok(()) => Err(error).context("DNS query task failed"),
+                    Err(previous) => {
+                        Err(previous.context(format!("DNS query cleanup failed: {error}")))
+                    }
+                };
+            }
         }
+        result
     }
 }
 
@@ -182,6 +203,8 @@ fn build_servfail(query: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    mod lifecycle;
+
     use super::*;
     use std::net::Ipv4Addr;
 
