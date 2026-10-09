@@ -142,3 +142,9 @@ All 33 transport tests pass, including real socket checks for idle async receive
 `MachineManager` now registers normal and expected-run agent clients in one socket scope. Final host shutdown can reject new operational connections and interrupt pending guest I/O. The final VM shutdown request keeps its independent connection. Callers must still retain and join connection and operation workers.
 
 Both engine cancellation tests pass. The new test performs the real Ping handshake and sends a one-hour `SandboxExecWaitRequest` through each transport. The peer withholds its response; scope closure causes a receive error within two seconds and releases the socket. The existing test verifies that cancellation joins a blocking worker after socket shutdown. Engine all-target Clippy with `-D warnings` and workspace formatting pass. These socket checks do not start a VM or prove daemon cleanup ordering.
+
+## Built machine boot image
+
+The ARM64 rootfs build at boot-assets `6a6d971` completed successfully. The image has 6,041,600 bytes and SHA-256 `0612c68dd16b42ef4b59339c8df9be879a5dc88b24376217ccd5fb24bde4e2b0`. Boot-assets now includes `tests/rootfs-machine-tools.sh` and its rerun command in the README. The probe passed against this image in a disposable Colima ARM64 Alpine container with read-only source and image access.
+
+The probe extracts EROFS and compares the embedded machine init and helper scripts with source. The extracted helper installs the image's actual static iptables into a temporary distro tree. Installed bytes match, owner and mode are `0:0:755`, and absolute execution reports `iptables v1.8.13 (legacy)`. This evidence establishes image contents and tool installation, not boot, AF_VSOCK signing, packet forwarding, or client trust. The boot release and runtime asset pin remain unchanged.
