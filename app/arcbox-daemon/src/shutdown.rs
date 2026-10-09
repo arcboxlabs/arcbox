@@ -53,6 +53,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     if let Err(error) = ctx.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed");
     }
+    if let Err(error) = ctx.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed");
+    }
     if let Err(error) = ctx.guest_trust_service.join().await {
         warn!(%error, "guest trust service cleanup failed");
     }
@@ -242,6 +245,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed during startup cancellation");
     }
+    if let Err(error) = handles.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed during startup cancellation");
+    }
     if let Err(error) = handles.guest_trust_service.join().await {
         warn!(%error, "guest trust service cleanup failed during startup cancellation");
     }
@@ -285,6 +291,9 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
     handles.shutdown.cancel();
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed after startup error");
     }
     if let Err(error) = handles.guest_trust_service.join().await {
         warn!(%error, "guest trust service cleanup failed after startup error");
@@ -338,7 +347,7 @@ pub async fn wait_for_signal() {
 
 async fn drain(handles: &mut ServiceHandles) {
     if tokio::time::timeout(DRAIN_TIMEOUT, async {
-        let _ = tokio::join!(&mut handles.dns, &mut handles.grpc);
+        let _ = (&mut handles.grpc).await;
         if let Some(h) = handles.docker.as_mut() {
             let _ = h.await;
         }
@@ -359,7 +368,6 @@ async fn drain(handles: &mut ServiceHandles) {
             "Server drain timed out after {}s, aborting remaining tasks",
             DRAIN_TIMEOUT.as_secs()
         );
-        handles.dns.abort();
         handles.grpc.abort();
         if let Some(h) = handles.docker.as_mut() {
             h.abort();

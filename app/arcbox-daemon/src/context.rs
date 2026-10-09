@@ -58,6 +58,7 @@ pub struct StartupHandles {
     /// Filled before an isolated VM boots and held through shutdown cleanup.
     pub container_network_lease: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
@@ -76,6 +77,7 @@ impl StartupHandles {
             daemon_lock: Arc::new(std::sync::OnceLock::new()),
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
             resolver_service: BackgroundTask::default(),
+            dns_service: BackgroundTask::default(),
             guest_trust_service: BackgroundTask::default(),
             web_index_service: BackgroundTask::default(),
             tls_signer: BackgroundTask::default(),
@@ -106,6 +108,7 @@ pub struct EarlyContext {
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
@@ -158,6 +161,7 @@ pub struct DaemonContext {
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
@@ -205,7 +209,6 @@ pub struct ControlPlane {
 
 /// Handles to spawned services for drain-on-shutdown.
 pub struct ServiceHandles {
-    pub dns: tokio::task::JoinHandle<()>,
     /// Actual UDP port selected by the bound DNS socket.
     pub dns_port: u16,
     /// Docker API server task; `None` in VM-host-only mode.

@@ -4,11 +4,14 @@
 //! Runtime; operations wait for the operational Runtime. Empty handles return
 //! `UNAVAILABLE` without restarting the gRPC server mid-boot.
 
+mod control_plane;
+
+pub use control_plane::start_control_plane;
+
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arcbox_api::SystemServiceImpl;
 #[cfg(target_os = "macos")]
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::ports::KUBERNETES_API_HOST_PORT;
@@ -18,58 +21,11 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::context::{ControlPlane, DaemonContext, ServiceHandles};
-use crate::dns_service::DnsService;
 
 #[cfg(target_os = "macos")]
 const ROUTE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const ROUTE_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// Starts the control plane and binds the DNS socket.
-///
-/// Called before `init_runtime()`. gRPC comes first so a client watching
-/// the setup stream sees a DNS bind failure as `FAILED` with its cause;
-/// the DNS socket is bound here, before the VM boots, so an explicitly
-/// requested port that is taken costs no boot, and the previous daemon
-/// has already released its socket because the lease is held.
-pub async fn start_control_plane(ctx: &DaemonContext) -> Result<ControlPlane> {
-    let grpc = start_grpc(ctx).await?;
-    let dns = DnsService::bind_requested(ctx.dns_port, ctx.profile.dns_host_port())
-        .await
-        .context("Failed to start DNS service")?;
-    Ok(ControlPlane { grpc, dns })
-}
-
-/// Starts the gRPC server with all services.
-///
-/// Setup status works immediately. Machine directory reads and web snapshots
-/// become available at Runtime construction; operations wait for initialization.
-async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
-    let socket_path = &ctx.layout.grpc_socket;
-    let listener = crate::control_plane::bind(socket_path)?;
-
-    info!(socket = %socket_path.display(), "control plane listening (Connect + gRPC + gRPC-Web)");
-
-    let system_service = SystemServiceImpl::new(
-        Arc::clone(&ctx.setup_state),
-        Arc::clone(&ctx.shared_runtime),
-        Arc::clone(&ctx.early_runtime),
-    );
-    // Every service is served over Connect (CORE-53, CORE-68). The sandbox
-    // control/data-plane split (CORE-57) is preserved inside it, so a cloud
-    // deployment can still host those halves in different processes.
-    // Reflection rides along and answers over all three wire formats.
-    let app = crate::control_plane::into_app(crate::control_plane::connect_router(
-        Arc::clone(&ctx.shared_runtime),
-        Arc::clone(&ctx.early_runtime),
-        system_service,
-    )?);
-
-    let shutdown = ctx.shutdown.clone();
-    let handle = tokio::spawn(crate::control_plane::serve(listener, app, shutdown));
-
-    Ok(handle)
-}
 
 /// Starts DNS, Docker API, and Kubernetes services.
 ///
@@ -165,11 +121,14 @@ pub async fn start_services(
 
     let dns_shutdown = ctx.shutdown.clone();
     let network_manager = Arc::clone(runtime.network_manager());
-    let dns = tokio::spawn(async move {
-        if let Err(e) = dns_service.run(network_manager, dns_shutdown).await {
-            tracing::error!("DNS service error: {}", e);
-        }
-    });
+    ctx.dns_service
+        .start(async move {
+            dns_service
+                .run(network_manager, dns_shutdown)
+                .await
+                .inspect_err(|error| tracing::error!(%error, "DNS service error"))
+        })
+        .await;
 
     let docker = docker_service.map(|(docker_server, listener)| {
         let docker_shutdown = ctx.shutdown.clone();
@@ -208,7 +167,6 @@ pub async fn start_services(
     let route_guard = None;
 
     Ok(ServiceHandles {
-        dns,
         dns_port,
         docker,
         grpc,
@@ -238,10 +196,6 @@ pub fn enable_docker_integration(ctx: &DaemonContext) {
         }
     }
 }
-
-// =============================================================================
-// Helpers
-// =============================================================================
 
 /// Starts the `vm_running` mirror for the System VM.
 ///

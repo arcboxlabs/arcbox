@@ -151,7 +151,8 @@ write current PID
 signal received
   ├─ cancel CancellationToken         → all services begin draining
   ├─ join resolver publication        → Bonjour connection and records are released
-  ├─ drain(DNS, Docker, gRPC)         → 5 s timeout, then abort
+  ├─ join DNS                        → running upstream queries finish; listener closes
+  ├─ drain(Docker, gRPC)              → 5 s timeout, then abort
   │   Docker and the control plane close idle keep-alive connections at
   │   once and finish in-flight requests with `Connection: close`; only
   │   a request still running can use the budget. A client that parks
@@ -169,7 +170,7 @@ signal received
 
 The daemon completes host cleanup before reporting a runtime shutdown error. A failed graceful stop returns the error to `main`; a failed forced stop exits with status 1. A shutdown task panic also remains a failure, even if the subsequent forced stop succeeds. Forced stops still use `process::exit` after cleanup because an abandoned graceful task can block Tokio runtime destruction.
 
-The DNS service owns its UDP listener and retains blocking upstream queries in a `JoinSet`. Cancellation stops admission and replies, cancels queued work, then joins running queries. A listener error or query panic follows the same cleanup path before returning an error. A running query can wait up to two seconds for each configured upstream. The outer daemon drain retains its five-second deadline: aborting the service releases the listener immediately, while running blocking queries finish on their network deadlines. DNS service completion alone does not prove that a forcibly aborted blocking query has finished.
+The DNS service owns its UDP listener and retains blocking upstream queries in a `JoinSet`. Cancellation stops admission and replies, cancels queued work, then joins running queries. A listener error or query panic follows the same cleanup path before returning an error. A running query can wait up to two seconds for each configured upstream. DNS uses a shared `BackgroundTask` outside the five-second server drain. Normal shutdown, interrupted startup, and failed startup join that task before stopping Runtime. Cancelling a cleanup waiter preserves the service in the shared slot so another waiter can finish the join. DNS task failures are logged before the eventual join.
 
 ### Residual state after graceful exit
 
@@ -280,7 +281,7 @@ centrally during startup — each server removes and rebinds independently:
 
 | Socket | Owner | Cleanup |
 |--------|-------|---------|
-| `arcbox.sock` | `services::start_grpc` | `remove_file` before `UnixListener::bind` |
+| `arcbox.sock` | `services::control_plane::start_grpc` | `remove_file` before `UnixListener::bind` |
 | `docker.sock` | `DockerApiServer::bind` | `remove_file` before `UnixListener::bind` |
 
 This avoids race conditions where a centralized cleanup could delete a
