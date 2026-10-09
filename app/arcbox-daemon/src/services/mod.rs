@@ -149,9 +149,6 @@ pub async fn start_system_services(
     ctx.shared_runtime
         .set(Arc::clone(runtime))
         .map_err(|_| anyhow::anyhow!("start_services called twice"))?;
-    ctx.host_runtime
-        .set(Arc::clone(runtime))
-        .map_err(|_| anyhow::anyhow!("Machine host already admitted"))?;
 
     let docker = docker_service.map(|(docker_server, listener)| {
         let docker_shutdown = ctx.shutdown.clone();

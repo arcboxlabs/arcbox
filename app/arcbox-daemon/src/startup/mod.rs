@@ -7,6 +7,7 @@ mod host_mounts;
 mod lock;
 mod pipeline;
 mod resource_cleanup;
+mod system;
 
 pub use assets::find_bundle_contents;
 pub use container_network_lease::ContainerNetworkLease;
@@ -20,7 +21,7 @@ use anyhow::{Context, Result};
 use arcbox_api::SetupPhase;
 use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
-use arcbox_core::{Config, InitProgress, Runtime};
+use arcbox_core::{Config, Runtime};
 use tracing::info;
 
 use crate::DaemonArgs;
@@ -257,30 +258,16 @@ async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 async fn prepare_assets(ctx: &DaemonContext) -> Result<assets::PreparedAssets> {
     let config = effective_config(ctx)?;
     let prepared = assets::prepare(&config).await?;
-    prepared.prepare_system(&config, &ctx.setup_state).await?;
     ctx.setup_state
-        .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
+        .set_phase(SetupPhase::AssetsReady, "Host assets prepared");
     Ok(prepared)
 }
 
-/// Phase 2: seed/download boot assets, build runtime, start VM.
-///
-/// Called after gRPC SystemService is already listening so clients
-/// can observe DOWNLOADING_ASSETS → ASSETS_READY progression, and
-/// publishes VM_STARTING → VM_READY around the guest boot itself.
-/// Returns the initialized runtime.
+/// Constructs Runtime and completes the shared-directory security barrier.
 async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let config = effective_config(ctx)?;
     #[cfg(target_os = "macos")]
     crate::self_setup::tls::prepare(ctx);
-    if config.vm.autostart
-        && let Some(lease) = ContainerNetworkLease::acquire(config.container.cidr)?
-    {
-        ctx.container_network_lease_slot
-            .set(lease)
-            .map_err(|_| anyhow::anyhow!("container network lease already configured"))?;
-    }
-    let selected_guest_docker_port = config.container.guest_docker_vsock_port;
     let runtime = Arc::new(Runtime::new(config).context("Failed to create runtime")?);
     // A stuck boot must preserve diagnostics and read-only directory access
     // while `shared_runtime` still gates operations.
@@ -303,51 +290,10 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     // Armed here for the same reason: a host sleep can land during the boot
     // below, and the wake that follows must still re-sync the guest clock.
     crate::power::spawn_wake_clock_sync(&runtime, &ctx.shutdown);
-    // The guest boot is the longest stretch of startup and the only one a
-    // client cannot infer from anything else, so the runtime reports its
-    // milestones from inside and they are published as they arrive.
     runtime
-        .init(|milestone| {
-            use arcbox_connect::v1::system_runtime_status::State;
-            let (state, reason) = match milestone {
-                InitProgress::SystemVmStarting => (State::VmStarting, "Starting the System VM"),
-                InitProgress::SystemVmReady => {
-                    (State::VmReady, "System VM ready; waiting for Docker")
-                }
-            };
-            ctx.setup_state.set_system_runtime(state, reason);
-        })
+        .prepare_host()
         .await
-        .context("Failed to initialize runtime")?;
-    info!(
-        data_dir = %ctx.layout.data_dir.display(),
-        guest_docker_vsock_port = selected_guest_docker_port,
-        container_cidr = %runtime.config().container.cidr,
-        "Runtime initialized"
-    );
-
-    // Replay the startup cleanup before the runtime is published, so no
-    // sandbox state from a previous daemon outlives it. The stream is a
-    // streaming RPC, which the HV backend's blocking agent transport cannot
-    // carry; HV runs no sandboxes, so there is nothing to replay there. The
-    // same gate, re-evaluated per VM incarnation, keeps the long-lived watch
-    // (`sandbox_cleanup::spawn`) off backends that cannot carry it.
-    let backend = runtime.system_vm_backend();
-    if !runtime.config().vm.autostart || runtime.machine_manager().storage_is_held()? {
-        // No guest, nothing to clean.
-    } else if backend.supports_nested_virt() {
-        let replayed = arcbox_computer::cleanup::initialize(runtime.as_ref())
-            .await
-            .context("Failed to initialize sandbox cleanup")?;
-        if !replayed {
-            info!("sandbox cleanup skipped: the guest runs no sandboxes");
-        }
-    } else {
-        info!(
-            backend = backend.as_str(),
-            "sandbox cleanup skipped: the backend does not run sandboxes"
-        );
-    }
+        .context("Failed to prepare Machine host")?;
     Ok(runtime)
 }
 

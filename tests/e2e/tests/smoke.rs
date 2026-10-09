@@ -61,7 +61,7 @@ const BOOT_BUDGET_DEFAULT_SECS: f64 = 10.0;
 
 /// Phases a healthy cold start publishes, in order.
 ///
-/// Host and System milestones use separate readiness fields.
+/// The host becomes ready before the independent System VM startup.
 const EXPECTED_PROGRESSION: [Phase; 3] = [Phase::AssetsReady, Phase::NetworkReady, Phase::Ready];
 
 #[test]
@@ -131,10 +131,9 @@ fn check_phase_progression(marks: &PhaseMarks) -> Result<()> {
     if by_sighting != observed {
         bail!("setup phases arrived out of order: {by_sighting:?}, expected {observed:?}");
     }
-    let host_ready = marks
+    let mut previous = marks
         .at(Phase::Ready)
         .context("host READY was not observed")?;
-    let mut previous = Duration::ZERO;
     for state in [State::VmStarting, State::VmReady, State::Ready] {
         let at = marks
             .system_at(state)
@@ -146,9 +145,6 @@ fn check_phase_progression(marks: &PhaseMarks) -> Result<()> {
             );
         }
         previous = at;
-    }
-    if previous > host_ready {
-        bail!("host readiness preceded synchronous System startup");
     }
     Ok(())
 }

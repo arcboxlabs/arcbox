@@ -116,7 +116,7 @@ impl ResourcesReleased {
         Ok(AssetsPrepared {
             ctx: self.ctx,
             control_plane: self.control_plane,
-            _assets: assets,
+            assets,
         })
     }
 }
@@ -124,17 +124,18 @@ impl ResourcesReleased {
 pub struct AssetsPrepared {
     ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
-    _assets: assets::PreparedAssets,
+    assets: assets::PreparedAssets,
 }
 
 impl AssetsPrepared {
-    /// Builds and initializes the ArcBox runtime.
+    /// Constructs Runtime and prepares the shared Machine host.
     pub async fn boot_runtime(self) -> Result<RuntimeBooted> {
         let runtime = record_startup_phase("boot_runtime", init_runtime(&self.ctx)).await?;
         Ok(RuntimeBooted {
             ctx: self.ctx,
             control_plane: self.control_plane,
             runtime,
+            assets: self.assets,
         })
     }
 }
@@ -143,68 +144,30 @@ pub struct RuntimeBooted {
     ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
     runtime: Arc<Runtime>,
+    assets: assets::PreparedAssets,
 }
 
 impl RuntimeBooted {
     /// Starts services that require an initialized runtime.
     pub async fn start_runtime_services(self) -> Result<RuntimeServicesStarted> {
-        let linux_vm = self.runtime.config().vm.autostart;
         let handles = record_startup_phase("start_runtime_services", async {
             let handles =
                 services::start_host_services(&self.ctx, &self.runtime, self.control_plane).await?;
-            let mut system_handles =
-                services::start_system_services(&self.ctx, &self.runtime).await?;
-            let shutdown = self.ctx.shutdown.clone();
-            self.ctx
-                .system_service
-                .start(async move {
-                    shutdown.cancelled().await;
-                    crate::shutdown::drain_system(&mut system_handles).await;
-                    Ok(())
-                })
-                .await;
             recovery::prepare_host(&self.ctx, &self.runtime, handles.dns_port).await?;
-            recovery::run_system(&self.ctx, &self.runtime).await?;
             #[cfg(target_os = "macos")]
             crate::tls_signer::spawn(&self.ctx, &self.runtime).await;
-            if linux_vm {
-                crate::web_index::start(&self.ctx, &self.runtime).await;
-                services::enable_docker_integration(&self.ctx);
-                crate::kubernetes_lb::start(&self.ctx, &self.runtime).await;
-                crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);
-            }
-            crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
-            crate::nfs_mount::spawn(&self.ctx, &self.runtime);
-            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
-            crate::machine_dns::spawn(&self.ctx, &self.runtime);
-            crate::machine_mount::spawn(&self.ctx, &self.runtime);
             Ok(handles)
         })
         .await?;
-        // DNS was bound in `start_control_plane`; with a Linux VM, Docker is
-        // bound before `start_services` returns. An explicitly requested
-        // Kubernetes endpoint is also required; the canonical best-effort
-        // 16443 listener may remain unavailable. An explicitly requested DNS
-        // resolver is installed before this phase.
-        use arcbox_connect::v1::system_runtime_status::State;
-        let (state, reason) = if !linux_vm {
-            (State::Disabled, "System VM is disabled")
-        } else if self.runtime.machine_manager().storage_is_held()? {
-            (
-                State::Failed,
-                "System VM storage is protected; use storage recovery",
-            )
-        } else {
-            (State::Ready, "Docker runtime ready")
-        };
-        self.ctx.setup_state.set_system_runtime(state, reason);
+        // Host listeners and the explicitly requested resolver are available before admission.
         self.ctx
             .setup_state
             .set_phase(SetupPhase::NetworkReady, "Network services ready");
         Ok(RuntimeServicesStarted {
             ctx: self.ctx,
             handles,
-            linux_vm,
+            runtime: self.runtime,
+            assets: self.assets,
         })
     }
 }
@@ -212,28 +175,30 @@ impl RuntimeBooted {
 pub struct RuntimeServicesStarted {
     ctx: Arc<DaemonContext>,
     handles: ServiceHandles,
-    /// Whether the Linux VM (and its Docker/K8s services) is running.
-    linux_vm: bool,
+    runtime: Arc<Runtime>,
+    assets: assets::PreparedAssets,
 }
 
 impl RuntimeServicesStarted {
     /// Marks startup complete and returns handles for the shutdown loop.
     pub async fn mark_ready(self) -> Result<ReadyDaemon> {
         record_startup_phase("mark_ready", async {
-            self.ctx
-                .setup_state
-                .set_phase(SetupPhase::Ready, "Daemon ready");
+            crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
+            crate::nfs_mount::spawn(&self.ctx, &self.runtime);
+            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
+            crate::machine_dns::spawn(&self.ctx, &self.runtime);
+            crate::machine_mount::spawn(&self.ctx, &self.runtime);
+            self.admit_host_and_start_system().await?;
 
             println!("ArcBox daemon started");
-            if self.linux_vm {
-                println!("  Docker API: {}", self.ctx.layout.docker_socket.display());
-            }
             println!("  gRPC API:   {}", self.ctx.layout.grpc_socket.display());
             println!("  DNS:        127.0.0.1:{}", self.handles.dns_port);
             println!("  Data:       {}", self.ctx.layout.data_dir.display());
             println!();
-            if self.linux_vm {
-                println!("Use 'abctl docker enable' to configure Docker CLI integration.");
+            if self.runtime.config().vm.autostart {
+                println!(
+                    "System VM starts independently; watch setup status for Docker readiness."
+                );
             } else {
                 println!(
                     "Running as a VM host only (--no-linux-vm): Docker and Kubernetes are disabled."
@@ -249,6 +214,24 @@ impl RuntimeServicesStarted {
             ctx: self.ctx,
             handles: self.handles,
         })
+    }
+
+    async fn admit_host_and_start_system(&self) -> Result<()> {
+        self.ctx
+            .host_runtime
+            .set(Arc::clone(&self.runtime))
+            .map_err(|_| anyhow::anyhow!("Machine host already admitted"))?;
+        self.ctx
+            .setup_state
+            .set_phase(SetupPhase::Ready, "Daemon ready");
+        let ctx = Arc::clone(&self.ctx);
+        let runtime = Arc::clone(&self.runtime);
+        let assets = self.assets;
+        self.ctx
+            .system_service
+            .start(async move { super::system::run(ctx, runtime, assets).await })
+            .await;
+        Ok(())
     }
 }
 
