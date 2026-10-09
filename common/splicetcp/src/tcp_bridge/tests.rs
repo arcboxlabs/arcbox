@@ -143,7 +143,7 @@ async fn handshake_passive_open_registers_and_emits_syn_ack() {
     let parsed = crate::ethernet::parse_tcp_syn_options(&syn_ack[tcp..]);
     assert_eq!(parsed.mss, Some(SHIM_MSS));
     assert_eq!(parsed.wscale, Some(SHIM_WSCALE));
-    assert!(parsed.sack_permitted);
+    assert!(!parsed.sack_permitted);
 }
 
 #[tokio::test]
@@ -225,6 +225,10 @@ async fn handshake_active_open_emits_syn_and_completes() {
     assert_eq!(out.len(), 1);
     let tcp = 34;
     assert_eq!(out[0][tcp + 13], 0x02, "expected pure SYN");
+    let parsed = crate::ethernet::parse_tcp_syn_options(&out[0][tcp..]);
+    assert_eq!(parsed.mss, Some(SHIM_MSS));
+    assert_eq!(parsed.wscale, Some(SHIM_WSCALE));
+    assert!(!parsed.sack_permitted);
     let our_isn = u32::from_be_bytes([
         out[0][tcp + 4],
         out[0][tcp + 5],
@@ -402,7 +406,6 @@ fn handshake_capacity_sends_rst() {
                 host_stream: None,
                 connect_rx: None,
                 peer_wscale: None,
-                peer_sack: false,
                 peer_mss: 1460,
                 gw_mac: GW_MAC,
                 guest_mac: GUEST_MAC,

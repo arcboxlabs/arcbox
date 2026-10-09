@@ -444,8 +444,8 @@ pub fn build_tcp_syn_ack_frame(p: &SynAckParams) -> Vec<u8> {
 /// Parameters for constructing a TCP SYN frame (active open).
 ///
 /// Used when arcbox initiates a TCP connection toward the guest for an
-/// inbound port-forward. Only the MSS option is included — WScale and
-/// SACK-Permitted are negotiated by the peer echoing them in its SYN-ACK.
+/// inbound port-forward. MSS is always included. WScale and SACK-Permitted
+/// are included only when requested by the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct SynParams {
     pub src_ip: Ipv4Addr,
@@ -457,6 +457,8 @@ pub struct SynParams {
     pub dst_mac: [u8; 6],
     pub mss: u16,
     pub wscale: Option<u8>,
+    /// Whether to include SACK-Permitted. Enable only when the caller supports SACK.
+    pub sack_permitted: bool,
 }
 
 /// Builds a TCP SYN frame for active open toward the guest.
@@ -469,9 +471,10 @@ pub fn build_tcp_syn_frame(p: &SynParams) -> Vec<u8> {
     options.push(4);
     options.extend_from_slice(&p.mss.to_be_bytes());
 
-    // SACK-Permitted — always advertise, we don't care if peer uses it.
-    options.push(4);
-    options.push(2);
+    if p.sack_permitted {
+        options.push(4);
+        options.push(2);
+    }
 
     if let Some(shift) = p.wscale {
         options.push(3);

@@ -89,10 +89,9 @@ impl TcpBridge {
             return build_rst_from_syn(syn_frame, gateway_mac);
         }
 
-        // Parse peer options (MSS / WScale / SACK-perm).
+        // Parse peer options (MSS / WScale).
         let opts = crate::ethernet::parse_tcp_syn_options(&syn_frame[l4_start..]);
         let peer_wscale = opts.wscale;
-        let peer_sack = opts.sack_permitted;
         let peer_mss = opts.mss.unwrap_or(536);
 
         // Decide + dial egress via the injected resolver. The default
@@ -137,7 +136,6 @@ impl TcpBridge {
                 host_stream: None,
                 connect_rx: Some(result_rx),
                 peer_wscale,
-                peer_sack,
                 peer_mss,
                 gw_mac: gateway_mac,
                 guest_mac,
@@ -184,7 +182,6 @@ impl TcpBridge {
                 host_stream: Some(host_stream),
                 connect_rx: None,
                 peer_wscale: Some(SHIM_WSCALE),
-                peer_sack: true,
                 peer_mss: SHIM_MSS,
                 gw_mac: gateway_mac,
                 guest_mac,
@@ -286,7 +283,8 @@ impl TcpBridge {
                                 dst_mac: conn.guest_mac,
                                 mss: SHIM_MSS,
                                 wscale: conn.peer_wscale.map(|_| SHIM_WSCALE),
-                                sack_permitted: conn.peer_sack,
+                                // The fast path only supports cumulative ACKs.
+                                sack_permitted: false,
                             },
                         );
                         conn.saved_frame = Some(frame.clone());
@@ -359,6 +357,7 @@ impl TcpBridge {
                                 dst_mac: conn.guest_mac,
                                 mss: SHIM_MSS,
                                 wscale: Some(SHIM_WSCALE),
+                                sack_permitted: false,
                             });
                         conn.saved_frame = Some(frame.clone());
                         conn.last_sent = Some(now);
@@ -500,9 +499,6 @@ impl TcpBridge {
                 conn.peer_isn = guest_isn;
                 if peer_opts.wscale.is_some() {
                     conn.peer_wscale = peer_opts.wscale;
-                }
-                if peer_opts.sack_permitted {
-                    conn.peer_sack = true;
                 }
                 // Record the guest endpoint's real MSS so host→guest segments
                 // are sized to what it can forward (a bridged container behind
