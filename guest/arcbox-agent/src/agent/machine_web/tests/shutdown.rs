@@ -190,11 +190,13 @@ async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_
         let (kind, trace, _) = read_message(&mut client).await.unwrap();
         assert_eq!(kind, MessageType::OpenMachineWebResponse);
         assert_eq!(trace, "open");
+        let mut request = replacement(1, Selection::Port(8080), Selection::Off(Box::default()));
+        request.ca_certificate_pem = Some(CA_PEM.to_vec());
         write_message(
             &mut client,
             MessageType::ReplaceMachineWebRequest,
             "replace",
-            &replacement(1, Selection::Port(8080), Selection::Off(Box::default())).encode_to_vec(),
+            &request.encode_to_vec(),
         )
         .await
         .unwrap();
@@ -207,11 +209,17 @@ async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_
                 .source_revision,
             1
         );
+        let authority = receiver.authority.subscribe();
+        assert_eq!(
+            authority.borrow().as_ref().unwrap().der(),
+            PublicAuthority::from_pem(CA_PEM).unwrap().der()
+        );
         publish_cleanup_witness(&receiver);
         client.shutdown().await.unwrap();
         waiting.await.unwrap();
         assert!(receiver.state.lock().unwrap().active);
         assert!(receiver.state.lock().unwrap().configuration.is_none());
+        assert!(authority.borrow().is_none());
         {
             let registry = receiver.registry.read().unwrap();
             assert!(registry.get("machine:my_vm").is_none());
@@ -239,8 +247,12 @@ fn invalid_or_stale_replacements_preserve_the_last_complete_policy() {
             .replace(replacement(0, Selection::Port(80), Selection::Port(443)))
             .is_err()
     );
-    let accepted = replacement(2, Selection::Port(8080), Selection::Port(8443));
+    let mut accepted = replacement(2, Selection::Port(8080), Selection::Port(8443));
+    accepted.ca_certificate_pem = Some(CA_PEM.to_vec());
     session.replace(accepted.clone()).unwrap();
+    let directory = receiver.web.directory_source();
+    directory.ready();
+    publish_cleanup_witness(&receiver);
     let mut invalid = vec![
         replacement(0, Selection::Port(80), Selection::Port(443)),
         replacement(1, Selection::Port(80), Selection::Port(443)),
@@ -252,6 +264,12 @@ fn invalid_or_stale_replacements_preserve_the_last_complete_policy() {
             ..Default::default()
         },
     ];
+    let mut invalid_root = replacement(3, Selection::Port(80), Selection::Port(443));
+    invalid_root.ca_certificate_pem = Some(b"invalid root".to_vec());
+    invalid.push(invalid_root);
+    let mut invalid_ports = replacement(3, Selection::Port(80), Selection::Port(65536));
+    invalid_ports.ca_certificate_pem = Some(CA_PEM.to_vec());
+    invalid.push(invalid_ports);
     for http in [true, false] {
         let mut missing = replacement(3, Selection::Port(80), Selection::Port(443));
         let ports = missing.ports.as_option_mut().unwrap();
@@ -263,13 +281,34 @@ fn invalid_or_stale_replacements_preserve_the_last_complete_policy() {
         invalid.push(missing);
     }
     let accepted_configuration = receiver.state.lock().unwrap().configuration.clone();
+    let authority = receiver.authority.borrow().clone().unwrap();
     for request in invalid {
         assert!(session.replace(request).is_err());
         assert_eq!(
             receiver.state.lock().unwrap().configuration,
             accepted_configuration
         );
+        assert!(Arc::ptr_eq(
+            &authority,
+            receiver.authority.borrow().as_ref().unwrap()
+        ));
+        assert_eq!(receiver.web.snapshot(None).len(), 1);
     }
+    session
+        .replace(replacement(3, Selection::Port(80), Selection::Port(443)))
+        .unwrap();
+    assert!(receiver.authority.borrow().is_none());
+    assert_eq!(
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .configuration
+            .as_ref()
+            .unwrap()
+            .source_revision,
+        3
+    );
 }
 
 #[test]

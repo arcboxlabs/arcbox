@@ -207,10 +207,12 @@ message OpenMachineWebRequest {
 }
 message OpenMachineWebResponse {}
 
-// Replaces the complete policy. The first revision is positive; later revisions increase.
+// Replaces the complete policy and public root. Revisions are positive and strictly increase.
 message ReplaceMachineWebRequest {
     uint64 source_revision = 1;
     MachineWebPorts ports = 2;
+    // Absence disables managed certificate issuance without changing guest client trust.
+    optional bytes ca_certificate_pem = 3;
 }
 
 // Confirms validated session configuration, not installed routing.

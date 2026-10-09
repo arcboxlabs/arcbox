@@ -32,7 +32,7 @@ The validation Dockerfile extends the existing local musl image without replacin
 | Legacy tool operations | Insert, check, list, delete, save, restore, and exact baseline restoration passed on Linux `6.8.0-117-generic` |
 | Production publisher regression | `kernel_index_repairs_order_and_preserves_unrelated_rules`: 1 passed; stale-port replacement, repeated publication, damaged ordering repair, repair-path duplicate cleanup, DNS withdrawal, and unrelated-rule preservation |
 
-The App is at `target/dmg-build/ArcBox Dev.app` and the DMG is at `target/ArcBox-Dev-1.37.1-arm64.dmg` in the runtime checkout. The guest protocol and minimum remain `7/7`; helper remains `1.2.0`. This commit adds validation and documentation only, so the packaged production implementation remains current.
+The App is at `target/dmg-build/ArcBox Dev.app` and the DMG is at `target/ArcBox-Dev-1.37.1-arm64.dmg` in the runtime checkout. The guest protocol and minimum remain `7/7`; helper remains `1.2.0`. These packaging checks apply to the source revisions recorded above. Later production changes require a new paired build.
 
 The isolated containers used `--network none`, `--cap-drop ALL`, explicit `NET_ADMIN` and `NET_RAW`, and `no-new-privileges`. They had no host mounts and were removed after execution. A `NET_ADMIN`-only attempt failed before any rule mutation: the legacy backend also needs a raw control socket. This capability requirement was verified by the successful run, not inferred from tool installation.
 
@@ -55,3 +55,24 @@ The test covers repeated scans, listener disappearance and rediscovery, changing
 The frontend is a held socket, and the explicit native TLS port has no server. This result proves rule management and discovery, not TLS or packet forwarding. The machine configuration receiver still needs a session-owned route actor and an authenticated public-root source. The old actor must finish cleanup before a new session can claim the same address.
 
 Source inspection also found a boot prerequisite: the boot shim moves `/arcbox` and copies BusyBox into a distro root, but does not retain the boot root's static `/sbin/iptables`. The routing code currently uses that absolute path. Product-owned tool delivery must be connected before enabling routes across supported distros; an arbitrary distro package is not a guaranteed substitute.
+
+## Machine public-root delivery
+
+Machine web replacements now carry complete policies and the current public CA, or explicit absence. The host observes policy and CA changes independently, records the acknowledged snapshot, and resamples both sources. Root changes during Open, during Ack, and while idle reuse the retained connection on both host transports.
+
+The guest validates the public root and both policies before changing accepted state. Invalid replacements preserve policies, root identity, and published routes. Disconnect clears proxy authority before awaited stream shutdown; session admission remains occupied until shutdown finishes. This channel does not change machine client trust.
+
+| Check | Result |
+|---|---|
+| Host machine web tests | 3 passed, including both host transports |
+| Linux guest machine web tests | 8 passed in the isolated Linux validation image |
+| Transport tests | 29 passed; protocol and gRPC test commands also passed |
+| Engine machine web test | 1 passed |
+| Daemon control-plane tests | 5 passed |
+| Host and Linux guest all-target Clippy | Passed with `-D warnings`; the dependency future-incompatibility notice for `proc-macro-error2` remains |
+| Workspace formatting | `cargo fmt --check` passed |
+| Incremental protocol check | `buf breaking` against the preceding `a8ad4544` source passed |
+
+The full `buf breaking` comparison against `origin/master` still reports the existing `MachineService.Import` to `ImportMachine` rename. The unchanged preceding source produces the same finding. No compatibility RPC, protocol bump, or gate suppression was added.
+
+Machine frontend consumption of the session root, route activation, signing listeners, and boot tool delivery remain pending. These results establish authenticated root delivery and withdrawal, not machine HTTPS. The signed App and DMG above predate this production change and must be rebuilt before native acceptance.

@@ -75,6 +75,7 @@ non-obvious invariants and failure signatures.
 ## Invariants (each with WHY)
 
 - **Update the host and agent together.** Change paired callers and decoders in the same source change. Keep `AGENT_PROTOCOL_VERSION` and `MIN_AGENT_PROTOCOL_VERSION` at 7 for current feature work. Do not add compatibility branches or bump versions for each message change. Preserve existing field numbers. The connection handshake still rejects agents below the minimum version.
+- Machine web sessions validate optional public-root PEM before changing policies. Keep the parsed root in session memory. An absent root withdraws proxy authority; guest client trust uses its separate reconciliation channel. Clear proxy authority before awaiting stream shutdown. Reject invalid replacements without changing the accepted configuration.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
   guest's `/arcbox/bin/arcbox-agent` (the agent is NOT baked into the EROFS rootfs — the

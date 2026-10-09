@@ -1,4 +1,4 @@
-//! Exclusive machine configuration and exact private DNS ownership for one host connection.
+//! Session-owned machine policies, validated public roots, and exact private DNS claims.
 
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context as _, Result, ensure};
 use arcbox_connect::v1::{MachineWebAck, OpenMachineWebRequest, ReplaceMachineWebRequest};
 use arcbox_dns::{NamePattern, claims::Claim};
+use arcbox_local_ca::PublicAuthority;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::watch;
 
 use crate::dns_server::DnsRegistry;
 use crate::domains::{EndpointFacts, WebServices};
@@ -19,6 +21,7 @@ pub(super) struct Receiver {
     registry: DnsRegistry,
     web: WebServices,
     state: Arc<Mutex<State>>,
+    authority: watch::Sender<Option<Arc<PublicAuthority>>>,
 }
 
 #[derive(Default)]
@@ -39,6 +42,7 @@ impl Receiver {
             registry,
             web,
             state: Arc::default(),
+            authority: watch::channel(None).0,
         }
     }
 
@@ -159,8 +163,15 @@ impl Session {
             revision > configuration.source_revision,
             "source revision must increase"
         );
+        let authority = request
+            .ca_certificate_pem
+            .as_deref()
+            .map(PublicAuthority::from_pem)
+            .transpose()?
+            .map(Arc::new);
         configuration.facts.replace_machine_ports(&request.ports)?;
         self.receiver.web.clear();
+        self.receiver.authority.send_replace(authority);
         configuration.source_revision = revision;
         Ok(revision)
     }
@@ -179,6 +190,7 @@ impl Session {
                 .remove(configuration.facts.owner());
         }
         self.receiver.web.clear();
+        self.receiver.authority.send_replace(None);
     }
 }
 

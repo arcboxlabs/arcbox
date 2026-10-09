@@ -1,4 +1,4 @@
-//! Delivers captured machine web configuration and drains every retained guest connection.
+//! Delivers captured machine policies and public roots through retained guest connections.
 
 use std::{sync::Arc, time::Duration};
 
@@ -6,6 +6,7 @@ use anyhow::{Context, Result, ensure};
 use arcbox_connect::v1::{MachineWebPorts, ReplaceMachineWebRequest};
 use arcbox_core::{Runtime, machine::MachineState, runtime::CapturedMachineWeb};
 use arcbox_engine::agent_client::{AgentClient, MachineWebSession};
+use arcbox_local_ca::KeychainAuthority;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -13,9 +14,18 @@ use crate::{context::DaemonContext, guest_workers::supervise_machines};
 
 const RESCAN_INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Clone)]
+struct Updates<A> {
+    policies: watch::Receiver<()>,
+    dns: watch::Receiver<u64>,
+    authority: watch::Receiver<A>,
+    certificate: fn(&A) -> Option<Vec<u8>>,
+}
+
 pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let runtime = Arc::clone(runtime);
     let names = Arc::clone(&runtime);
+    let authority = ctx.local_ca.subscribe();
     ctx.machine_web_service
         .start(supervise_machines(
             runtime.event_bus().subscribe(),
@@ -35,7 +45,17 @@ pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
                     .collect()
             },
             move |name, changed, shutdown| {
-                run_machine(Arc::clone(&runtime), name, changed, shutdown)
+                let updates = Updates {
+                    policies: changed,
+                    dns: runtime.network_manager().subscribe_dns_registry(),
+                    authority: authority.clone(),
+                    certificate: |authority| {
+                        authority
+                            .as_ref()
+                            .map(|ca| ca.certificate_pem().into_bytes())
+                    },
+                };
+                run_machine(Arc::clone(&runtime), name, updates, shutdown)
             },
         ))
         .await;
@@ -44,7 +64,7 @@ pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
 async fn run_machine(
     runtime: Arc<Runtime>,
     name: String,
-    mut changed: watch::Receiver<()>,
+    mut updates: Updates<Option<Arc<KeychainAuthority>>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     while !shutdown.is_cancelled() {
@@ -64,14 +84,9 @@ async fn run_machine(
             })
             .await
             .context("machine web connection task failed")??;
-            connected(
-                client,
-                snapshot,
-                changed.clone(),
-                runtime.network_manager().subscribe_dns_registry(),
-                &shutdown,
-                || Ok(runtime.capture_machine_web(&name)?),
-            )
+            connected(client, snapshot, updates.clone(), &shutdown, || {
+                Ok(runtime.capture_machine_web(&name)?)
+            })
             .await
         }
         .await;
@@ -83,18 +98,18 @@ async fn run_machine(
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
-            update = changed.changed() => update?,
+            update = updates.policies.changed() => update?,
+            update = updates.authority.changed() => update?,
             () = tokio::time::sleep(RESCAN_INTERVAL) => {}
         }
     }
     Ok(())
 }
 
-async fn connected(
+async fn connected<A: Clone + Send + Sync>(
     client: AgentClient,
     initial: CapturedMachineWeb,
-    mut changed: watch::Receiver<()>,
-    mut dns: watch::Receiver<u64>,
+    updates: Updates<A>,
     shutdown: &CancellationToken,
     capture: impl Fn() -> Result<CapturedMachineWeb> + Send + Sync,
 ) -> Result<()> {
@@ -106,7 +121,8 @@ async fn connected(
         "machine web identity changed during connection"
     );
     let (mut session, mut coordinator) = client.machine_web(initial.open.clone())?;
-    let policy_changes = changed.clone();
+    let mut changed = updates.policies.clone();
+    let mut dns = updates.dns.clone();
     let mut completed = false;
     let result = tokio::select! {
         biased;
@@ -126,7 +142,7 @@ async fn connected(
                 }
             }
         } => result,
-        result = drive(&mut session, policy_changes, &initial, &capture) => result,
+        result = drive(&mut session, updates, &initial, &capture) => result,
     };
     drop(session);
     if !completed {
@@ -144,9 +160,9 @@ async fn connected(
     result
 }
 
-async fn drive(
+async fn drive<A: Send + Sync>(
     session: &mut MachineWebSession,
-    mut changed: watch::Receiver<()>,
+    mut updates: Updates<A>,
     initial: &CapturedMachineWeb,
     capture: &(impl Fn() -> Result<CapturedMachineWeb> + Sync),
 ) -> Result<()> {
@@ -154,13 +170,15 @@ async fn drive(
     let mut acknowledged = None;
     let mut source_revision = 0_u64;
     loop {
-        changed.borrow_and_update();
+        updates.policies.borrow_and_update();
+        let certificate = (updates.certificate)(&updates.authority.borrow_and_update());
         let snapshot = capture()?;
         ensure!(
             initial.same_identity(&snapshot),
             "machine web identity changed before policy delivery"
         );
-        if acknowledged != Some(snapshot.ports) {
+        let desired = (snapshot.ports, certificate);
+        if acknowledged.as_ref() != Some(&desired) {
             source_revision = source_revision
                 .checked_add(1)
                 .context("machine web source revision exhausted")?;
@@ -168,6 +186,7 @@ async fn drive(
                 .replace(ReplaceMachineWebRequest {
                     source_revision,
                     ports: MachineWebPorts::from(snapshot.ports).into(),
+                    ca_certificate_pem: desired.1.clone(),
                     ..Default::default()
                 })
                 .await?;
@@ -175,10 +194,13 @@ async fn drive(
                 initial.same_identity(&capture()?),
                 "machine web identity changed before policy acknowledgment"
             );
-            acknowledged = Some(snapshot.ports);
+            acknowledged = Some(desired);
             continue;
         }
-        changed.changed().await?;
+        tokio::select! {
+            changed = updates.policies.changed() => changed?,
+            changed = updates.authority.changed() => changed?,
+        }
     }
 }
 

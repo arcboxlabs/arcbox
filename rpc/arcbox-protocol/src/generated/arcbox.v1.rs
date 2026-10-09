@@ -3846,13 +3846,16 @@ pub struct OpenMachineWebRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OpenMachineWebResponse {}
-/// Replaces the complete policy. The first revision is positive; later revisions increase.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+/// Replaces the complete policy and public root. Revisions are positive and strictly increase.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReplaceMachineWebRequest {
     #[prost(uint64, tag = "1")]
     pub source_revision: u64,
     #[prost(message, optional, tag = "2")]
     pub ports: ::core::option::Option<MachineWebPorts>,
+    /// Absence disables managed certificate issuance without changing guest client trust.
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub ca_certificate_pem: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Confirms validated session configuration, not installed routing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

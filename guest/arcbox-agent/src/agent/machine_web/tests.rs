@@ -4,6 +4,8 @@ use super::*;
 use arcbox_connect::v1::{MachineWebPorts, WebPortPolicy, web_port_policy::Selection};
 use arcbox_dns::registry::Lookup;
 
+const CA_PEM: &[u8] = include_bytes!("../linux/rpc/guest_trust_ca.pem");
+
 fn receiver() -> Receiver {
     let registry = DnsRegistry::default();
     Receiver::new(registry.clone(), WebServices::new(registry))
