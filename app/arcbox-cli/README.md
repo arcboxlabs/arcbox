@@ -94,6 +94,7 @@ and `setup status` exit nonzero when their report is unhealthy or incomplete.
 A check that could not be run is reported as `unknown` rather than failed —
 `doctor` counts it separately and `setup status` still exits zero, because a
 login-shell probe that times out says nothing about the integration itself.
+On macOS, `doctor` includes the daemon's cached local CA status without requesting authorization. A CA that needs trust, renewal, or repair appears as `warning`, counted in `summary.warnings`; warnings do not change the exit code. Missing or incomplete daemon status remains `unknown`. This certificate check does not probe DNS, HTTPS routing, or application traffic.
 Drift the daemon repairs on its next start is likewise reported as a detail,
 not as an incomplete cache: `boot status` says so for a runtime binary missing
 its executable bit instead of asking for a re-download.

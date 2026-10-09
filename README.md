@@ -309,6 +309,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   and certificate trust require separate administrator authorization.
   The host verifies container DNS ownership before and after each signature.
   Run `abctl tls status --json` to inspect trust, certificate lifetime, and the public CA fingerprint without changing trust. The certificate state distinguishes expiry, renewal within 30 days, and a Mac clock before the certificate's validity period.
+  `abctl doctor` includes the daemon's CA status and repair guidance. Optional HTTPS warnings do not fail the runtime health report or request authorization.
   Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
   Run `abctl tls repair` to restore a missing or damaged public CA file from the current Keychain identity without changing trust. Repair preserves different certificates and rejects ambiguous identities.
   Run `abctl tls rotate` to replace the root through native authorization. New roots cover `.local` DNS names; existing roots retain their narrower scope until rotation. See [local HTTPS](docs/local-https.md) for domain support and security boundaries.
