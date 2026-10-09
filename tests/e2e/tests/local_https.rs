@@ -17,7 +17,9 @@ use arcbox_e2e::docker::{
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_grpc::SystemServiceClient;
 use arcbox_local_ca::KeychainAuthority;
-use arcbox_protocol::v1::{Empty, local_https_status::TrustState, web_service::HttpsMode};
+use arcbox_protocol::v1::{
+    Empty, ListWebServicesRequest, local_https_status::TrustState, web_service::HttpsMode,
+};
 
 const MARKER: &str = "keychain-https-ok";
 
@@ -191,7 +193,10 @@ fn verify_service_directory(socket: &Path, container_name: &str, compose_name: &
         .build()?
         .block_on(async {
             let mut client = SystemServiceClient::new(connect_unix(socket).await?);
-            let listing = client.list_web_services(Empty {}).await?.into_inner();
+            let listing = client
+                .list_web_services(ListWebServicesRequest::default())
+                .await?
+                .into_inner();
             let service = listing
                 .services
                 .iter()
