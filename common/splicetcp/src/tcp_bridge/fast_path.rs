@@ -209,14 +209,11 @@ impl TcpBridge {
         // Write payload to host stream (if any). The invariant that keeps
         // uploads lossless: `last_ack` advances ONLY over bytes actually
         // written, in order, to the host socket. Everything else
-        // (WouldBlock, the unwritten tail of a short write) stays un-ACKed,
-        // so the guest's own fast-retransmit/RTO machinery repairs the
-        // stream — dup-ACKs from the fall-through below are the recovery
-        // signal. ACKing past unwritten bytes is how uploads silently lost
-        // data (2026-07-19). Out-of-order segments are parked un-ACKed in
-        // `ooo_segs` and written once the hole before them fills — parking
-        // (vs the old drop) is what keeps one lost frame from forcing the
-        // guest to retransmit the entire in-flight window.
+        // (WouldBlock, the unwritten tail of a short write) stays un-ACKed
+        // and is retained for a later poll. Future segments stay parked
+        // until the missing prefix arrives; only evicted bytes require
+        // guest retransmission. ACKing past unwritten bytes would silently
+        // lose data.
         let mut in_order_advanced = false;
         if payload_len > 0 {
             use std::io::Write;
@@ -241,7 +238,7 @@ impl TcpBridge {
                     // last_ack alone — the ACK below is a dup-ACK, which is
                     // exactly what makes the guest fast-retransmit the gap.
                     conn.up_out_of_order += 1;
-                    conn.buffer_ooo_segment(guest_seq, &frame[payload_start..payload_end]);
+                    conn.buffer_upload_segment(guest_seq, &frame[payload_start..payload_end]);
                 } else {
                     let fresh = &frame[payload_start + overlap as usize..payload_end];
                     match conn.stream.write(fresh) {
@@ -250,17 +247,13 @@ impl TcpBridge {
                             conn.set_last_ack(conn.last_ack.wrapping_add(n as u32));
                             in_order_advanced = true;
                             if n < fresh.len() {
-                                // Host socket buffer filled mid-segment: ACK
-                                // covers only what was written; the guest
-                                // retransmits the tail.
                                 conn.up_short_writes += 1;
+                                conn.buffer_upload_segment(conn.last_ack, &fresh[n..]);
                             }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // Nothing written, nothing ACKed. Fall through to
-                            // the dup-ACK so the guest fast-retransmits once
-                            // the socket drains, instead of waiting out RTO.
                             conn.up_would_block += 1;
+                            conn.buffer_upload_segment(conn.last_ack, fresh);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                             // Peer closed; inject already relayed FIN. ACK at
@@ -434,24 +427,52 @@ impl TcpBridge {
         let dead_flow_timeout = self.dead_flow_timeout;
 
         for (key, conn) in &mut self.fast_path_conns {
+            // Failed inline readers mark the shared stream dead before poll reaps it.
+            if conn
+                .dead
+                .as_ref()
+                .is_some_and(|d| d.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                to_remove.push(*key);
+                continue;
+            }
+            let previous_ack = conn.last_ack;
+            if !conn.ooo_segs.is_empty()
+                && let Err(e) = conn.drain_parked_segments()
+            {
+                tracing::warn!("Fast path TX drain error, RST to guest: {e}");
+                frames.push(crate::ethernet::build_tcp_rst_frame(
+                    &crate::ethernet::TcpFrameParams {
+                        src_ip: conn.remote_ip,
+                        dst_ip: conn.guest_ip,
+                        src_port: conn.remote_port,
+                        dst_port: conn.guest_port,
+                        seq: conn.our_seq.load(std::sync::atomic::Ordering::Relaxed),
+                        ack: conn.last_ack,
+                        window: 0,
+                        src_mac: gw_mac,
+                        dst_mac: guest_mac,
+                    },
+                ));
+                to_remove.push(*key);
+                continue;
+            }
+            if conn.last_ack != previous_ack {
+                frames.push(crate::ethernet::build_tcp_ack_frame(
+                    &crate::ethernet::TcpFrameParams {
+                        src_ip: conn.remote_ip,
+                        dst_ip: conn.guest_ip,
+                        src_port: conn.remote_port,
+                        dst_port: conn.guest_port,
+                        seq: conn.our_seq.load(std::sync::atomic::Ordering::Relaxed),
+                        ack: conn.last_ack,
+                        window: 65535,
+                        src_mac: gw_mac,
+                        dst_mac: guest_mac,
+                    },
+                ));
+            }
             if conn.inline_owned {
-                // The inline inject thread owns the socket. It marks the
-                // flow dead only after RST-terminating the guest on an
-                // upstream ERROR — reap the entry here, since the guest
-                // sends no further frames for it (ABX-431). After a clean
-                // EOF the flag stays unset and the entry survives so the
-                // guest's ACK/FIN and half-close writes still reach
-                // try_fast_path_intercept (parity with the non-inline
-                // path's host_eof handling).
-                if conn
-                    .dead
-                    .as_ref()
-                    .is_some_and(|d| d.load(std::sync::atomic::Ordering::Relaxed))
-                {
-                    to_remove.push(*key);
-                    continue;
-                }
-
                 // Zero-window persist for the inline path. The inject thread /
                 // direct_rx reader stops reading at a zero send budget and can't
                 // probe on its own, so a lost guest window-update ACK would

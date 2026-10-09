@@ -347,14 +347,14 @@ pub(super) struct FastPathConn {
     guest_window: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Upload-path recovery counters (reported at flow close): segments
     /// the host socket wouldn't take, segments it took partially, and
-    /// segments that arrived beyond the contiguous cursor. All three
-    /// recover via guest retransmission; they quantify backpressure, not loss.
+    /// segments that arrived beyond the contiguous cursor. Retained bytes
+    /// recover in poll; missing or evicted bytes require guest retransmission.
     up_would_block: u64,
     up_short_writes: u64,
     up_out_of_order: u64,
-    /// Upload segments that arrived beyond the contiguous cursor, parked
-    /// until the hole before them fills: `(guest_seq, payload)`, ordered by
-    /// wrapping distance from `last_ack`. Parking turns one lost frame into
+    /// Upload segments awaiting a missing prefix or host socket capacity:
+    /// `(guest_seq, payload)`, ordered by signed wrapping distance from
+    /// `last_ack`. Parking turns one lost frame into
     /// one guest retransmission; dropping (the pre-2026-07 behavior) made
     /// recovery go-back-N across the whole 8 MiB advertised window, which
     /// collapsed docker-bridge uploads to tens of Mbit/s. A deque so the
@@ -411,8 +411,8 @@ pub(super) struct FastPathConn {
     /// silently drops FIN_WAIT2) can't leak the bridge entry and host fd.
     guest_fin_at: Option<StdInstant>,
     /// True if the socket has been cloned to the inline inject thread.
-    /// poll_fast_path() skips connections with this flag — the inject
-    /// thread reads directly from the cloned socket.
+    /// poll_fast_path() skips socket reads for these connections; upload
+    /// retries and recovery still run while the inject thread owns reads.
     inline_owned: bool,
     /// Guest→host (client→server) bytes forwarded on this flow.
     up_bytes: u64,
@@ -456,50 +456,62 @@ impl FastPathConn {
         }
     }
 
-    /// Parks an upload segment that arrived beyond the contiguous cursor
-    /// (caller guarantees `seq` is strictly ahead of `last_ack`).
+    /// Parks an upload segment at or ahead of the contiguous cursor.
     /// Deduplicates same-seq arrivals and enforces [`OOO_REASSEMBLY_CAP`]
     /// on both total parked bytes and how far past the cursor a segment
     /// may start. Parking never ACKs: `last_ack` still advances only over
     /// bytes actually written to the host socket, in
     /// [`Self::drain_parked_segments`].
-    pub(super) fn buffer_ooo_segment(&mut self, seq: u32, payload: &[u8]) {
+    /// A contiguous tail takes priority over future segments when a cap is
+    /// reached, so retained future bytes cannot prevent progress.
+    pub(super) fn buffer_upload_segment(&mut self, seq: u32, payload: &[u8]) {
         let base = self.last_ack;
-        let rel = seq.wrapping_sub(base) as usize;
+        let rel = seq.wrapping_sub(base);
+        // A short-written front starts behind the cursor but must stay first.
         let idx = self
             .ooo_segs
-            .partition_point(|(s, _)| (s.wrapping_sub(base) as usize) < rel);
+            .partition_point(|(s, _)| s.wrapping_sub(base).cast_signed() < rel.cast_signed());
         let replaces_existing = matches!(self.ooo_segs.get(idx), Some((s, _)) if *s == seq);
-        if rel.saturating_add(payload.len()) > OOO_REASSEMBLY_CAP
-            || self.ooo_bytes.saturating_add(payload.len()) > OOO_REASSEMBLY_CAP
-            // A new distinct segment past the count cap is dropped; an
-            // in-place replacement of a parked seq does not grow the count.
-            || (!replaces_existing && self.ooo_segs.len() >= OOO_MAX_SEGMENTS)
+        let replaced_bytes = if replaces_existing {
+            self.ooo_segs[idx].1.len()
+        } else {
+            0
+        };
+        if replaced_bytes >= payload.len() {
+            return;
+        }
+        let exceeds_cap = self.ooo_bytes - replaced_bytes + payload.len() > OOO_REASSEMBLY_CAP
+            || (!replaces_existing && self.ooo_segs.len() >= OOO_MAX_SEGMENTS);
+        if (rel as usize).saturating_add(payload.len()) > OOO_REASSEMBLY_CAP
+            || (rel > 0 && exceeds_cap)
         {
             self.up_ooo_dropped += 1;
             return;
         }
-        if replaces_existing {
-            // Same start seq already parked: keep whichever is longer (a
-            // retransmit may carry more data), never write the shorter twice.
-            if self.ooo_segs[idx].1.len() >= payload.len() {
-                return;
-            }
-            if let Some((_, old)) = self.ooo_segs.remove(idx) {
-                self.ooo_bytes -= old.len();
-            }
+        if replaces_existing && let Some((_, old)) = self.ooo_segs.remove(idx) {
+            self.ooo_bytes -= old.len();
+        }
+        while self.ooo_bytes + payload.len() > OOO_REASSEMBLY_CAP
+            || self.ooo_segs.len() >= OOO_MAX_SEGMENTS
+        {
+            let (_, old) = self
+                .ooo_segs
+                .pop_back()
+                .expect("the admitted payload fits in an empty queue");
+            self.ooo_bytes -= old.len();
+            self.up_ooo_dropped += 1;
         }
         self.ooo_bytes += payload.len();
-        self.ooo_segs.insert(idx, (seq, payload.to_vec()));
+        self.ooo_segs
+            .insert(idx.min(self.ooo_segs.len()), (seq, payload.to_vec()));
     }
 
     /// Writes parked out-of-order segments that the advanced `last_ack` now
     /// reaches, in sequence order, with the same partial-take semantics as
     /// the in-order path: the cursor advances only over bytes the host
     /// socket accepted. Stops at the first remaining hole, `WouldBlock`, or
-    /// short take — whatever stays parked is re-driven by the guest's
-    /// retransmission machinery (an arriving retransmit re-enters this
-    /// drain). A hard write error propagates for the caller's RST teardown.
+    /// short take. The poll path retries retained bytes when the host socket
+    /// drains. A hard write error propagates for the caller's RST teardown.
     pub(super) fn drain_parked_segments(&mut self) -> std::io::Result<()> {
         use std::io::Write;
         while let Some(&(seq, ref data)) = self.ooo_segs.front() {
