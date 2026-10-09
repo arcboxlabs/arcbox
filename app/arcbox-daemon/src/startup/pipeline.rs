@@ -186,6 +186,18 @@ impl RuntimeBooted {
         // Kubernetes endpoint is also required; the canonical best-effort
         // 16443 listener may remain unavailable. An explicitly requested DNS
         // resolver is installed before this phase.
+        use arcbox_connect::v1::system_runtime_status::State;
+        let (state, reason) = if !linux_vm {
+            (State::Disabled, "System VM is disabled")
+        } else if self.runtime.machine_manager().storage_is_held()? {
+            (
+                State::Failed,
+                "System VM storage is protected; use storage recovery",
+            )
+        } else {
+            (State::Ready, "Docker runtime ready")
+        };
+        self.ctx.setup_state.set_system_runtime(state, reason);
         self.ctx
             .setup_state
             .set_phase(SetupPhase::NetworkReady, "Network services ready");

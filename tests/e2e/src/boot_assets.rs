@@ -572,8 +572,7 @@ fn setup_test_env(ctx: &TestContext) -> Result<()> {
     stage_dev_boot_assets(&ctx.root, &ctx.test_dir, &ctx.version)
 }
 
-/// Spawns the daemon and blocks until it reports READY on the setup
-/// status stream — VM booted, agent up, services started.
+/// Spawns the daemon and waits for host and System runtime READY on the setup stream.
 fn start_daemon(ctx: &mut TestContext) -> Result<()> {
     info!(backend = ?ctx.backend, "starting daemon");
     let mut env = vec![("ARCBOX_BOOT_ASSET_VERSION".to_owned(), ctx.version.clone())];

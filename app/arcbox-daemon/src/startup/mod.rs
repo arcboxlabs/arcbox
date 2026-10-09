@@ -307,14 +307,15 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     // client cannot infer from anything else, so the runtime reports its
     // milestones from inside and they are published as they arrive.
     runtime
-        .init(|milestone| match milestone {
-            InitProgress::SystemVmStarting => ctx
-                .setup_state
-                .set_phase(SetupPhase::VmStarting, "Starting the Linux VM…"),
-            InitProgress::SystemVmReady => ctx.setup_state.set_phase(
-                SetupPhase::VmReady,
-                "Linux VM ready; waiting for the container runtime…",
-            ),
+        .init(|milestone| {
+            use arcbox_connect::v1::system_runtime_status::State;
+            let (state, reason) = match milestone {
+                InitProgress::SystemVmStarting => (State::VmStarting, "Starting the System VM"),
+                InitProgress::SystemVmReady => {
+                    (State::VmReady, "System VM ready; waiting for Docker")
+                }
+            };
+            ctx.setup_state.set_system_runtime(state, reason);
         })
         .await
         .context("Failed to initialize runtime")?;

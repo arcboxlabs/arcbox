@@ -279,7 +279,7 @@ async fn start(
     daemon
         .as_mut()
         .context("spawned test daemon")?
-        .wait_ready(Duration::from_secs(240))
+        .wait_storage_startup(Duration::from_secs(240))
         .await?;
     Ok(())
 }
