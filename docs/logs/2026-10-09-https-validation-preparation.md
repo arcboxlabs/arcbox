@@ -160,3 +160,9 @@ All six targeted readiness tests pass, including the new cancellation case, stal
 Connect request contexts now accept a daemon cancellation token. Icon lookup and macOS image resolution cancel their read-only HTTP requests. Machine import checks cancellation before preparation and before starting the native import worker; accepted native work remains awaited. Calls without a daemon token preserve their existing behavior.
 
 Both targeted API tests pass: an already-cancelled request never polls its operation, and a real partial HTTP response is disconnected during macOS image resolution. The original direct-call error remains intact. API all-target Clippy with `-D warnings` and workspace formatting pass through devenv. Daemon token delivery and retained handler shutdown are separate integration work; these tests do not start a VM or modify native trust.
+
+## Migration preparation cancellation
+
+Preparation passes one cancellation token to both source and target Docker runners. Cancellation closes output pipes, kills and reaps the direct child, and rejects subsequent commands. Closing pipes prevents a descendant that inherited stdout or stderr from retaining the preparation handler. Command failures still preserve stderr. Migration execution remains a separate owner.
+
+All 38 migration crate tests and 12 Core migration tests pass. The new real-process checks cover source and target cancellation, inherited output pipes, child reaping, later-command rejection, an empty prepared-plan registry, and stderr preservation. Fixtures clean up their own descendants. Strict all-target Clippy and workspace formatting pass through devenv; the two cancellation tests also pass after the native-pointer lint correction. These checks do not run a real migration or start a VM.

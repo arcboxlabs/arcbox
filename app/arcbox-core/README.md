@@ -46,6 +46,8 @@ Capture `Runtime::container_network_incarnation` before querying Kubernetes Serv
 
 ## Architecture
 
+`MigrationManager::prepare_migration` accepts a cancellation token. Cancellation closes command output pipes, kills and reaps the active Docker command, and prevents later planning commands. Callers must cancel and await preparation before releasing its owner. Migration execution has a separate lifecycle.
+
 ```text
 arcbox-api / arcbox-cli
           |

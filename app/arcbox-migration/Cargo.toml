@@ -16,6 +16,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing.workspace = true
 
 [lints]

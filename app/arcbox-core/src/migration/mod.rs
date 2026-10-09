@@ -20,6 +20,7 @@ use std::sync::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -166,10 +167,11 @@ impl MigrationManager {
         }
     }
 
-    /// Prepares a migration plan.
+    /// Prepares a migration plan and joins active Docker commands after cancellation.
     pub async fn prepare_migration(
         &self,
         request: PrepareMigrationRequest,
+        cancelled: CancellationToken,
     ) -> Result<PrepareMigrationResponse> {
         let source_kind = parse_source_kind(&request.source_kind)?;
         let source = resolve_source(
@@ -181,7 +183,7 @@ impl MigrationManager {
             DockerCliRunner::new(self.target_socket.clone()).map_err(map_migration_error)?;
         let planner = MigrationPlanner::new(target_runner);
         let plan = planner
-            .plan(source.clone())
+            .plan(source.clone(), cancelled)
             .await
             .map_err(map_migration_error)?;
 
@@ -430,6 +432,8 @@ fn map_migration_error(error: MigrationError) -> CoreError {
 
 #[cfg(test)]
 mod tests {
+    mod cancellation;
+
     use super::*;
     use arcbox_migration::{MigrationPlan, ReplacementSummary, SourceInfo};
     use buffa::Message as _;
@@ -810,7 +814,7 @@ exit 0
 
         let manager = MigrationManager::new(temp_dir.path().join("arcbox-docker.sock"));
         let response = manager
-            .prepare_migration(prepare_request(&socket, true))
+            .prepare_migration(prepare_request(&socket, true), CancellationToken::new())
             .await;
 
         restore_path(previous_path);
@@ -840,7 +844,7 @@ exit 0
 
         let manager = MigrationManager::new(temp_dir.path().join("arcbox-docker.sock"));
         let response = manager
-            .prepare_migration(prepare_request(&socket, false))
+            .prepare_migration(prepare_request(&socket, false), CancellationToken::new())
             .await;
 
         restore_path(previous_path);
@@ -874,7 +878,7 @@ exit 0
 
         let manager = MigrationManager::new(temp_dir.path().join("arcbox-docker.sock"));
         let response = manager
-            .prepare_migration(prepare_request(&socket, false))
+            .prepare_migration(prepare_request(&socket, false), CancellationToken::new())
             .await;
 
         restore_path(previous_path);

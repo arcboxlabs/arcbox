@@ -13,6 +13,7 @@ use crate::model::{
 };
 use crate::runner::DockerCliRunner;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use tokio_util::sync::CancellationToken;
 
 /// Builds migration plans from source and target Docker daemons.
 #[derive(Debug, Clone)]
@@ -27,18 +28,22 @@ impl MigrationPlanner {
         Self { target }
     }
 
-    /// Plans a migration from the provided source into the configured target.
-    pub async fn plan(&self, source: SourceConfig) -> Result<MigrationPlan> {
-        let source_runner = DockerCliRunner::new(source.socket_path.clone())?;
+    /// Plans a migration and reaps active Docker commands when cancellation is requested.
+    pub async fn plan(
+        &self,
+        source: SourceConfig,
+        cancelled: CancellationToken,
+    ) -> Result<MigrationPlan> {
+        let source_runner = DockerCliRunner::new(source.socket_path.clone())?
+            .with_command_cancellation(cancelled.clone());
+        let target = self.target.clone().with_command_cancellation(cancelled);
 
         let source_info = source_runner.info().await?;
-        let target_images = self.target.list_images().await?;
+        let target_images = target.list_images().await?;
         let target_image_tags = collect_target_tags(&target_images);
-        let target_volumes =
-            collect_names(self.target.list_volumes().await?, |volume| &volume.name);
-        let target_networks =
-            collect_names(self.target.list_networks().await?, |network| &network.name);
-        let target_containers = collect_names(self.target.list_containers().await?, |container| {
+        let target_volumes = collect_names(target.list_volumes().await?, |volume| &volume.name);
+        let target_networks = collect_names(target.list_networks().await?, |network| &network.name);
+        let target_containers = collect_names(target.list_containers().await?, |container| {
             trimmed_name(container)
         });
 
