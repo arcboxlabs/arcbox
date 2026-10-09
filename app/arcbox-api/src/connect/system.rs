@@ -53,6 +53,7 @@ impl SetupState {
         let initial = SetupStatus {
             phase: setup_status::Phase::Initializing.into(),
             message: "Daemon starting...".to_string(),
+            system_runtime: pb::SystemRuntimeStatus::default().into(),
             ..Default::default()
         };
         let (tx, _) = watch::channel(initial);
@@ -94,6 +95,18 @@ impl SetupState {
             s.phase = setup_status::Phase::Failed.into();
             "Daemon startup failed".clone_into(&mut s.message);
             error.clone_into(&mut s.error);
+        });
+    }
+
+    /// Publishes System readiness without changing host admission or HTTPS status.
+    pub fn set_system_runtime(&self, state: pb::system_runtime_status::State, reason: &str) {
+        self.publish(|s| {
+            s.system_runtime = pb::SystemRuntimeStatus {
+                state: state.into(),
+                reason: reason.to_owned(),
+                ..Default::default()
+            }
+            .into();
         });
     }
 
@@ -779,6 +792,7 @@ mod tests {
     fn https_authorization_does_not_change_docker_readiness() {
         let state = SetupState::new();
         state.set_phase(setup_status::Phase::Ready, "ready");
+        state.set_system_runtime(pb::system_runtime_status::State::Ready, "");
         state.set_vm_running(true);
         let (_, mut updates) = state.subscribe();
         for trust in [
@@ -792,8 +806,56 @@ mod tests {
             });
             let update = updates.try_recv().unwrap();
             assert_eq!(update.phase, setup_status::Phase::Ready);
+            assert_eq!(
+                update.system_runtime.state,
+                pb::system_runtime_status::State::Ready
+            );
             assert!(update.vm_running);
             assert_eq!(update.local_https.trust_state, trust);
         }
+    }
+
+    #[test]
+    fn system_failure_preserves_host_https_and_storage_status() {
+        use pb::system_runtime_status::State;
+
+        let state = SetupState::new();
+        assert_eq!(
+            state.current().system_runtime.state,
+            State::StateUnspecified
+        );
+        state.set_phase(setup_status::Phase::Ready, "host ready");
+        state.set_local_https(pb::LocalHttpsStatus {
+            trust_state: pb::local_https_status::TrustState::Trusted.into(),
+            ..Default::default()
+        });
+        state.set_storage_recovery(pb::StorageRecoveryProgress {
+            storage_protected: true,
+            ..Default::default()
+        });
+        let (before, mut updates) = state.subscribe();
+
+        for (system, reason) in [
+            (State::Disabled, ""),
+            (State::Starting, "preparing System assets"),
+            (State::VmStarting, "booting System VM"),
+            (State::VmReady, "waiting for Docker"),
+            (State::Failed, "storage recovery required"),
+            (State::Ready, ""),
+        ] {
+            state.set_system_runtime(system, reason);
+            let update = updates.try_recv().unwrap();
+            assert_eq!(update.system_runtime.state, system);
+            assert_eq!(update.system_runtime.reason, reason);
+            assert_eq!(update.phase, before.phase);
+            assert_eq!(update.message, before.message);
+            assert_eq!(update.error, before.error);
+            assert_eq!(update.local_https, before.local_https);
+            assert_eq!(update.storage_recovery, before.storage_recovery);
+            assert_eq!(state.current(), update);
+        }
+        let (snapshot, mut after) = state.subscribe();
+        assert_eq!(snapshot.system_runtime.state, State::Ready);
+        assert!(after.try_recv().is_err());
     }
 }

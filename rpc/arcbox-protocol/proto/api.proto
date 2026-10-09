@@ -1162,6 +1162,30 @@ message SetupStatus {
     StorageRecoveryProgress storage_recovery = 10;
     // Local HTTPS trust does not gate VM or Docker readiness.
     LocalHttpsStatus local_https = 11;
+    // System runtime admission is independent of host and local HTTPS readiness.
+    SystemRuntimeStatus system_runtime = 12;
+}
+
+// Readiness of the System VM and its dependent services.
+message SystemRuntimeStatus {
+    enum State {
+        STATE_UNSPECIFIED = 0;
+        // System VM autostart is disabled.
+        DISABLED = 1;
+        // System VM assets and runtime binaries are being prepared.
+        STARTING = 2;
+        // System services accept requests.
+        READY = 3;
+        // System startup or operation failed. Host services remain available.
+        FAILED = 4;
+        // Guest binaries are staged and the System VM is booting.
+        VM_STARTING = 5;
+        // The guest agent answered. Docker runtime readiness is still pending.
+        VM_READY = 6;
+    }
+    State state = 1;
+    // Failure cause or current startup detail. Empty when no detail applies.
+    string reason = 2;
 }
 
 // Explicitly starts a storage check or recovery. Both actions stop workloads.

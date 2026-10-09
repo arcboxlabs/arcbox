@@ -7,6 +7,7 @@
 //! - inspect daemon status (`abctl daemon status`)
 
 use anyhow::{Context, Result, bail};
+use arcbox_connect::v1 as pb;
 use arcbox_constants::{
     container_network::ContainerNetwork,
     dns::Domain,
@@ -231,10 +232,10 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
     } else {
         "n/a".to_string()
     };
-    let grpc_responsive = if running {
-        grpc_daemon_is_responsive(grpc_socket).await
+    let setup = if running {
+        Some(daemon_setup_status(grpc_socket).await)
     } else {
-        false
+        None
     };
 
     println!("ArcBox daemon status: {status}");
@@ -247,26 +248,64 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
     println!("Uptime: {uptime}");
     println!(
         "gRPC responsive: {}",
-        if grpc_responsive { "yes" } else { "no" }
+        if setup.as_ref().is_some_and(Result::is_ok) {
+            "yes"
+        } else {
+            "no"
+        }
     );
+    if let Some(setup) = setup {
+        match setup {
+            Ok(status) => println!("{}", render_startup_status(&status)),
+            Err(error) => println!("Startup status unavailable: {error:#}"),
+        }
+    }
     Ok(())
 }
 
-async fn grpc_daemon_is_responsive(socket_path: &Path) -> bool {
-    if !socket_path.exists() {
-        return false;
-    }
-
-    // Eager rather than lazy on purpose: this asks whether a daemon is
-    // actually there, so the h2c handshake has to happen now.
-    let connect_future = connectrpc::client::Http2Connection::connect_unix(
-        socket_path.to_path_buf(),
-        "http://localhost".parse().expect("static authority parses"),
-    );
-    matches!(
-        timeout(Duration::from_secs(2), connect_future).await,
-        Ok(Ok(_))
+async fn daemon_setup_status(socket_path: &Path) -> Result<pb::SetupStatus> {
+    let (transport, config) = crate::connect::daemon(socket_path);
+    let client = pb::SystemServiceClient::new(transport, config);
+    Ok(timeout(
+        Duration::from_secs(2),
+        client.get_setup_status(pb::Empty::default()),
     )
+    .await
+    .context("daemon status query timed out")?
+    .context("daemon status query failed")?
+    .into_owned())
+}
+
+fn render_startup_status(status: &pb::SetupStatus) -> String {
+    use pb::{setup_status::Phase, system_runtime_status::State};
+    let host = match status.phase.as_known() {
+        Some(Phase::Ready) => "ready",
+        Some(Phase::Failed) => "failed",
+        Some(Phase::PhaseUnspecified) | None => "unknown",
+        _ => "starting",
+    };
+    let mut output = vec![format!("Host services: {host}")];
+    if !status.error.is_empty() {
+        output.push(format!("Host error: {}", status.error));
+    }
+    let Some(system) = status.system_runtime.as_option() else {
+        output.push("System runtime: unknown".into());
+        return output.join("\n");
+    };
+    let state = match system.state.as_known() {
+        Some(State::Disabled) => "disabled",
+        Some(State::Starting) => "preparing",
+        Some(State::VmStarting) => "starting VM",
+        Some(State::VmReady) => "VM ready; waiting for Docker",
+        Some(State::Ready) => "ready",
+        Some(State::Failed) => "failed",
+        Some(State::StateUnspecified) | None => "unknown",
+    };
+    output.push(format!("System runtime: {state}"));
+    if !system.reason.is_empty() {
+        output.push(format!("System detail: {}", system.reason));
+    }
+    output.join("\n")
 }
 
 fn lock_file_uptime(lock_file: &Path) -> Option<Duration> {
@@ -566,13 +605,34 @@ fn send_sigterm(pid: i32) -> Result<()> {
 mod tests {
     use super::{
         DaemonAction, DaemonArgs, SpawnLock, build_daemon_args, read_lock_file,
-        wait_for_lock_handoff,
+        render_startup_status, wait_for_lock_handoff,
     };
+    use arcbox_connect::v1 as pb;
     use arcbox_constants::paths::ArcboxProfile;
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::io::AsRawFd;
     use tempfile::tempdir;
+
+    #[test]
+    fn status_keeps_host_readiness_separate_from_system_failure() {
+        let mut status = pb::SetupStatus {
+            phase: pb::setup_status::Phase::Ready.into(),
+            system_runtime: pb::SystemRuntimeStatus {
+                state: pb::system_runtime_status::State::Failed.into(),
+                reason: "guest storage unavailable".into(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let rendered = render_startup_status(&status);
+        assert!(rendered.contains("Host services: ready"));
+        assert!(rendered.contains("System runtime: failed"));
+        assert!(rendered.contains("guest storage unavailable"));
+        status.system_runtime = None.into();
+        assert!(render_startup_status(&status).contains("System runtime: unknown"));
+    }
 
     fn flock_nb(file: &fs::File) -> bool {
         // SAFETY: flock on a valid fd owned by the test.

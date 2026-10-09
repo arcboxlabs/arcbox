@@ -42,6 +42,7 @@ abctl migrate from orbstack --no-start         # recreate but leave stopped
 # Daemon management
 abctl daemon start              # Start daemon in background
 abctl daemon stop               # Stop daemon
+abctl daemon status             # Show host and System runtime readiness
 abctl info                      # System info
 abctl version                   # Version info
 

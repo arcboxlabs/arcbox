@@ -162,7 +162,8 @@ pub mod api {
         ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess,
         LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest, PruneResponse,
         ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
-        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
+        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, SystemRuntimeStatus,
+        WebService, system_runtime_status,
     };
 
     // Volume service types
@@ -254,7 +255,7 @@ pub use v1::{
     ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
     PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
     ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
-    SystemPingResponse, WebService,
+    SystemPingResponse, SystemRuntimeStatus, WebService, system_runtime_status,
 };
 
 // API types - Volume

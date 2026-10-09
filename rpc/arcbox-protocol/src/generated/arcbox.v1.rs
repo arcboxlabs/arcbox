@@ -1417,6 +1417,9 @@ pub struct SetupStatus {
     /// Local HTTPS trust does not gate VM or Docker readiness.
     #[prost(message, optional, tag = "11")]
     pub local_https: ::core::option::Option<LocalHttpsStatus>,
+    /// System runtime admission is independent of host and local HTTPS readiness.
+    #[prost(message, optional, tag = "12")]
+    pub system_runtime: ::core::option::Option<SystemRuntimeStatus>,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
@@ -1502,6 +1505,65 @@ pub mod setup_status {
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 "CLEANING_UP" => Some(Self::CleaningUp),
                 "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Readiness of the System VM and its dependent services.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SystemRuntimeStatus {
+    #[prost(enumeration = "system_runtime_status::State", tag = "1")]
+    pub state: i32,
+    /// Failure cause or current startup detail. Empty when no detail applies.
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `SystemRuntimeStatus`.
+pub mod system_runtime_status {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum State {
+        Unspecified = 0,
+        /// System VM autostart is disabled.
+        Disabled = 1,
+        /// System VM assets and runtime binaries are being prepared.
+        Starting = 2,
+        /// System services accept requests.
+        Ready = 3,
+        /// System startup or operation failed. Host services remain available.
+        Failed = 4,
+        /// Guest binaries are staged and the System VM is booting.
+        VmStarting = 5,
+        /// The guest agent answered. Docker runtime readiness is still pending.
+        VmReady = 6,
+    }
+    impl State {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STATE_UNSPECIFIED",
+                Self::Disabled => "DISABLED",
+                Self::Starting => "STARTING",
+                Self::Ready => "READY",
+                Self::Failed => "FAILED",
+                Self::VmStarting => "VM_STARTING",
+                Self::VmReady => "VM_READY",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "DISABLED" => Some(Self::Disabled),
+                "STARTING" => Some(Self::Starting),
+                "READY" => Some(Self::Ready),
+                "FAILED" => Some(Self::Failed),
+                "VM_STARTING" => Some(Self::VmStarting),
+                "VM_READY" => Some(Self::VmReady),
                 _ => None,
             }
         }
