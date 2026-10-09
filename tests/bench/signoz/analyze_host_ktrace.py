@@ -81,6 +81,8 @@ def analyze(trace, prefix, targets):
                 if tid in targets:
                     seen_targets.setdefault(tid, set()).add((row[9], row[10]))
                 relevant = tid in targets
+                if base in {0x01400018, 0x01400080}:
+                    relevant = relevant or int(row[3]) in targets
                 if base in SWITCHES:
                     incoming = int(row[4])
                     tracker.add(ts, cpu, tid, incoming)
