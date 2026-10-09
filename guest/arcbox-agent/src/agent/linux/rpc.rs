@@ -56,7 +56,7 @@ pub(super) async fn handle_connection<S>(
     peer_cid: u32,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Assign before Ping: reconnecting must not let buffered older updates win.
     let trust_order = if peer_cid == tokio_vsock::VMADDR_CID_HOST && guest != Guest::StorageRecovery
@@ -205,7 +205,7 @@ where
                 if let Some(receiver) = &services.machine_web {
                     return receiver
                         .serve(
-                            &mut stream,
+                            stream,
                             &trace_id,
                             request,
                             super::system_info::bridge_ipv4(),

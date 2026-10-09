@@ -9,6 +9,7 @@ use arcbox_dns::{NamePattern, claims::Claim};
 use arcbox_local_ca::PublicAuthority;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::DnsRegistry;
 use crate::domains::{EndpointFacts, WebServices};
@@ -84,39 +85,69 @@ impl Receiver {
         state.active = true;
         Ok(Some(Session {
             receiver: self.clone(),
+            cancel: CancellationToken::new(),
         }))
     }
 
-    pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         &self,
-        stream: &mut S,
+        mut stream: S,
         trace: &str,
         open: OpenMachineWebRequest,
         bridge: Option<Ipv4Addr>,
     ) -> Result<()> {
         let Some(session) = self.open(open, bridge)? else {
             return write_response(
-                stream,
+                &mut stream,
                 &RpcResponse::Error(ErrorResponse::new(409, "machine web connection is busy")),
                 trace,
             )
             .await;
         };
-        let result: Result<()> = async {
+        let session = Arc::new(session);
+        let _connection = Connection(Arc::clone(&session));
+        let trace = trace.to_owned();
+        // The owned task finishes shutdown even when the RPC caller is canceled.
+        tokio::spawn(async move { session.serve(stream, &trace).await })
+            .await
+            .context("machine web connection task failed")?
+    }
+}
+
+struct Connection(Arc<Session>);
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.withdraw();
+    }
+}
+
+struct Session {
+    receiver: Receiver,
+    cancel: CancellationToken,
+}
+
+impl Session {
+    async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        mut stream: S,
+        trace: &str,
+    ) -> Result<()> {
+        let protocol = async {
             write_response(
-                stream,
+                &mut stream,
                 &RpcResponse::OpenMachineWeb(Default::default()),
                 trace,
             )
             .await?;
             loop {
-                let (kind, trace, payload) = read_message(stream).await?;
+                let (kind, trace, payload) = read_message(&mut stream).await?;
                 let RpcRequest::ReplaceMachineWeb(request) = parse_request(kind, &payload)? else {
                     anyhow::bail!("machine web connection requires a complete replacement");
                 };
-                let source_revision = session.replace(request)?;
+                let source_revision = self.replace(request)?;
                 write_response(
-                    stream,
+                    &mut stream,
                     &RpcResponse::MachineWebAck(MachineWebAck {
                         source_revision,
                         ..Default::default()
@@ -125,13 +156,18 @@ impl Receiver {
                 )
                 .await?;
             }
-        }
-        .await;
-        session.withdraw();
+        };
+        let result: Result<()> = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => Ok(()),
+            result = protocol => result,
+        };
+        self.withdraw();
         let shutdown = stream
             .shutdown()
             .await
-            .context("shut down machine web connection");
+            .context("shut down machine web connection")
+            .inspect_err(|error| tracing::error!(%error, "machine web shutdown failed"));
         // Retain exclusivity until the real stream has finished shutdown.
         match (result, shutdown) {
             (Err(error), Err(shutdown)) => {
@@ -141,13 +177,6 @@ impl Receiver {
             (Ok(()), Ok(())) => Ok(()),
         }
     }
-}
-
-struct Session {
-    receiver: Receiver,
-}
-
-impl Session {
     fn replace(&self, request: ReplaceMachineWebRequest) -> Result<u64> {
         let mut state = self
             .receiver
@@ -157,7 +186,7 @@ impl Session {
         let configuration = state
             .configuration
             .as_mut()
-            .expect("session owns configuration");
+            .context("machine web session ended")?;
         let revision = request.source_revision;
         ensure!(
             revision > configuration.source_revision,
@@ -191,6 +220,7 @@ impl Session {
         }
         self.receiver.web.clear();
         self.receiver.authority.send_replace(None);
+        self.cancel.cancel();
     }
 }
 

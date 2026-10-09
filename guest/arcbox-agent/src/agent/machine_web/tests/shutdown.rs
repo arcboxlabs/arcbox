@@ -50,6 +50,15 @@ struct ShutdownGate {
     stream: UnixStream,
     entered: Option<oneshot::Sender<()>>,
     resume: Option<oneshot::Receiver<()>>,
+    closed: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for ShutdownGate {
+    fn drop(&mut self) {
+        if let Some(closed) = self.closed.take() {
+            let _ = closed.send(());
+        }
+    }
 }
 
 impl AsyncRead for ShutdownGate {
@@ -169,6 +178,17 @@ fn a_new_revision_with_identical_policies_invalidates_installed_routes() {
 
 #[tokio::test]
 async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_finishes() {
+    check_shutdown("eof").await;
+}
+
+#[tokio::test]
+async fn canceled_caller_withdraws_but_retains_admission_until_owned_shutdown_finishes() {
+    for phase in ["read", "shutdown"] {
+        check_shutdown(phase).await;
+    }
+}
+
+async fn check_shutdown(phase: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         let receiver = receiver();
         let directory = receiver.web.directory_source();
@@ -176,16 +196,16 @@ async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_
         let (mut client, stream) = UnixStream::pair().unwrap();
         let (entered, waiting) = oneshot::channel();
         let (resume, released) = oneshot::channel();
+        let (closed, closure) = oneshot::channel();
         let serving = receiver.clone();
-        let task = tokio::spawn(async move {
-            let mut stream = ShutdownGate {
+        let mut task = tokio::spawn(async move {
+            let stream = ShutdownGate {
                 stream,
                 entered: Some(entered),
                 resume: Some(released),
+                closed: Some(closed),
             };
-            serving
-                .serve(&mut stream, "open", open(), Some(bridge()))
-                .await
+            serving.serve(stream, "open", open(), Some(bridge())).await
         });
         let (kind, trace, _) = read_message(&mut client).await.unwrap();
         assert_eq!(kind, MessageType::OpenMachineWebResponse);
@@ -215,8 +235,17 @@ async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_
             PublicAuthority::from_pem(CA_PEM).unwrap().der()
         );
         publish_cleanup_witness(&receiver);
-        client.shutdown().await.unwrap();
+        if phase == "read" {
+            task.abort();
+            assert!((&mut task).await.unwrap_err().is_cancelled());
+        } else {
+            client.shutdown().await.unwrap();
+        }
         waiting.await.unwrap();
+        if phase == "shutdown" {
+            task.abort();
+            assert!((&mut task).await.unwrap_err().is_cancelled());
+        }
         assert!(receiver.state.lock().unwrap().active);
         assert!(receiver.state.lock().unwrap().configuration.is_none());
         assert!(authority.borrow().is_none());
@@ -231,7 +260,10 @@ async fn eof_withdraws_before_shutdown_and_preserves_exclusivity_until_shutdown_
         );
         assert!(receiver.open(open(), Some(bridge())).unwrap().is_none());
         resume.send(()).unwrap();
-        assert!(task.await.unwrap().is_err());
+        if phase == "eof" {
+            assert!(task.await.unwrap().is_err());
+        }
+        closure.await.unwrap();
         assert!(receiver.open(open(), Some(bridge())).unwrap().is_some());
     })
     .await
