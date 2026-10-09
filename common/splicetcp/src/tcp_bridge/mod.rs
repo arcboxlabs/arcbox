@@ -241,7 +241,6 @@ pub(super) struct HandshakeConn {
     /// Peer's TCP options, mirrored in our SYN-ACK (PassiveOpen) or
     /// captured from their SYN-ACK (ActiveOpen).
     peer_wscale: Option<u8>,
-    peer_sack: bool,
     peer_mss: u16,
     /// MAC addresses used when building frames to the guest.
     gw_mac: [u8; 6],

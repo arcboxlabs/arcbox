@@ -563,6 +563,7 @@ fn test_build_syn_frame_active_open() {
         dst_mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
         mss: 1460,
         wscale: Some(7),
+        sack_permitted: true,
     };
     let frame = build_tcp_syn_frame(&p);
     let tcp = 34;
@@ -577,5 +578,6 @@ fn test_build_syn_frame_active_open() {
     let parsed = parse_tcp_syn_options(&frame[tcp..]);
     assert_eq!(parsed.mss, Some(1460));
     assert_eq!(parsed.wscale, Some(7));
+    assert!(parsed.sack_permitted);
     verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
 }
