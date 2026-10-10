@@ -80,6 +80,12 @@ available receive window. The bridge segments these bytes by the peer MSS and
 configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits
 one IPv4 frame.
 
+`TcpBridge::set_fast_path_mtu` also sets the MSS advertised in new guest-facing
+handshakes. An MTU of 4000 advertises MSS 3960, so uploads can use the link's full
+packet budget. Downloads remain bounded by the peer's advertised MSS. Without
+an explicit MTU, the bridge advertises MSS 1460. Handshake retransmissions reuse
+the original options, even if the configured MTU changes.
+
 `poll_fast_path` also retries retained guest→host bytes after host socket
 backpressure, including for inline flows. Upload ACKs advance only over bytes
 accepted by the host socket. Hard write errors, including `BrokenPipe`, reset
