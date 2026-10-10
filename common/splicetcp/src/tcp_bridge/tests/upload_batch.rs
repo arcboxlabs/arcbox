@@ -32,14 +32,14 @@ fn segments(base: u32, payload: &[u8], size: usize) -> Vec<Vec<u8>> {
 #[tokio::test]
 async fn upload_batch_wraps_sequence_and_acks_only_the_consumed_prefix() {
     let base = u32::MAX - 100;
-    let payload: Vec<_> = (0..17 * 257).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<_> = (0..65 * 257).map(|i| (i % 251) as u8).collect();
     let mut bridge = TcpBridge::new(GW_IP);
     let mut server = fast_path_pair(&mut bridge, key(), base).await;
     let frames = segments(base, &payload, 257);
     let (count, ack) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
-    assert_eq!(count, 16);
-    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(16 * 257));
-    let (count, ack) = bridge.try_fast_path_intercept_batch(&frames[16..]).unwrap();
+    assert_eq!(count, 64);
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(64 * 257));
+    let (count, ack) = bridge.try_fast_path_intercept_batch(&frames[64..]).unwrap();
     assert_eq!(count, 1);
     assert_eq!(tcp_ack_of(&ack), base.wrapping_add(payload.len() as u32));
     let mut got = vec![0; payload.len()];
@@ -90,10 +90,10 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
         batch.extend(first, &candidates, 2050);
         assert_eq!(batch.count, 1);
     }
-    let large = segments(2000, &vec![7; 80_000], 40_000);
+    let large = segments(2000, &vec![7; 280_000], 40_000);
     let mut batch = UploadBatch::new(&large[0][54..]);
     batch.extend(&large[0], &large[1..], 42_000);
-    assert_eq!(batch.count, 1, "batch payload must stay within 64 KiB");
+    assert_eq!(batch.count, 6, "batch payload must stay within 256 KiB");
 }
 
 #[tokio::test]
@@ -126,10 +126,10 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
             Err(e) => panic!("fill: {e}"),
         }
     }
-    let payload: Vec<_> = (0..16 * 3960).map(|i| (i % 251) as u8).collect();
+    let payload: Vec<_> = (0..64 * 3960).map(|i| (i % 251) as u8).collect();
     let frames = segments(base, &payload, 3960);
     let (count, reply) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
-    assert_eq!(count, 16);
+    assert_eq!(count, 64);
     let written = tcp_ack_of(&reply).wrapping_sub(base) as usize;
     assert!(
         written < payload.len(),
