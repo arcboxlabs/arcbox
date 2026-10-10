@@ -634,8 +634,23 @@ impl TcpBridge {
     }
 }
 
+impl TcpBridge {
+    /// Returns the number of active fast-path connections.
+    #[must_use]
+    pub fn fast_path_count(&self) -> usize {
+        self.fast_path_conns.len()
+    }
+
+    /// Returns the number of in-progress handshakes.
+    #[must_use]
+    pub fn handshake_count(&self) -> usize {
+        self.handshake_conns.len()
+    }
+}
+
 mod fast_path;
 mod handshake;
+mod promotion;
 mod settings;
 
 /// Returns true if the saved handshake frame is due for retransmit.
