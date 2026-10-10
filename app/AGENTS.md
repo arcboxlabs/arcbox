@@ -591,6 +591,8 @@ above). When editing either side, keep in lockstep:
 
 ## Boot-asset pin (`engine/arcbox-image`)
 
+- `abctl boot --data-dir PATH` selects one root for boot assets and runtime binaries. Apply the override before constructing the boot policy. Packaging must pass this argument when preparing a separate resource directory.
+
 - `assets.lock` is embedded at COMPILE TIME
   (`include_str!("../../../../assets.lock")`, `lockfile.rs`): the daemon
   verifies against whatever `assets.lock` existed when it was built.

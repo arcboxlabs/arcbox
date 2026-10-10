@@ -13,8 +13,7 @@ launchd (macOS system).
 ## 1. `~/.arcbox/` — User Data Root
 
 Default data directory. Resolved by `dirs::home_dir().join(".arcbox")`;
-falls back to `/var/lib/arcbox` when `HOME` is unset. Overridable via
-`--data-dir` on the daemon and CLI.
+falls back to `/var/lib/arcbox` when `HOME` is unset. The daemon accepts `--data-dir`. Use `abctl boot --data-dir PATH` to select a separate directory for boot prefetch, status, list, and clear. The boot override takes precedence over the configured data directory.
 
 **Defined in**: `app/arcbox-daemon/src/startup.rs` (`resolve_data_dir`),
 `app/arcbox-core/src/config.rs`.

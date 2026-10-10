@@ -46,6 +46,10 @@ abctl daemon status             # Show host and System runtime readiness
 abctl info                      # System info
 abctl version                   # Version info
 
+# Prepare and inspect boot resources in a separate data directory
+abctl boot --data-dir /tmp/arcbox-resources prefetch
+abctl boot --data-dir /tmp/arcbox-resources status --offline --format json
+
 # Local HTTPS trust (macOS login session)
 abctl tls status --json          # Inspect the profile's certificate and native trust
 abctl tls trust                  # Authorize HTTPS through the macOS prompt
