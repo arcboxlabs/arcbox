@@ -75,6 +75,19 @@ impl TcpBridge {
     /// `Some(ack_frame)` if the frame was handled (payload written to
     /// host stream, ACK generated), or `None` if not a fast-path match.
     pub fn try_fast_path_intercept(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        self.try_fast_path_intercept_batch(std::slice::from_ref(&frame))
+            .map(|(_, reply)| reply)
+    }
+
+    /// Intercept the first frame and up to 15 consecutive upload frames.
+    /// Return the consumed prefix length and one cumulative ACK, RST, or empty reply.
+    /// Frames with different ACK state, gaps, control flags, or retained data use the single-frame path.
+    pub fn try_fast_path_intercept_batch<T: AsRef<[u8]>>(
+        &mut self,
+        frames: &[T],
+    ) -> Option<(usize, Vec<u8>)> {
+        let frame = frames.first()?.as_ref();
+        let mut consumed = 1;
         if frame.len() < ETH_HEADER_LEN + 40 {
             return None; // Too short for ETH + IP + TCP minimum
         }
@@ -133,7 +146,7 @@ impl TcpBridge {
             // RST: close host stream immediately, no response needed.
             tracing::debug!("Fast path: RST from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
             self.close_fast_path(&key);
-            return Some(Vec::new()); // Intercepted, no reply frame.
+            return Some((consumed, Vec::new())); // Intercepted, no reply frame.
         }
 
         // Extract payload using IPv4 total_length to exclude Ethernet padding.
@@ -216,7 +229,6 @@ impl TcpBridge {
         // lose data.
         let mut in_order_advanced = false;
         if payload_len > 0 {
-            use std::io::Write;
             let seq_end = guest_seq.wrapping_add(payload_len as u32);
             // Bytes this segment extends past our contiguous cursor.
             let extends = seq_end.wrapping_sub(conn.last_ack);
@@ -241,20 +253,13 @@ impl TcpBridge {
                     conn.buffer_upload_segment(guest_seq, &frame[payload_start..payload_end]);
                 } else {
                     let fresh = &frame[payload_start + overlap as usize..payload_end];
-                    match conn.stream.write(fresh) {
-                        Ok(n) => {
-                            conn.up_bytes += n as u64;
-                            conn.set_last_ack(conn.last_ack.wrapping_add(n as u32));
-                            in_order_advanced = true;
-                            if n < fresh.len() {
-                                conn.up_short_writes += 1;
-                                conn.buffer_upload_segment(conn.last_ack, &fresh[n..]);
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            conn.up_would_block += 1;
-                            conn.buffer_upload_segment(conn.last_ack, fresh);
-                        }
+                    let mut batch = super::upload_batch::UploadBatch::new(fresh);
+                    if overlap == 0 && conn.ooo_segs.is_empty() {
+                        batch.extend(frame, &frames[1..], seq_end);
+                    }
+                    consumed = batch.count;
+                    match batch.send(conn) {
+                        Ok(advanced) => in_order_advanced = advanced,
                         Err(e) => {
                             tracing::warn!("Fast path TX write error, RST to guest: {e}");
                             // Mirror the RX-error path: the host stream is dead,
@@ -274,7 +279,7 @@ impl TcpBridge {
                                 },
                             );
                             self.close_fast_path(&key);
-                            return Some(rst);
+                            return Some((consumed, rst));
                         }
                     }
                 }
@@ -302,7 +307,7 @@ impl TcpBridge {
                 dst_mac: self.fast_path_guest_mac.unwrap_or([0xFF; 6]),
             });
             self.close_fast_path(&key);
-            return Some(rst);
+            return Some((consumed, rst));
         }
 
         // FIN handling — only once every byte before it has been written and
@@ -345,7 +350,7 @@ impl TcpBridge {
                             src_mac: self.fast_path_gateway_mac,
                             dst_mac: guest_mac,
                         });
-                    return Some(ack);
+                    return Some((consumed, ack));
                 }
                 tracing::debug!(
                     "Fast path: FIN from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}"
@@ -363,7 +368,7 @@ impl TcpBridge {
                         dst_mac: guest_mac,
                     });
                 self.close_fast_path(&key);
-                return Some(fin_ack);
+                return Some((consumed, fin_ack));
             }
             tracing::debug!(
                 "Fast path: FIN from guest {src_ip}:{src_port}→{dst_ip}:{dst_port} deferred (fin_seq={fin_seq}, last_ack={})",
@@ -380,7 +385,7 @@ impl TcpBridge {
         // data or FIN it carried was already handled by the paths above, so it
         // is never dropped.
         if payload_len == 0 && flags & (0x01 | 0x02) == 0 {
-            return Some(Vec::new());
+            return Some((consumed, Vec::new()));
         }
 
         let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
@@ -396,7 +401,7 @@ impl TcpBridge {
             dst_mac: guest_mac,
         });
 
-        Some(ack)
+        Some((consumed, ack))
     }
 
     /// Polls fast-path host streams for readable data and generates frames

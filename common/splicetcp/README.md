@@ -86,6 +86,14 @@ packet budget. Downloads remain bounded by the peer's advertised MSS. Without
 an explicit MTU, the bridge advertises MSS 1460. Handshake retransmissions reuse
 the original options, even if the configured MTU changes.
 
+`FrameClassifier::drain_tcp` preserves arrival order across handshake completion
+and subsequent data. Established uploads coalesce at most 16 consecutive frames
+and 64 KiB into one vectored socket write and cumulative ACK. Coalescing requires
+the same connection, contiguous sequence numbers, identical download ACK/window
+state, no control flags other than ACK/PSH, and no retained upload data. Other
+frames use the single-frame path. Partial writes retain every unwritten suffix;
+only bytes accepted by the host socket advance the ACK.
+
 `poll_fast_path` also retries retained guest→host bytes after host socket
 backpressure, including for inline flows. Upload ACKs advance only over bytes
 accepted by the host socket. Hard write errors, including `BrokenPipe`, reset

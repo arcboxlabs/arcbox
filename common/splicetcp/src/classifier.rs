@@ -238,6 +238,27 @@ impl FrameClassifier {
         ack_frames
     }
 
+    /// Drain queued TCP frames in arrival order, including handshake promotion before later data.
+    /// Consecutive established upload frames share one bounded socket write and cumulative ACK.
+    pub fn drain_tcp(&mut self, bridge: &mut crate::tcp_bridge::TcpBridge) -> Vec<Vec<u8>> {
+        let mut replies = Vec::new();
+        while !self.rx_queue.is_empty() {
+            if let Some((count, reply)) =
+                bridge.try_fast_path_intercept_batch(self.rx_queue.make_contiguous())
+            {
+                self.rx_queue.drain(..count);
+                if !reply.is_empty() {
+                    replies.push(reply);
+                }
+            } else if let Some(frame) = self.rx_queue.pop_front()
+                && let Some(handshake) = bridge.try_complete_handshake(&frame)
+            {
+                replies.extend(handshake);
+            }
+        }
+        replies
+    }
+
     /// Filters handshake-completion frames from `rx_queue`.
     ///
     /// Parallel to [`drain_fast_path`] but for frames that complete an
