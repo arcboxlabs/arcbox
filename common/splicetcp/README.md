@@ -88,8 +88,8 @@ an explicit MTU, the bridge advertises MSS 1460. Handshake retransmissions reuse
 the original options, even if the configured MTU changes.
 
 `FrameClassifier::drain_tcp` preserves arrival order across handshake completion
-and subsequent data. Established uploads coalesce at most 16 consecutive frames
-and 64 KiB into one vectored socket write and cumulative ACK. Coalescing requires
+and subsequent data. Established uploads coalesce at most 64 consecutive frames
+and 256 KiB into one vectored socket write and cumulative ACK. Coalescing requires
 the same connection, contiguous sequence numbers, identical download ACK/window
 state, no control flags other than ACK/PSH, and no retained upload data. Other
 frames use the single-frame path. Partial writes retain every unwritten suffix;
