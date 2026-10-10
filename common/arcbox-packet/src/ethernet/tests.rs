@@ -410,6 +410,38 @@ fn test_tcp_checksum_standalone() {
     verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
 }
 
+#[test]
+fn tcp_checksum_matches_scalar_with_existing_field_and_unaligned_payload() {
+    use crate::checksum::{checksum_add_scalar, checksum_fold};
+
+    let src = Ipv4Addr::BROADCAST;
+    let dst = Ipv4Addr::new(192, 168, 255, 254);
+    for len in (0..=130).chain([1480, 1481, 3980, 3981, 65495, 65535]) {
+        for offset in 0..16 {
+            for fill in [false, true] {
+                let storage: Vec<u8> = (0..len + offset)
+                    .map(|i| if fill { 255 } else { (i % 251) as u8 })
+                    .collect();
+                let segment = &storage[offset..];
+                let mut wire = Vec::from(src.octets());
+                wire.extend_from_slice(&dst.octets());
+                wire.extend_from_slice(&[0, 6]);
+                wire.extend_from_slice(&(len as u16).to_be_bytes());
+                wire.extend_from_slice(segment);
+                if len >= 18 {
+                    wire[12 + 16..12 + 18].fill(0);
+                }
+                let expected = checksum_fold(checksum_add_scalar(&wire));
+                assert_eq!(
+                    tcp_checksum(src, dst, segment),
+                    expected,
+                    "len={len}, offset={offset}, fill={fill}",
+                );
+            }
+        }
+    }
+}
+
 /// Helper: build a minimal SYN frame (ETH + IP + TCP with given options).
 fn make_syn_with_options(opts: &[u8]) -> Vec<u8> {
     let tcp_hdr_len = 20 + opts.len();
