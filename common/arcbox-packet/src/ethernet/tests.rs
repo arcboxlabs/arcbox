@@ -375,14 +375,35 @@ fn test_tcp_ack_frame_structure() {
 
 #[test]
 fn test_tcp_data_frame_payload() {
-    let p = make_tcp_params([1, 1, 1, 1], [10, 0, 2, 2], 80, 54321, 5000, 6000);
-    let payload = b"Hello, world!";
-    let frame = build_tcp_data_frame(&p, payload);
+    use crate::checksum::{checksum_add_scalar, checksum_fold};
 
-    assert_eq!(frame.len(), 54 + payload.len());
-    assert_eq!(&frame[54..], payload.as_slice());
-    assert_eq!(frame[34 + 13], 0x18); // ACK|PSH
-    verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    let p = make_tcp_params([1, 1, 1, 1], [10, 0, 2, 2], 80, 54321, 5000, 6000);
+    for len in (0..=65).chain([1460, 1461, 3960, 3961, 32768, 65495]) {
+        let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let mut expected = vec![
+            0x52, 0x54, 0, 0x12, 0x34, 0x56, 2, 0xab, 0xcd, 0, 0, 1, 8, 0, 0x45, 0, 0, 0, 0, 0,
+            0x40, 0, 0x40, 6, 0, 0, 1, 1, 1, 1, 10, 0, 2, 2, 0, 0x50, 0xd4, 0x31, 0, 0, 0x13, 0x88,
+            0, 0, 0x17, 0x70, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0,
+        ];
+        expected[16..18].copy_from_slice(&((40 + len) as u16).to_be_bytes());
+        let ip_checksum = checksum_fold(checksum_add_scalar(&expected[14..34]));
+        expected[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+        expected.extend_from_slice(&payload);
+
+        let mut pseudo_header = vec![1, 1, 1, 1, 10, 0, 2, 2, 0, 6];
+        pseudo_header.extend_from_slice(&((20 + len) as u16).to_be_bytes());
+        let partial_checksum = checksum_fold(checksum_add_scalar(&pseudo_header));
+        pseudo_header.extend_from_slice(&expected[34..]);
+        let full_checksum = checksum_fold(checksum_add_scalar(&pseudo_header));
+        expected[50..52].copy_from_slice(&full_checksum.to_be_bytes());
+        assert_eq!(build_tcp_data_frame(&p, &payload), expected, "len={len}");
+        expected[50..52].copy_from_slice(&partial_checksum.to_be_bytes());
+        assert_eq!(
+            build_tcp_data_frame_partial_csum(&p, &payload),
+            expected,
+            "partial checksum, len={len}",
+        );
+    }
 }
 
 #[test]

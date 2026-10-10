@@ -210,3 +210,25 @@ Run `devenv shell -- cargo run --locked -p arcbox-packet --example checksum_benc
 | 65,535 | 12,195.0 | 745.2 |
 
 The scalar-oracle test covers unaligned input, nonzero checksum fields, odd lengths, the SIMD threshold, and the maximum IPv4 segment length. All 44 packet tests and 108 TCP bridge tests pass. Strict Clippy and formatting pass with Rust 1.98.1, which supports the workspace lint configuration. These measurements cover checksum computation only; they do not establish a network-throughput improvement.
+
+## 2026-10-10 — TCP frame initialization
+
+Both TCP data-frame builders allocated a zeroed frame and then copied the payload over those zeros. They now reserve the full capacity, initialize the 54-byte Ethernet/IPv4/TCP header, and append the payload. Reserved header fields remain zero. Frame contents, IPv4 length limits, and public interfaces remain unchanged.
+
+Run `devenv shell -- cargo run --locked -p arcbox-packet --example tcp_frame_bench --release`. The benchmark includes allocation, header writes, payload copy, checksum, and deallocation. Inputs and returned frames pass through `black_box`. Each binary runs seven rounds over seven payload sizes and both full and partial checksum builders. The baseline uses `8f14a07` plus the same benchmark. The candidate changes only frame initialization. Host: Apple M5 Max, macOS, Rust 1.96.0, warm allocator and cache.
+
+Two sequential baseline/candidate pairs produced these medians for full TCP checksums, in ns/frame:
+
+| Payload bytes | Baseline 1 | Candidate 1 | Baseline 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 17.236 | 17.355 | 18.212 | 17.135 |
+| 1 | 17.514 | 18.493 | 18.588 | 18.069 |
+| 64 | 18.909 | 18.793 | 18.908 | 18.549 |
+| 1,460 | 52.384 | 38.041 | 50.316 | 34.827 |
+| 3,960 | 121.767 | 90.582 | 121.177 | 81.441 |
+| 32,768 | 1,567.621 | 748.156 | 1,547.054 | 767.519 |
+| 65,495 | 3,101.965 | 1,606.331 | 3,024.942 | 1,540.798 |
+
+Packet-sized and larger payloads improved in both pairs. Very short payloads have no consistent improvement; the first 1-byte measurement regressed by 0.979 ns. These microbenchmarks do not prove a NE throughput or CPU/GB improvement. Runtime acceptance remains open.
+
+The existing frame test now compares every byte against a fixed wire-header fixture and scalar checksum oracle. Both checksum modes cover payload lengths 0 through 65, odd and even MTU-sized payloads, 32 KiB, and the maximum IPv4 payload. All 44 packet tests and 108 TCP bridge tests pass. Strict Clippy, including the benchmark target, and formatting pass with Rust 1.98.1.
