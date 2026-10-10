@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use core_foundation::{base::TCFType, data::CFData};
+use core_foundation::{base::TCFType, data::CFData, dictionary::CFDictionary};
 use rcgen::{Issuer, PKCS_ECDSA_P256_SHA256, PublicKeyData, SignatureAlgorithm, SigningKey};
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{
@@ -109,14 +109,23 @@ impl KeychainAuthority {
         pem::encode(&pem::Pem::new("CERTIFICATE", self.certificate.to_der()))
     }
 
-    /// Finds this profile's existing public certificate without creating or signing anything.
+    /// Finds the public certificate through Keychain metadata without accessing the private key.
     pub fn existing_certificate(tls_dir: &Path) -> Result<Option<Vec<u8>>, Error> {
         if let Some(journal) = Self::journal(tls_dir)? {
-            return Ok(Some(
-                Self::load_root(tls_dir, journal.current())?
-                    .certificate
-                    .to_der(),
-            ));
+            let root = journal.current();
+            let hash = private_key_hash(&Self::slot_label(tls_dir, root.slot)?)?.ok_or(
+                Error::InvalidAuthority("recorded CA private key is missing"),
+            )?;
+            let certificate = certificate_by_hash(&hash)?.ok_or(Error::InvalidAuthority(
+                "recorded CA certificate is missing",
+            ))?;
+            let der = certificate.to_der();
+            if der != root.der {
+                return Err(Error::InvalidAuthority(
+                    "Keychain CA differs from the recorded certificate",
+                ));
+            }
+            return Ok(Some(der));
         }
         Self::slot_certificate(tls_dir, Slot::Primary)
     }
@@ -187,8 +196,8 @@ impl KeychainAuthority {
 
     fn slot_certificate(tls_dir: &Path, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
         let label = Self::slot_label(tls_dir, slot)?;
-        let certificate = match find_key(&label)? {
-            Some(key) => certificate_for_key(&key)?,
+        let certificate = match private_key_hash(&label)? {
+            Some(hash) => certificate_by_hash(&hash)?,
             None => certificate_without_private_key(&label)?,
         };
         Ok(certificate.map(|certificate| certificate.to_der()))
@@ -245,8 +254,22 @@ fn find_key_class(label: &str, class: KeyClass) -> Result<Option<SecKey>, Error>
             .label(label)
             .load_refs(true),
     )? {
-        Some(Reference::Key(key)) => Ok(Some(key)),
+        Some(SearchResult::Ref(Reference::Key(key))) => Ok(Some(key)),
         Some(_) => Err(Error::InvalidAuthority("expected a key")),
+        None => Ok(None),
+    }
+}
+
+fn private_key_hash(label: &str) -> Result<Option<CFData>, Error> {
+    // SecKeyCopyAttributes can invoke private-key operations; query stored metadata instead.
+    match find(
+        ItemSearchOptions::new()
+            .key_class(KeyClass::private())
+            .label(label)
+            .load_attributes(true),
+    )? {
+        Some(SearchResult::Dict(attributes)) => application_label(&attributes).map(Some),
+        Some(_) => Err(Error::InvalidAuthority("expected key attributes")),
         None => Ok(None),
     }
 }
@@ -259,22 +282,27 @@ fn certificate_by_public_key(
     hash: &CFData,
     public: &[u8],
 ) -> Result<Option<SecCertificate>, Error> {
+    let certificate = certificate_by_hash(hash)?;
+    if let Some(certificate) = &certificate {
+        let bytes = certificate
+            .public_key()?
+            .external_representation()
+            .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
+        if bytes.bytes() != public {
+            return Err(Error::InvalidAuthority("certificate and public key differ"));
+        }
+    }
+    Ok(certificate)
+}
+
+fn certificate_by_hash(hash: &CFData) -> Result<Option<SecCertificate>, Error> {
     match find(
         ItemSearchOptions::new()
             .class(ItemClass::certificate())
             .pub_key_hash(hash.bytes())
             .load_refs(true),
     )? {
-        Some(Reference::Certificate(certificate)) => {
-            let bytes = certificate
-                .public_key()?
-                .external_representation()
-                .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
-            if bytes.bytes() != public {
-                return Err(Error::InvalidAuthority("certificate and public key differ"));
-            }
-            Ok(Some(certificate))
-        }
+        Some(SearchResult::Ref(Reference::Certificate(certificate))) => Ok(Some(certificate)),
         Some(_) => Err(Error::InvalidAuthority("expected a certificate")),
         None => Ok(None),
     }
@@ -301,17 +329,20 @@ fn public_key_bytes(key: &SecKey) -> Result<Vec<u8>, Error> {
 }
 
 fn public_key_hash(key: &SecKey) -> Result<CFData, Error> {
-    let attributes = key.attributes();
+    application_label(&key.attributes())
+}
+
+fn application_label(attributes: &CFDictionary) -> Result<CFData, Error> {
     // SAFETY: Security.framework defines this constant as a CFString dictionary key.
     let label = unsafe { security_framework_sys::item::kSecAttrApplicationLabel };
     let value = attributes
         .find(label.cast())
         .ok_or(Error::InvalidAuthority("missing public key hash"))?;
-    // SAFETY: SecKeyCopyAttributes returns kSecAttrApplicationLabel as CFData.
+    // SAFETY: Security.framework key attributes store kSecAttrApplicationLabel as CFData.
     Ok(unsafe { CFData::wrap_under_get_rule((*value).cast()) })
 }
 
-fn find(query: &mut ItemSearchOptions) -> Result<Option<Reference>, Error> {
+fn find(query: &mut ItemSearchOptions) -> Result<Option<SearchResult>, Error> {
     // The helper stores a public copy in System.keychain. Identity operations
     // must only find and delete the user's original Keychain items.
     match query
@@ -319,21 +350,17 @@ fn find(query: &mut ItemSearchOptions) -> Result<Option<Reference>, Error> {
         .limit(Limit::All)
         .search()
     {
-        Ok(items) => unique_reference(items),
+        Ok(items) => unique_item(items),
         Err(error) if error.code() == errSecItemNotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
-fn unique_reference(mut items: Vec<SearchResult>) -> Result<Option<Reference>, Error> {
+fn unique_item(mut items: Vec<SearchResult>) -> Result<Option<SearchResult>, Error> {
     if items.len() > 1 {
         return Err(Error::InvalidAuthority("ambiguous Keychain CA identity"));
     }
-    match items.pop() {
-        Some(SearchResult::Ref(reference)) => Ok(Some(reference)),
-        Some(_) => Err(Error::InvalidAuthority("expected a keychain reference")),
-        None => Ok(None),
-    }
+    Ok(items.pop())
 }
 
 struct KeychainKey {

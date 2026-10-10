@@ -13,9 +13,9 @@ fn identity_lookup_rejects_multiple_matches() {
             SecCertificate::from_der(certificate.der()).unwrap(),
         ))
     };
-    assert!(unique_reference(Vec::new()).unwrap().is_none());
-    assert!(unique_reference(vec![reference()]).unwrap().is_some());
-    assert!(unique_reference(vec![reference(), reference()]).is_err());
+    assert!(unique_item(Vec::new()).unwrap().is_none());
+    assert!(unique_item(vec![reference()]).unwrap().is_some());
+    assert!(unique_item(vec![reference(), reference()]).is_err());
 }
 
 #[test]
@@ -115,6 +115,32 @@ fn journal_selects_current_root_and_missing_journal_cannot_recreate_primary() {
     assert!(open_rejected);
     assert!(inspect_rejected);
     assert!(!primary_items.unwrap());
+}
+
+#[test]
+#[ignore = "creates and deletes isolated identities in the user's macOS Keychain"]
+fn public_inspection_rejects_a_different_recorded_root() {
+    let profile = Profile::new();
+    let other = Profile::new();
+    let original = KeychainAuthority::open(profile.path())
+        .unwrap()
+        .root(Slot::Primary);
+    let foreign = KeychainAuthority::open(other.path())
+        .unwrap()
+        .root(Slot::Primary);
+    Journal::Stable { current: foreign }
+        .persist(profile.path())
+        .unwrap();
+    let result = KeychainAuthority::existing_certificate(profile.path());
+    Journal::Stable { current: original }
+        .persist(profile.path())
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(Error::InvalidAuthority(
+            "Keychain CA differs from the recorded certificate"
+        ))
+    ));
 }
 
 #[test]

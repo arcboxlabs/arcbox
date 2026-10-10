@@ -9,6 +9,24 @@ const PROBE: &str = "keychain::tests::signing_identity::native_identity_probe";
 const PROFILE: &str = "ARCBOX_CA_TEST_PROFILE";
 const ACTION: &str = "ARCBOX_CA_TEST_ACTION";
 
+#[test]
+#[ignore = "reads ARCBOX_CA_TEST_PROFILE and checks ARCBOX_CA_TEST_EXPECTED_FINGERPRINT without changing Keychain items or trust"]
+fn native_existing_profile_public_inspection() {
+    let profile = std::path::PathBuf::from(std::env::var_os(PROFILE).expect("existing profile"));
+    let expected = std::env::var("ARCBOX_CA_TEST_EXPECTED_FINGERPRINT")
+        .expect("expected colon-separated SHA-256 fingerprint");
+    let _no_ui = SecKeychain::disable_user_interaction().unwrap();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let der = KeychainAuthority::existing_certificate(&profile)
+            .unwrap()
+            .expect("existing profile certificate");
+        let certificate = PublicAuthority::try_from(der).unwrap();
+        assert_eq!(certificate.fingerprint_sha256(), expected);
+        eprintln!("Public certificate inspection: {:?}", start.elapsed());
+    }
+}
+
 fn run(command: &mut Command) -> Result<String, String> {
     let output = command.output().map_err(|error| error.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -93,6 +111,9 @@ fn native_signing_acl_rejects_other_code_identities() {
         probe(&creator, &profile, "create")?;
         probe(&creator, &profile, "allow")?;
         probe(&relocated, &profile, "allow")?;
+        for binary in [&creator, &relocated, &different, &adhoc] {
+            probe(binary, &profile, "inspect")?;
+        }
         probe(&different, &profile, "deny")?;
         probe(&adhoc, &profile, "deny")?;
         probe(&creator, &profile, "allow")
@@ -156,7 +177,10 @@ fn native_identity_probe() {
         return;
     }
 
-    assert!(matches!(action.as_str(), "create" | "allow" | "deny"));
+    assert!(matches!(
+        action.as_str(),
+        "create" | "allow" | "deny" | "inspect"
+    ));
     let der = if action == "create" {
         assert!(
             KeychainAuthority::existing_certificate(&profile)
@@ -174,6 +198,14 @@ fn native_identity_probe() {
     };
     let public = PublicAuthority::try_from(der).unwrap();
     assert!(!public.has_trust().unwrap());
+    if action == "inspect" {
+        assert_eq!(
+            KeychainAuthority::existing_certificate(&profile).unwrap(),
+            Some(public.der().to_vec())
+        );
+        eprintln!("Read the exact public root without signing authorization");
+        return;
+    }
     let key = SecCertificate::from_der(public.der())
         .unwrap()
         .public_key()

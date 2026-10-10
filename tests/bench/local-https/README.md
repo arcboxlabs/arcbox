@@ -1,4 +1,26 @@
-# Isolated legacy NAT validation
+# Local HTTPS validation
+
+## Native public CA status latency
+
+Set `ARCBOX_CLI` to a portable CLI built from the revision under test. Keep the production App and helper running. This probe reads the existing CA and trust without installing, signing, or changing trust:
+
+```sh
+for run in 1 2 3 4 5; do
+  /usr/bin/time -p "$ARCBOX_CLI" --profile production tls status --json
+done
+```
+
+Require five successful exits and the same expected certificate fingerprint and trust state in every response. Record each elapsed time and the CLI's SHA-256. These measurements cover the existing login session; they do not establish first-use authorization or performance with a locked Keychain.
+
+To measure only public Keychain lookup without the helper, set `ARCBOX_CA_TEST_PROFILE` to the existing TLS directory and `ARCBOX_CA_TEST_EXPECTED_FINGERPRINT` to its colon-separated SHA-256 fingerprint:
+
+```sh
+devenv shell -- cargo test -p arcbox-local-ca native_existing_profile_public_inspection -- --ignored --nocapture --test-threads=1
+```
+
+This probe disables Keychain user interaction and performs five reads. It does not create or delete Keychain items, change trust, or establish complete CLI status behavior.
+
+## Isolated legacy NAT validation
 
 Run these checks only in a disposable Linux container. The checks require an empty NAT table and a loopback-only network namespace. Do not use host networking, host mounts, a Docker socket mount, or `--privileged`.
 
