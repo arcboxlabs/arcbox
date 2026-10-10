@@ -37,18 +37,32 @@ impl FrameBuf {
     ///
     /// Falls back to `Heap` if the pool is exhausted.
     pub fn from_pool(pool: &Arc<PacketPool>, data: &[u8]) -> Self {
+        Self::from_pool_with_prefix(pool, &[], data)
+    }
+
+    /// Copies a header and payload into one owned frame without an intermediate buffer.
+    /// Falls back to `Heap` if the pool is exhausted or the combined frame is too large.
+    pub fn from_pool_with_prefix(pool: &Arc<PacketPool>, prefix: &[u8], data: &[u8]) -> Self {
+        let len = prefix.len() + data.len();
         if let Some(mut pkt) = pool.alloc()
-            && pkt.copy_from_slice(data).is_ok()
+            && let Some(frame) = pkt.as_full_mut_slice().get_mut(..len)
         {
+            let (header, payload) = frame.split_at_mut(prefix.len());
+            header.copy_from_slice(prefix);
+            payload.copy_from_slice(data);
+            pkt.set_len(len);
             let index = pkt.into_index();
             return Self::Pooled {
                 pool: Arc::clone(pool),
                 index,
-                len: data.len() as u32,
+                len: len as u32,
             };
         }
         // Pool exhausted or frame too large — fall back to heap.
-        Self::Heap(data.to_vec())
+        let mut frame = Vec::with_capacity(len);
+        frame.extend_from_slice(prefix);
+        frame.extend_from_slice(data);
+        Self::Heap(frame)
     }
 
     /// Returns the frame data length.
@@ -181,6 +195,34 @@ mod tests {
         let fallback = FrameBuf::from_pool(&pool, &[0xFF; 20]);
         assert!(!fallback.is_pooled());
         assert_eq!(fallback.len(), 20);
+    }
+
+    #[test]
+    fn prefixed_frame_preserves_bytes_across_pool_exhaustion_and_reuse() {
+        let pool = Arc::new(PacketPool::new(1).unwrap());
+        let pooled = FrameBuf::from_pool_with_prefix(&pool, &[1, 2], &[3, 4, 5]);
+        let heap = FrameBuf::from_pool_with_prefix(&pool, &[6], &[7, 8]);
+        assert!(pooled.is_pooled());
+        assert!(!heap.is_pooled());
+        assert_eq!(&*pooled, &[1, 2, 3, 4, 5]);
+        assert_eq!(&*heap, &[6, 7, 8]);
+        drop(pooled);
+        let reused = FrameBuf::from_pool_with_prefix(&pool, &[9], &[]);
+        assert!(reused.is_pooled());
+        assert_eq!(&*reused, &[9]);
+        drop(reused);
+        assert_eq!(pool.free_count(), 1);
+    }
+
+    #[test]
+    fn prefixed_frame_exceeding_pool_slot_retains_the_complete_payload() {
+        let pool = Arc::new(PacketPool::new(1).unwrap());
+        let payload = vec![0xAB; crate::MAX_PACKET_SIZE];
+        let frame = FrameBuf::from_pool_with_prefix(&pool, &[1, 2], &payload);
+        assert!(!frame.is_pooled());
+        assert_eq!(&frame[..2], &[1, 2]);
+        assert_eq!(&frame[2..], payload);
+        assert_eq!(pool.free_count(), 1);
     }
 
     #[test]
