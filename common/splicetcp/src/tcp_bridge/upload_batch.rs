@@ -4,8 +4,8 @@ use super::FastPathConn;
 use crate::ethernet::ETH_HEADER_LEN;
 use std::io::{self, IoSlice, Write};
 
-const MAX_SEGMENTS: usize = 16;
-const MAX_BYTES: usize = 64 * 1024;
+const MAX_SEGMENTS: usize = 64;
+const MAX_BYTES: usize = 256 * 1024;
 
 pub(super) struct UploadBatch<'a> {
     payloads: [IoSlice<'a>; MAX_SEGMENTS],
