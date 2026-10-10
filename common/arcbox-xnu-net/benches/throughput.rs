@@ -215,5 +215,57 @@ fn bench_batch_rw(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_rw, bench_batch_rw);
+fn bench_ipv4(c: &mut Criterion) {
+    use std::net::{SocketAddr, UdpSocket};
+
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender.set_nonblocking(true).unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    set_buf_size(receiver.as_raw_fd(), libc::SO_RCVBUF, 1024 * 1024);
+    let SocketAddr::V4(address) = receiver.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let payload = [0xAB; 1472];
+    let bufs = [payload.as_slice(); 64];
+    let mut recv = [0; 1472];
+    let mut batch = BatchDgram::new();
+    let mut group = c.benchmark_group("ipv4");
+    group.throughput(Throughput::Elements(bufs.len() as u64));
+    for batched in [false, true] {
+        group.bench_function(
+            if batched {
+                "send_batch_to_v4"
+            } else {
+                "send_to"
+            },
+            |bencher| {
+                bencher.iter(|| {
+                    if batched {
+                        let mut sent = 0;
+                        while sent < bufs.len() {
+                            let n = batch
+                                .send_batch_to_v4(sender.as_raw_fd(), &bufs[sent..], address)
+                                .unwrap();
+                            assert!(n > 0);
+                            sent += n;
+                        }
+                    } else {
+                        for buf in bufs {
+                            assert_eq!(sender.send_to(buf, address).unwrap(), buf.len());
+                        }
+                    }
+                    for _ in bufs {
+                        assert_eq!(receiver.recv(&mut recv).unwrap(), payload.len());
+                    }
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_single_rw, bench_batch_rw, bench_ipv4);
 criterion_main!(benches);

@@ -4,6 +4,8 @@
 //! Provides safe wrappers around platform-specific batch datagram syscalls,
 //! reducing syscall overhead by up to 99% for high-throughput datagram
 //! workloads (e.g., L2 Ethernet frames over `AF_UNIX SOCK_DGRAM` socketpairs).
+//! [`BatchDgram::send_batch_to_v4`] sends to explicit IPv4 destinations without
+//! connecting the UDP socket. Partial sends return the accepted prefix count.
 //!
 //! # Platform support
 //!
