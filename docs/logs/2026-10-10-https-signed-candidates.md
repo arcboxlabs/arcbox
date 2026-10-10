@@ -39,3 +39,13 @@ Both apps pass `codesign --verify --deep --strict`. Independent checks also vali
 No candidate app was installed or launched, no native trust changed, and no Production workload stopped. Installed DNS, browser access on 443, first authorization and cancellation, CA lifecycle, and new-image Machine boot/signing/forwarding still require an agreed native acceptance window. Development does not own the canonical resolver by default, so default installed DNS acceptance must use Production.
 
 Kubernetes Service/Pod networking and DNS, broader macOS trust portability, per-service diagnostics, and comparable performance remain incomplete. Publishing requires matched boot and Runtime releases before Desktop's pin update, followed by signed/notarized release verification. Candidate preparation does not complete the feature objective.
+
+## Native installation follow-up
+
+The operator authorized the native acceptance window. All 18 running containers stopped through the selected Docker socket. The original App, helper, public CA, configuration state, and offline APFS disk copies were preserved before installation. The installed Production candidate matched all 140 verified inventory entries.
+
+The normal App installer stalled before replacing the helper. The elevated `abctl` process retained an exited child while its Tokio runtime waited for an event. A native process sample and open-file inventory are preserved under the candidate's `native-acceptance/evidence/` directory. The installed helper still matched the original SHA-256 `cf6e2b002c27920edb4988c2f4dbda47c6e46a9e71b73d77b1f060ebb66fdba1`.
+
+Bundled helper probes now use `std::process::Command::output` on a blocking worker, which waits for and reaps the child directly. Probe exit failures, invalid UTF-8, binary equality checks, and the bounded helper RPC inspection retain their existing behavior. The admitted read-only subprocess finishes even if its async caller is dropped.
+
+All eight preflight regression tests, workspace formatting, and strict CLI all-target Clippy pass. The replacement signed candidate still requires the same native installer test. No native DNS, 443, Machine, or first-use authorization result can be inferred from these checks.

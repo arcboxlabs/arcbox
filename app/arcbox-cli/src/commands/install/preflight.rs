@@ -2,6 +2,7 @@
 
 use std::io::ErrorKind;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -9,7 +10,6 @@ use arcbox_constants::helper::{helper_needs_reinstall, parse_helper_version};
 use arcbox_constants::paths::privileged;
 use arcbox_helper::client::{Client, ClientError};
 use serde::Serialize;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,12 +69,12 @@ fn same_binary(helper: &Path, installed: &Path) -> Result<bool> {
 }
 
 async fn run(helper: &Path, argument: &str, roots: &[String]) -> Result<String> {
-    let output = Command::new(helper)
-        .arg(argument)
-        .args(roots)
-        .kill_on_drop(true)
-        .output()
+    let mut command = Command::new(helper);
+    command.arg(argument).args(roots);
+    // Native administrator launches can leave async child-exit notifications undelivered.
+    let output = tokio::task::spawn_blocking(move || command.output())
         .await
+        .context("join bundled helper inspection")?
         .with_context(|| format!("failed to execute {} {argument}", helper.display()))?;
     ensure!(
         output.status.success(),
