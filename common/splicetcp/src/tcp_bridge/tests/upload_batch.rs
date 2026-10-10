@@ -1,0 +1,195 @@
+use super::*;
+use std::io::{Read, Write};
+use std::net::Shutdown;
+
+fn key() -> SynFlowKey {
+    SynFlowKey {
+        src_ip: GUEST_IP,
+        src_port: 40300,
+        dst_ip: Ipv4Addr::new(198, 18, 31, 1),
+        dst_port: 443,
+    }
+}
+
+fn segments(base: u32, payload: &[u8], size: usize) -> Vec<Vec<u8>> {
+    let key = key();
+    payload
+        .chunks(size)
+        .enumerate()
+        .map(|(index, data)| {
+            make_guest_segment(
+                (key.src_port, key.dst_ip, key.dst_port),
+                base.wrapping_add((index * size) as u32),
+                1000,
+                65535,
+                0x18,
+                data,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn upload_batch_wraps_sequence_and_acks_only_the_consumed_prefix() {
+    let base = u32::MAX - 100;
+    let payload: Vec<_> = (0..17 * 257).map(|i| (i % 251) as u8).collect();
+    let mut bridge = TcpBridge::new(GW_IP);
+    let mut server = fast_path_pair(&mut bridge, key(), base).await;
+    let frames = segments(base, &payload, 257);
+    let (count, ack) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
+    assert_eq!(count, 16);
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(16 * 257));
+    let (count, ack) = bridge.try_fast_path_intercept_batch(&frames[16..]).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(payload.len() as u32));
+    let mut got = vec![0; payload.len()];
+    server.read_exact(&mut got).unwrap();
+    assert_eq!(got, payload);
+    let (_, ack) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(payload.len() as u32));
+    assert_eq!(
+        bridge.fast_path_conns[&key()].up_bytes,
+        payload.len() as u64
+    );
+}
+
+#[test]
+fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
+    use super::super::upload_batch::UploadBatch;
+    let frames = segments(2000, &[7; 100], 50);
+    let first = &frames[0];
+    let candidate = &frames[1];
+    let mut batch = UploadBatch::new(&first[54..]);
+    batch.extend(first, &frames[1..], 2050);
+    assert_eq!(batch.count, 2);
+    for (offset, value) in [
+        (26, 99),
+        (34, 99),
+        (41, 99),
+        (45, 99),
+        (48, 1),
+        (47, 0x19),
+        (20, 0x20),
+        (14, 0x44),
+        (46, 0x40),
+        (16, 0xff),
+    ] {
+        let mut changed = candidate.clone();
+        changed[offset] = value;
+        let mut batch = UploadBatch::new(&first[54..]);
+        let candidates = [changed];
+        batch.extend(first, &candidates, 2050);
+        assert_eq!(
+            batch.count, 1,
+            "changed offset {offset} must stop coalescing"
+        );
+    }
+    for length in 0..candidate.len() {
+        let mut batch = UploadBatch::new(&first[54..]);
+        let candidates = [&candidate[..length]];
+        batch.extend(first, &candidates, 2050);
+        assert_eq!(batch.count, 1);
+    }
+    let large = segments(2000, &vec![7; 80_000], 40_000);
+    let mut batch = UploadBatch::new(&large[0][54..]);
+    batch.extend(&large[0], &large[1..], 42_000);
+    assert_eq!(batch.count, 1, "batch payload must stay within 64 KiB");
+}
+
+#[tokio::test]
+async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
+    let base = u32::MAX - 1000;
+    let mut bridge = TcpBridge::new(GW_IP);
+    let mut server = fast_path_pair(&mut bridge, key(), base).await;
+    socket2::SockRef::from(&server)
+        .set_recv_buffer_size(4096)
+        .unwrap();
+    socket2::SockRef::from(&bridge.fast_path_conns[&key()].stream)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    // Fill both kernel queues without involving the bridge's retained upload queue.
+    let mut prefix = 0;
+    loop {
+        match bridge
+            .fast_path_conns
+            .get_mut(&key())
+            .unwrap()
+            .stream
+            .write(&[0x5a; 4096])
+        {
+            Ok(n) => {
+                assert!(n > 0);
+                prefix += n;
+                assert!(prefix < 8 * 1024 * 1024);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => panic!("fill: {e}"),
+        }
+    }
+    let payload: Vec<_> = (0..16 * 3960).map(|i| (i % 251) as u8).collect();
+    let frames = segments(base, &payload, 3960);
+    let (count, reply) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
+    assert_eq!(count, 16);
+    let written = tcp_ack_of(&reply).wrapping_sub(base) as usize;
+    assert!(
+        written < payload.len(),
+        "the oversized batch must hit backpressure"
+    );
+    assert_eq!(
+        bridge.fast_path_conns[&key()].ooo_bytes,
+        payload.len() - written
+    );
+    let fin = make_guest_segment(
+        (key().src_port, key().dst_ip, key().dst_port),
+        base.wrapping_add(payload.len() as u32),
+        1000,
+        65535,
+        0x11,
+        &[],
+    );
+    let deferred = bridge.try_fast_path_intercept(&fin).unwrap();
+    assert_eq!(tcp_ack_of(&deferred), base.wrapping_add(written as u32));
+    assert!(bridge.fast_path_conns[&key()].guest_fin_at.is_none());
+    let reader = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        server.read_to_end(&mut got).unwrap();
+        got
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while bridge.fast_path_conns[&key()].last_ack != base.wrapping_add(payload.len() as u32) {
+            bridge.poll_fast_path();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        bridge.fast_path_conns[&key()].up_bytes,
+        payload.len() as u64
+    );
+    assert!(bridge.fast_path_conns[&key()].ooo_segs.is_empty());
+    let closed = bridge.try_fast_path_intercept(&fin).unwrap();
+    assert_eq!(
+        tcp_ack_of(&closed),
+        base.wrapping_add(payload.len() as u32 + 1)
+    );
+    let got = reader.join().unwrap();
+    assert_eq!(&got[..prefix], vec![0x5a; prefix]);
+    assert_eq!(&got[prefix..], payload);
+}
+
+#[tokio::test]
+async fn upload_batch_broken_pipe_resets_without_acking_the_batch() {
+    let mut bridge = TcpBridge::new(GW_IP);
+    let _server = fast_path_pair(&mut bridge, key(), 2000).await;
+    bridge.fast_path_conns[&key()]
+        .stream
+        .shutdown(Shutdown::Write)
+        .unwrap();
+    let frames = segments(2000, &[7; 1024], 64);
+    let (count, reply) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
+    assert_eq!(count, 16);
+    assert_eq!(tcp_ack_of(&reply), 2000);
+    assert_ne!(tcp_flags_of(&reply) & 0x04, 0);
+    assert_eq!(bridge.fast_path_count(), 0);
+}
