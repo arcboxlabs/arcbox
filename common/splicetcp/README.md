@@ -39,6 +39,7 @@ The crate is split around a few seams:
 
 - `classifier::FrameClassifier` is a pure Ethernet-frame demultiplexer. It owns
   no fd; callers feed frames via `classify_frame` and drain the resulting queues.
+  Push sources may pass bare IPv4 packets to `classify_ip_packet` to avoid a framing copy.
 - `tcp_bridge::TcpBridge` performs SYN gating, handshake synthesis, and the
   promoted fast path.
 - `egress::EgressResolver` is the policy/dial seam. The default resolver dials
@@ -145,8 +146,11 @@ The `shim` module provides the adapter:
 
 - `L3ToL2Source` wraps an L3 `FrameSource` and prepends a fixed synthetic
   Ethernet header before classification.
-- `synthetic_l2_header` plus `l3_to_l2` provide the same conversion for
-  callback/push based sources that have no pollable fd.
+- `FrameClassifier::classify_ip_packet` accepts bare IPv4 packets from push
+  sources. Retained packets receive the synthetic Ethernet header directly in
+  their owned buffer. IPv4 fragments use the same reassembler as Ethernet input.
+- `synthetic_l2_header` plus `l3_to_l2` remain available for consumers that need
+  a contiguous Ethernet frame before classification.
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
   drops ARP or non-IPv4 frames that have no L3 representation.
 
