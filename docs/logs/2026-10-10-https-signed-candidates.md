@@ -49,3 +49,21 @@ The normal App installer stalled before replacing the helper. The elevated `abct
 Bundled helper probes now use `std::process::Command::output` on a blocking worker, which waits for and reaps the child directly. Probe exit failures, invalid UTF-8, binary equality checks, and the bounded helper RPC inspection retain their existing behavior. The admitted read-only subprocess finishes even if its async caller is dropped.
 
 All eight preflight regression tests, workspace formatting, and strict CLI all-target Clippy pass. The replacement signed candidate still requires the same native installer test. No native DNS, 443, Machine, or first-use authorization result can be inferred from these checks.
+
+## Replacement candidate native results
+
+Runtime `4ac714f6` contains the probe fix. The second-generation Production DMG has SHA-256 `a3ff49ba35da042ae58ac75476f410745748bc90a6d4a2f5eb2620a61643bb2a`. Desktop's portable host build and signed packaging targets produced this candidate. Its independent verifier passed all 140 inventory entries, signatures, binary provenance, and resource checks. First-generation artifacts remain under `generation-1/`; the Development DMG has not been rebuilt with this fix.
+
+The normal App authorization flow completed helper installation. The installed helper matched the bundled SHA-256 `75051033e5df87f64fb6a7365fc0cbc09d25bdc165b020f6ad8032fc7cf98388`, and the installer exited. `WatchSetupStatus` reported host `READY`, System `DISABLED`, and local HTTPS `TRUSTED`. The Machines list and creation control remained available. This result verifies the installer fix and host admission with System disabled.
+
+After removing the acceptance-only autostart override and restarting the App, System and Docker reached `READY`. The daemon log confirms kernel and rootfs selection from `0.8.9-machine-https.6a6d971`. Five original containers restarted through Docker policy; the acceptance driver stopped them again. No independent System start control was verified in the running App.
+
+`dscacheutil -q host -a name arcbox.local` returned `172.17.0.1`. Native `/usr/bin/curl https://arcbox.local` used port 443, verified the SAN and certificate chain, negotiated HTTP/2, and received 200. The in-app browser opened the local-services index without a certificate warning. These checks used the existing trusted CA. They do not establish first-use authorization, cancellation, or native container forwarding.
+
+The disposable `nginx:alpine` container failed before start. Create returned a CA-injection warning, and start returned 500. Docker's log identified `HEAD /containers/<id>/archive` failures while mounting the container's overlayfs with `index=on,nfs_export=on`: `device or resource busy`. Later individual archive queries returned 200 for the existing bundle and 404 for an absent bundle. The failure therefore needs investigation of repeated archive mount/unmount operations; no retry, delay, or injection bypass was added. The failed container was removed.
+
+The standalone `abctl --profile production tls status` query eventually succeeded after approximately 92 seconds. A sample during the delay showed `SecKeyCopyAttributes` entering `SecCDSAKeyCopyExternalRepresentation` and waiting in Security.framework. The public-only status path currently calls `load_root` when an identity journal exists. Native status latency and private-key access in public-certificate inspection remain open.
+
+The CA publication remained byte-identical to the pre-acceptance backup, with certificate SHA-256 `A9FA7415CCCE29386C14719538195C54C73132A0B8AB9D651C9CBC73970E489C`. No trust migration or revocation was requested. The candidate UI also reported that no sign-in service was configured; this local package does not establish complete production service configuration.
+
+The candidate exited normally. The original App, paired System disk clones, and original default-machine configuration were restored. Candidate disk state and diagnostic log tails were preserved. The temporary autostart configuration was removed. Restoration of the exact original helper requires local sudo authentication; workload restoration remains pending until that step completes. Do not treat the feature or native acceptance as complete.
