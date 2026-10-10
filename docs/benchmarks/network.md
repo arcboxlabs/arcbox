@@ -243,3 +243,16 @@ At upstream commit `42b55314`, validation on macOS Apple Silicon passed with the
 - `devenv shell -- cargo clippy -p arcbox-packet --all-targets --all-features -- -D warnings`: passed.
 
 The benchmark numbers above remain the original downstream measurements. No throughput or microbenchmark measurements were repeated for the upstream submission.
+
+## 2026-10-11 — IPv4 UDP batch sends
+
+`BatchDgram::send_batch_to_v4` sends to an explicit IPv4 destination without connecting the socket. The method uses the existing kernel cap and syscall error handling. Partial success returns the accepted prefix count. Tests cover destination changes, zero-length payloads, packet boundaries, and a valid packet followed by an oversized packet. All 24 crate tests, the documentation test, strict Clippy, and formatting pass.
+
+Run `devenv shell -- cargo bench --manifest-path .source/arcbox/Cargo.toml -p arcbox-xnu-net --bench throughput -- ipv4 --sample-size 10 --warm-up-time 1 --measurement-time 2` from the ArcTap checkout. The benchmark sends 64 datagrams of 1472 bytes, then receives each datagram individually. Host: Apple M5 Max (Mac17,6), macOS 26.7.1 (25G241), Rust 1.96.0.
+
+| Send method | Criterion time estimate per 64 datagrams | Estimate interval | Datagrams/s estimate |
+| --- | ---: | ---: | ---: |
+| `send_to` | 273.04 µs | 257.39–286.07 µs | 234,400 |
+| `send_batch_to_v4` | 263.83 µs | 254.16–275.19 µs | 242,580 |
+
+The point estimate improves by 3.4%, but the intervals overlap. This single sequential run includes receiver cost and does not establish a NE throughput improvement. ArcTap integration requires a separate runtime comparison.
