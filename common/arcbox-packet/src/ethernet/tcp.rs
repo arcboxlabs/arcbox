@@ -103,7 +103,9 @@ pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
         "build_tcp_data_frame: ip_total_len={ip_total_len} overflows u16"
     );
     let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
+    let mut frame = Vec::with_capacity(frame_len);
+    // Preserve zeroed reserved fields without clearing payload bytes before copying.
+    frame.resize(ETH_HEADER_LEN + 20 + tcp_hdr_len, 0);
 
     // -- Ethernet header --
     frame[0..6].copy_from_slice(&dst_mac);
@@ -133,7 +135,7 @@ pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
     frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
 
     // -- Payload --
-    frame[tcp + 20..].copy_from_slice(payload);
+    frame.extend_from_slice(payload);
 
     // TCP checksum over header + payload.
     let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
@@ -172,7 +174,9 @@ pub fn build_tcp_data_frame_partial_csum(p: &TcpFrameParams, payload: &[u8]) -> 
         "build_tcp_data_frame_partial_csum: ip_total_len={ip_total_len} overflows u16"
     );
     let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
+    let mut frame = Vec::with_capacity(frame_len);
+    // Preserve zeroed reserved fields without clearing payload bytes before copying.
+    frame.resize(ETH_HEADER_LEN + 20 + tcp_hdr_len, 0);
 
     // -- Ethernet header --
     frame[0..6].copy_from_slice(&dst_mac);
@@ -202,7 +206,7 @@ pub fn build_tcp_data_frame_partial_csum(p: &TcpFrameParams, payload: &[u8]) -> 
     frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
 
     // -- Payload --
-    frame[tcp + 20..].copy_from_slice(payload);
+    frame.extend_from_slice(payload);
 
     // Pseudo-header-only TCP checksum. The guest kernel completes it
     // per-segment during GSO segmentation (VIRTIO_NET_HDR_F_NEEDS_CSUM).
