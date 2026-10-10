@@ -195,3 +195,18 @@ iperf3 -c 127.0.0.1 -p 5201 -P 2 -b 6G -t 10
 # Rate-limited works clean.
 iperf3 -c 127.0.0.1 -p 5201 -P 4 -b 2G -t 10
 ```
+
+## 2026-10-10 — TCP frame checksum
+
+The Ethernet TCP checksum builder used a scalar loop with a branch at each 16-bit word. The builder now calls the existing `checksum_add` dispatcher and subtracts the stored checksum field before folding. The change preserves checksum-field exclusion, odd-length input, and short-input behavior.
+
+Run `devenv shell -- cargo run --locked -p arcbox-packet --example checksum_bench --release` from the ArcBox checkout. Both sides used the same benchmark with `black_box` on the input and result. The baseline checksum implementation is from `72a59f9`; only the checksum implementation changed between the two release builds. Host: Apple M5 Max, macOS, Rust 1.96.0. These are single-run, warm-cache microbenchmarks.
+
+| TCP segment bytes | Baseline ns/call | Shared dispatcher ns/call |
+| --- | ---: | ---: |
+| 20 | 3.6 | 2.1 |
+| 1,480 | 279.2 | 12.8 |
+| 3,980 | 731.6 | 37.5 |
+| 65,535 | 12,195.0 | 745.2 |
+
+The scalar-oracle test covers unaligned input, nonzero checksum fields, odd lengths, the SIMD threshold, and the maximum IPv4 segment length. All 44 packet tests and 108 TCP bridge tests pass. Strict Clippy and formatting pass with Rust 1.98.1, which supports the workspace lint configuration. These measurements cover checksum computation only; they do not establish a network-throughput improvement.

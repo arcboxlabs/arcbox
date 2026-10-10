@@ -68,16 +68,10 @@ pub fn tcp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u
     sum += 6u32; // Protocol: TCP
     sum += tcp_segment.len() as u32;
 
-    // TCP segment, treating checksum field (offset 16-17) as 0.
-    let mut i = 0;
-    while i + 1 < tcp_segment.len() {
-        if i != 16 {
-            sum += u32::from(u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]));
-        }
-        i += 2;
-    }
-    if i < tcp_segment.len() {
-        sum += u32::from(tcp_segment[i]) << 8;
+    // Subtract the existing field so the shared SIMD path can sum the whole segment.
+    sum += crate::checksum::checksum_add(tcp_segment);
+    if tcp_segment.len() >= 18 {
+        sum -= u32::from(u16::from_be_bytes([tcp_segment[16], tcp_segment[17]]));
     }
 
     while sum > 0xFFFF {

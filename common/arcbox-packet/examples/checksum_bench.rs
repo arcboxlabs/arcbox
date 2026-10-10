@@ -4,6 +4,7 @@
 //! cargo run -p arcbox-packet --example checksum_bench --release
 //! ```
 
+use std::net::Ipv4Addr;
 use std::time::Instant;
 
 use arcbox_packet::checksum::{checksum, checksum_add_scalar, checksum_fold, checksum_simd};
@@ -11,12 +12,12 @@ use arcbox_packet::checksum::{checksum, checksum_add_scalar, checksum_fold, chec
 fn bench(label: &str, len: usize, iters: usize, f: impl Fn(&[u8]) -> u16) {
     let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
     for _ in 0..100 {
-        std::hint::black_box(f(&data));
+        std::hint::black_box(f(std::hint::black_box(&data)));
     }
     let t0 = Instant::now();
     let mut sink = 0u16;
     for _ in 0..iters {
-        sink ^= f(&data);
+        sink ^= std::hint::black_box(f(std::hint::black_box(&data)));
     }
     let elapsed = t0.elapsed();
     std::hint::black_box(sink);
@@ -39,11 +40,20 @@ fn main() {
     );
     println!();
 
-    for &len in &[63usize, 64, 65, 1500, 9000, 16384, 65536] {
+    for &len in &[
+        20usize, 63, 64, 65, 1480, 1500, 3980, 9000, 16384, 65535, 65536,
+    ] {
         let iters = (50_000_000 / len).max(2_000);
         bench("checksum", len, iters, checksum);
         bench("scalar", len, iters, checksum_scalar);
         bench("simd", len, iters, checksum_simd);
+        bench("ethernet TCP", len, iters, |segment| {
+            arcbox_packet::ethernet::tcp_checksum(
+                Ipv4Addr::new(192, 168, 1, 1),
+                Ipv4Addr::new(192, 168, 1, 2),
+                segment,
+            )
+        });
         let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
         assert_eq!(
             checksum_fold(checksum_add_scalar(&data)),
