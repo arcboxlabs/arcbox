@@ -121,6 +121,9 @@ impl TcpBridge {
             );
         }
 
+        if !inline_owned && self.fast_path_read_buf.is_empty() {
+            self.fast_path_read_buf.resize(128 * 1024, 0);
+        }
         self.fast_path_conns.insert(
             key,
             FastPathConn {
@@ -152,11 +155,6 @@ impl TcpBridge {
                 fast_retransmit: false,
                 fin_seq: None,
                 retransmits: 0,
-                read_buf: if inline_owned {
-                    Vec::new()
-                } else {
-                    vec![0u8; 32768]
-                },
                 host_eof: false,
                 guest_fin_at: None,
                 inline_owned,

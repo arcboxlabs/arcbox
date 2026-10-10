@@ -274,6 +274,8 @@ pub struct TcpBridge {
     /// Fast-path connections bypassing any userspace TCP state machine.
     /// Keyed by (guest_src_ip, guest_src_port, dest_ip, dest_port).
     fast_path_conns: HashMap<SynFlowKey, FastPathConn>,
+    /// Shared read scratch, allocated when the first polled flow is promoted.
+    fast_path_read_buf: Vec<u8>,
     /// Gateway MAC for constructing frames to the guest.
     fast_path_gateway_mac: [u8; 6],
     /// Guest MAC for constructing frames to the guest. Learned from inbound
@@ -397,8 +399,6 @@ pub(super) struct FastPathConn {
     fin_seq: Option<u32>,
     /// Download retransmissions performed (diagnostics, logged at close).
     retransmits: u64,
-    /// Read buffer for host → guest data (reused across polls).
-    read_buf: Vec<u8>,
     /// True if host stream has reached EOF.
     host_eof: bool,
     /// `Some(t)` once the guest half-closed (sent an in-order FIN) while the
@@ -582,6 +582,7 @@ impl TcpBridge {
             )),
             gateway_ip,
             fast_path_conns: HashMap::new(),
+            fast_path_read_buf: Vec::new(),
             fast_path_gateway_mac: [0; 6],
             fast_path_guest_mac: None,
             large_frames_enabled: false,

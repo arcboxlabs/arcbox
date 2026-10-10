@@ -1,6 +1,7 @@
 use super::*;
 use crate::ethernet::ETH_HEADER_LEN;
 
+mod read_batch;
 mod upload_backpressure;
 mod upload_errors;
 
