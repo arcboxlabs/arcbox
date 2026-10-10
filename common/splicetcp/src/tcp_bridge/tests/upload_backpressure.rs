@@ -40,11 +40,18 @@ async fn limited_fast_path_pair(
 /// including when the first segment crosses the sequence-number boundary.
 #[tokio::test]
 async fn upload_multi_hole_burst_advances_to_each_missing_range() {
-    use std::io::Read;
+    check_upload_multi_hole_burst(1460).await;
+}
 
-    const SEGMENT: usize = 1460;
-    let holes = [0, 16 * SEGMENT, 899 * SEGMENT];
-    let payload: Vec<_> = (0..3 * 1024 * 1024)
+#[tokio::test]
+async fn jumbo_upload_multi_hole_burst_preserves_bytes_and_ack_cursor() {
+    check_upload_multi_hole_burst(3960).await;
+}
+
+async fn check_upload_multi_hole_burst(segment_size: usize) {
+    use std::io::Read;
+    let holes = [0, 16 * segment_size, 899 * segment_size];
+    let payload: Vec<_> = (0..(3 * 1024 * 1024).max(901 * segment_size))
         .map(|i| ((i * 31 + i / 251) % 256) as u8)
         .collect();
     let base = u32::MAX - 1000;
@@ -73,8 +80,8 @@ async fn upload_multi_hole_burst_advances_to_each_missing_range() {
         )
     };
 
-    for (index, bytes) in payload.chunks(SEGMENT).enumerate() {
-        let offset = index * SEGMENT;
+    for (index, bytes) in payload.chunks(segment_size).enumerate() {
+        let offset = index * segment_size;
         if holes.contains(&offset) {
             continue;
         }
@@ -85,13 +92,17 @@ async fn upload_multi_hole_burst_advances_to_each_missing_range() {
     }
     assert_eq!(
         bridge.fast_path_conns[&key].ooo_bytes,
-        payload.len() - holes.len() * SEGMENT
+        payload.len() - holes.len() * segment_size
     );
 
     for (index, &offset) in holes.iter().enumerate() {
         let next_hole = holes.get(index + 1).copied().unwrap_or(payload.len());
         let reply = bridge
-            .try_fast_path_intercept(&segment(offset, 0x18, &payload[offset..offset + SEGMENT]))
+            .try_fast_path_intercept(&segment(
+                offset,
+                0x18,
+                &payload[offset..offset + segment_size],
+            ))
             .unwrap();
         let mut cursor = tcp_ack_of(&reply).wrapping_sub(base) as usize;
         assert!(cursor >= offset && cursor <= next_hole);

@@ -142,7 +142,7 @@ const OOO_REASSEMBLY_CAP: usize = 4 * 1024 * 1024;
 /// drop-and-dup-ACK like the byte cap.
 const OOO_MAX_SEGMENTS: usize = 4096;
 
-/// MSS we advertise in handshake frames to the guest. 1460 is the standard
+/// Default MSS advertised in handshake frames to the guest. 1460 is the standard
 /// Ethernet MSS (1500 MTU − 40 bytes IP+TCP). Host→guest large frames with
 /// GSO are unaffected — MSS only bounds the *guest's* segment size.
 const SHIM_MSS: u16 = 1460;
@@ -287,6 +287,8 @@ pub struct TcpBridge {
     /// Maximum TCP payload bytes per host→guest fast-path frame when
     /// `large_frames_enabled` is false.
     fast_path_guest_mss: usize,
+    /// Receive MSS advertised in new handshakes, independent of the peer MSS.
+    advertised_mss: u16,
     /// Connection sink for sending promoted fast-path connections to the
     /// RX inject thread for inline (zero-copy) host→guest data transfer.
     conn_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
@@ -587,6 +589,7 @@ impl TcpBridge {
             fast_path_guest_mac: None,
             large_frames_enabled: false,
             fast_path_guest_mss: FAST_PATH_GUEST_MSS,
+            advertised_mss: SHIM_MSS,
             conn_sink: None,
             observer: None,
             handshake_conns: HashMap::new(),
@@ -614,12 +617,14 @@ impl TcpBridge {
     }
 
     /// Sets the fast-path segmentation budget so each emitted IPv4 packet fits
-    /// within `mtu` bytes. This preserves normal per-packet checksums and is the
-    /// right mode for high-MTU L3 links such as host `utun` / Network Extension.
+    /// within `mtu` bytes. New handshakes advertise the same payload budget for
+    /// guest uploads. Downloads still honor the peer MSS and retain per-packet
+    /// checksums. Use this for high-MTU L3 links such as `utun` / Network Extension.
     pub fn set_fast_path_mtu(&mut self, mtu: usize) {
         self.fast_path_guest_mss = mtu
             .saturating_sub(20 + 20)
             .clamp(1, u16::MAX as usize - 20 - 20);
+        self.advertised_mss = self.fast_path_guest_mss as u16;
     }
 
     /// Attaches a connection sink for sending promoted fast-path connections

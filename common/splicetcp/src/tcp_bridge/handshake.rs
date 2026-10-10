@@ -281,7 +281,7 @@ impl TcpBridge {
                                 ack: conn.peer_isn.wrapping_add(1),
                                 src_mac: conn.gw_mac,
                                 dst_mac: conn.guest_mac,
-                                mss: SHIM_MSS,
+                                mss: self.advertised_mss,
                                 wscale: conn.peer_wscale.map(|_| SHIM_WSCALE),
                                 // The fast path only supports cumulative ACKs.
                                 sack_permitted: false,
@@ -355,7 +355,7 @@ impl TcpBridge {
                                 seq: conn.our_isn,
                                 src_mac: conn.gw_mac,
                                 dst_mac: conn.guest_mac,
-                                mss: SHIM_MSS,
+                                mss: self.advertised_mss,
                                 wscale: Some(SHIM_WSCALE),
                                 sack_permitted: false,
                             });
