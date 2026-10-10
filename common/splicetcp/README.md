@@ -75,6 +75,11 @@ Without a `ConnSink`, host→guest bytes are drained by
 `TcpBridge::poll_fast_path`. This is simple and works in synchronous loops, but
 the caller must keep polling while fast-path connections are active.
 
+Each poll reads at most once per connection, up to 128 KiB within the guest's
+available receive window. The bridge segments these bytes by the peer MSS and
+configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits
+one IPv4 frame.
+
 `poll_fast_path` also retries retained guest→host bytes after host socket
 backpressure, including for inline flows. Upload ACKs advance only over bytes
 accepted by the host socket. Hard write errors, including `BrokenPipe`, reset
@@ -113,9 +118,10 @@ Important constraints:
 - If the sink rejects a connection, `TcpBridge` keeps that connection on the
   fallback polling path.
 
-When a promoted connection is owned by a `ConnSink` (`inline_owned = true`), the
-bridge does not allocate the fallback 32 KiB per-connection read buffer. This
-keeps the event-driven path from paying memory for a buffer it will never use.
+The first connection that requires polling allocates one shared 128 KiB read
+buffer. The bridge reuses this buffer across connections and keeps it until
+the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
+does not allocate this buffer.
 
 ## L3 tunnel shim
 

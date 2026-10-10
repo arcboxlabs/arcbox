@@ -416,6 +416,12 @@ impl TcpBridge {
         };
         let now = std::time::Instant::now();
         let dead_flow_timeout = self.dead_flow_timeout;
+        let read_buf = &mut self.fast_path_read_buf;
+        let read_cap = if ctx.large_frames {
+            32 * 1024
+        } else {
+            read_buf.len()
+        };
 
         for (key, conn) in &mut self.fast_path_conns {
             // Failed inline readers mark the shared stream dead before poll reaps it.
@@ -855,11 +861,11 @@ impl TcpBridge {
                         conn.guest_port,
                     );
                 }
-                budget.min(conn.read_buf.len())
+                budget.min(read_cap)
             };
 
             use std::io::Read;
-            match conn.stream.read(&mut conn.read_buf[..cap]) {
+            match conn.stream.read(&mut read_buf[..cap]) {
                 Ok(0) => {
                     // Host EOF — send FIN to guest.
                     conn.host_eof = true;
@@ -894,8 +900,8 @@ impl TcpBridge {
                         conn.guest_fin_at = Some(now);
                     }
                     let seq_now = conn.our_seq.load(std::sync::atomic::Ordering::Relaxed);
-                    conn.retransmit_buf.extend(&conn.read_buf[..n]);
-                    emit_data_frames(&ctx, conn, seq_now, &conn.read_buf[..n], &mut frames);
+                    conn.retransmit_buf.extend(&read_buf[..n]);
+                    emit_data_frames(&ctx, conn, seq_now, &read_buf[..n], &mut frames);
                     conn.our_seq
                         .fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
                 }
