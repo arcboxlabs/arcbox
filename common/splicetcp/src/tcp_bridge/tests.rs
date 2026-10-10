@@ -4,6 +4,7 @@ use crate::ethernet::ETH_HEADER_LEN;
 mod link_mss;
 mod read_batch;
 mod upload_backpressure;
+mod upload_batch;
 mod upload_errors;
 
 const GW_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 1);

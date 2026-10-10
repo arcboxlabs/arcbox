@@ -658,6 +658,7 @@ mod fast_path;
 mod handshake;
 mod promotion;
 mod settings;
+mod upload_batch;
 
 /// Returns true if the saved handshake frame is due for retransmit.
 ///
