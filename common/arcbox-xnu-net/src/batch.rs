@@ -4,6 +4,7 @@ use std::io;
 use std::os::fd::RawFd;
 
 mod ipv4;
+pub use ipv4::RxDatagramV4;
 
 /// Maximum datagrams per batch call.
 ///
@@ -70,7 +71,7 @@ pub struct BatchDgram {
 // SAFETY: BatchDgram contains raw pointers in its iovec/msghdr arrays, which
 // is why the auto-impl of `Send` is denied. Those pointers are only valid
 // for the duration of a single batch call — they alias the caller-supplied
-// buffer slices or a temporary destination address, get filled in before I/O,
+// buffer slices or temporary socket addresses, get filled in before I/O,
 // and are passed to the kernel by the immediately-following syscall under
 // `&mut self`. Between calls they are stale and never dereferenced by Rust.
 // Moving the struct across threads therefore moves no live aliases. We
