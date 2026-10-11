@@ -69,30 +69,17 @@ fn emit_data_frames(
 }
 
 impl TcpBridge {
-    /// Checks if a TCP frame matches a fast-path connection.
-    ///
-    /// Called from the classifier's `drain_fast_path`. Returns
-    /// `Some(ack_frame)` if the frame was handled (payload written to
-    /// host stream, ACK generated), or `None` if not a fast-path match.
-    pub fn try_fast_path_intercept(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
-        self.try_fast_path_intercept_batch(std::slice::from_ref(&frame))
-            .map(|(_, reply)| reply)
-    }
-
-    /// Intercept the first frame and up to 15 consecutive upload frames.
-    /// Return the consumed prefix length and one cumulative ACK, RST, or empty reply.
-    /// Frames with different ACK state, gaps, control flags, or retained data use the single-frame path.
-    pub fn try_fast_path_intercept_batch<T: AsRef<[u8]>>(
+    pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
         &mut self,
         frames: &[T],
     ) -> Option<(usize, Vec<u8>)> {
         let frame = frames.first()?.as_ref();
         let mut consumed = 1;
-        if frame.len() < ETH_HEADER_LEN + 40 {
-            return None; // Too short for ETH + IP + TCP minimum
+        if frame.len() < IP_START + 40 {
+            return None;
         }
 
-        let ip_start = ETH_HEADER_LEN;
+        let ip_start = IP_START;
         let protocol = frame[ip_start + 9];
         if protocol != 6 {
             return None; // Not TCP
@@ -255,7 +242,7 @@ impl TcpBridge {
                     let fresh = &frame[payload_start + overlap as usize..payload_end];
                     let mut batch = super::upload_batch::UploadBatch::new(fresh);
                     if overlap == 0 && conn.ooo_segs.is_empty() {
-                        batch.extend(frame, &frames[1..], seq_end);
+                        batch.extend(frame, &frames[1..], seq_end, ip_start);
                     }
                     consumed = batch.count;
                     match batch.send(conn) {

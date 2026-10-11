@@ -25,12 +25,18 @@ impl<'a> UploadBatch<'a> {
     }
 
     /// Coalesce only identical download ACK state; the intercept applies that state once.
-    pub fn extend<T: AsRef<[u8]>>(&mut self, first: &[u8], following: &'a [T], mut seq: u32) {
-        let Some((first_ip, first_tcp, _)) = plain_upload(first) else {
+    pub fn extend<T: AsRef<[u8]>>(
+        &mut self,
+        first: &[u8],
+        following: &'a [T],
+        mut seq: u32,
+        ip_start: usize,
+    ) {
+        let Some((first_ip, first_tcp, _)) = plain_upload(first, ip_start) else {
             return;
         };
         for frame in following.iter().take(MAX_SEGMENTS - 1) {
-            let Some((ip, tcp, payload)) = plain_upload(frame.as_ref()) else {
+            let Some((ip, tcp, payload)) = plain_upload(frame.as_ref(), ip_start) else {
                 break;
             };
             if ip[12..20] != first_ip[12..20]
@@ -156,11 +162,14 @@ impl FastPathConn {
 }
 
 /// Batch eligibility is stricter than single-frame interception; other frames stay on the existing path.
-fn plain_upload(frame: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
-    if frame.get(12..14)? != [0x08, 0x00] {
+fn plain_upload(frame: &[u8], ip_start: usize) -> Option<(&[u8], &[u8], &[u8])> {
+    if ip_start == 0 && frame.len() > usize::from(u16::MAX) {
         return None;
     }
-    let ip = frame.get(ETH_HEADER_LEN..)?;
+    if ip_start == ETH_HEADER_LEN && frame.get(12..14)? != [0x08, 0x00] {
+        return None;
+    }
+    let ip = frame.get(ip_start..)?;
     let header = ip.get(..20)?;
     let ihl = usize::from(header[0] & 0x0f) * 4;
     if header[0] >> 4 != 4
