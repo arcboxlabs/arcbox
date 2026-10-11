@@ -102,6 +102,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-11 — Docker archive teardown releases indexed overlay mounts](logs/2026-10-11-docker-archive-mount-lifetime.md)
 - [2026-10-10 — Signed HTTPS candidates pass artifact verification](logs/2026-10-10-https-signed-candidates.md)
 - [2026-10-09 — HTTPS packaging prerequisites and isolated NAT validation are ready](logs/2026-10-09-https-validation-preparation.md)
 - [2026-10-08 — Custom local domains and deterministic ownership](logs/2026-10-08-custom-local-domains.md)

@@ -119,12 +119,14 @@ impl HelperError {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl From<security_framework::base::Error> for HelperError {
     fn from(error: security_framework::base::Error) -> Self {
         Self::Other(format!("macOS security: {error}"))
     }
 }
 
+#[cfg(target_os = "macos")]
 impl From<core_foundation::error::CFError> for HelperError {
     fn from(error: core_foundation::error::CFError) -> Self {
         Self::Other(format!("macOS security: {error}"))

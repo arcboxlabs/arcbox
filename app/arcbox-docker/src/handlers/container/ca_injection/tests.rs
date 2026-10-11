@@ -2,6 +2,7 @@
 
 mod concurrency;
 mod guest;
+mod native;
 mod real_docker;
 
 use axum::http::Method;
