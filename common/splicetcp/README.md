@@ -96,7 +96,9 @@ frames use the single-frame path. Partial writes retain every unwritten suffix;
 only bytes accepted by the host socket advance the ACK.
 
 `poll_fast_path` also retries retained guest→host bytes after host socket
-backpressure, including for inline flows. Upload ACKs advance only over bytes
+backpressure, including for inline flows. Recovery batches contiguous retained
+bytes within the same 64-segment and 256 KiB limits, skips retransmission overlap,
+and stops at the first missing range. Upload ACKs advance only over bytes
 accepted by the host socket. Hard write errors, including `BrokenPipe`, reset
 the guest flow without ACKing rejected bytes. Pending upload data shares the
 reassembly limits of 4 MiB and 4096 segments per flow. A contiguous tail takes

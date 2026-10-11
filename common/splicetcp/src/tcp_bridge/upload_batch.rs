@@ -1,4 +1,4 @@
-//! Bounded vectored writes for consecutive upload frames with identical ACK state.
+//! Bounded vectored writes for consecutive upload frames and retained upload recovery.
 
 use super::FastPathConn;
 use crate::ethernet::ETH_HEADER_LEN;
@@ -51,12 +51,7 @@ impl<'a> UploadBatch<'a> {
 
     /// Advance the ACK only over accepted bytes; retain every rejected suffix for polling.
     pub fn send(&self, conn: &mut FastPathConn) -> io::Result<bool> {
-        let result = if self.count == 1 {
-            conn.stream.write(&self.payloads[0])
-        } else {
-            conn.stream.write_vectored(&self.payloads[..self.count])
-        };
-        let accepted = match result {
+        let accepted = match self.write_to(&mut conn.stream) {
             Ok(n) => {
                 conn.up_bytes += n as u64;
                 conn.set_last_ack(conn.last_ack.wrapping_add(n as u32));
@@ -83,6 +78,80 @@ impl<'a> UploadBatch<'a> {
             }
         }
         Ok(accepted.is_some())
+    }
+
+    fn write_to(&self, stream: &mut std::net::TcpStream) -> io::Result<usize> {
+        if self.count == 1 {
+            stream.write(&self.payloads[0])
+        } else {
+            stream.write_vectored(&self.payloads[..self.count])
+        }
+    }
+}
+
+impl FastPathConn {
+    /// Drain contiguous retained bytes in bounded batches, clipping retransmission overlap.
+    /// Stop at a hole, short write, or WouldBlock; propagate hard errors for RST teardown.
+    pub(super) fn drain_parked_segments(&mut self) -> io::Result<()> {
+        loop {
+            self.discard_acked_upload_segments();
+            let mut batch = UploadBatch {
+                payloads: [IoSlice::new(&[]); MAX_SEGMENTS],
+                count: 0,
+                bytes: 0,
+            };
+            let mut cursor = self.last_ack;
+            for (seq, data) in &self.ooo_segs {
+                let overlap = cursor.wrapping_sub(*seq);
+                if overlap >= 0x8000_0000 {
+                    break;
+                }
+                if overlap as usize >= data.len() {
+                    continue;
+                }
+                let start = overlap as usize;
+                let len = (data.len() - start).min(MAX_BYTES - batch.bytes);
+                batch.payloads[batch.count] = IoSlice::new(&data[start..start + len]);
+                batch.count += 1;
+                batch.bytes += len;
+                cursor = cursor.wrapping_add(len as u32);
+                if batch.count == MAX_SEGMENTS || batch.bytes == MAX_BYTES {
+                    break;
+                }
+            }
+            if batch.count == 0 {
+                break;
+            }
+            let offered = batch.bytes;
+            let take = match batch.write_to(&mut self.stream) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.up_would_block += 1;
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            self.up_bytes += take as u64;
+            self.set_last_ack(self.last_ack.wrapping_add(take as u32));
+            if take < offered {
+                self.up_short_writes += 1;
+                break;
+            }
+        }
+        self.discard_acked_upload_segments();
+        Ok(())
+    }
+
+    fn discard_acked_upload_segments(&mut self) {
+        while self.ooo_segs.front().is_some_and(|(seq, data)| {
+            seq.wrapping_add(data.len() as u32)
+                .wrapping_sub(self.last_ack)
+                .cast_signed()
+                <= 0
+        }) {
+            let (_, data) = self.ooo_segs.pop_front().unwrap();
+            self.ooo_bytes -= data.len();
+        }
     }
 }
 
