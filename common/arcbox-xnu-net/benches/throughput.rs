@@ -267,5 +267,88 @@ fn bench_ipv4(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_rw, bench_batch_rw, bench_ipv4);
+// Loopback delivery can become readable after send_to returns.
+fn receive_ready<T>(fd: RawFd, mut receive: impl FnMut() -> io::Result<T>) -> T {
+    loop {
+        match receive() {
+            Ok(value) => return value,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let mut event = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: event is one initialized pollfd and remains live during poll.
+                assert_eq!(unsafe { libc::poll(&raw mut event, 1, 2000) }, 1);
+                assert_ne!(event.revents & libc::POLLIN, 0);
+            }
+            Err(error) => panic!("receive failed: {error}"),
+        }
+    }
+}
+
+fn bench_ipv4_recv(c: &mut Criterion) {
+    use arcbox_xnu_net::RxDatagramV4;
+    use std::net::UdpSocket;
+
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    set_buf_size(receiver.as_raw_fd(), libc::SO_RCVBUF, 1024 * 1024);
+    let destination = receiver.local_addr().unwrap();
+    let mut io = BatchDgram::new();
+    let mut storage = vec![0; 64 * 16385];
+    let mut group = c.benchmark_group("ipv4_recv");
+    group.throughput(Throughput::Elements(64));
+    for size in [1472, 3972] {
+        let payload = vec![0xAB; size];
+        for batched in [false, true] {
+            group.bench_with_input(
+                BenchmarkId::new(if batched { "batch" } else { "scalar" }, size),
+                &batched,
+                |bencher, &batch| {
+                    bencher.iter(|| {
+                        for _ in 0..64 {
+                            assert_eq!(sender.send_to(&payload, destination).unwrap(), size);
+                        }
+                        if batch {
+                            let mut chunks = storage.as_chunks_mut::<16385>().0.iter_mut();
+                            let mut slots: [_; 64] =
+                                std::array::from_fn(|_| RxDatagramV4::new(chunks.next().unwrap()));
+                            let mut received = 0;
+                            while received < 64 {
+                                let count = receive_ready(receiver.as_raw_fd(), || {
+                                    io.recv_batch_from_v4(
+                                        receiver.as_raw_fd(),
+                                        &mut slots[received..],
+                                    )
+                                });
+                                assert!(count > 0);
+                                received += count;
+                            }
+                        } else {
+                            for _ in 0..64 {
+                                assert_eq!(
+                                    receive_ready(receiver.as_raw_fd(), || receiver
+                                        .recv_from(&mut storage[..16385]))
+                                    .0,
+                                    size
+                                );
+                            }
+                        }
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_single_rw,
+    bench_batch_rw,
+    bench_ipv4,
+    bench_ipv4_recv
+);
 criterion_main!(benches);

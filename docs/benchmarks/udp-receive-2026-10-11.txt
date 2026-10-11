@@ -1,0 +1,42 @@
+• Running devenv:files:cleanup
+✓ Running devenv:files:cleanup in 26.2ms
+• Running devenv:enterShell
+✓ Running devenv:enterShell in 23.3ms
+• Running devenv:enterTest
+✓ Running devenv:enterTest in 458ns (no command)
+✨ devenv 2.3.1 is newer than devenv input (2.1.2) in devenv.lock. Run 'devenv update' to sync.
+    Finished `bench` profile [optimized + debuginfo] target(s) in 0.21s
+     Running benches/throughput.rs (.source/arcbox/target/release/deps/throughput-b0ad7a1373fae86c)
+Gnuplot not found, using plotters backend
+Benchmarking ipv4_recv/scalar/1472
+Benchmarking ipv4_recv/scalar/1472: Warming up for 1.0000 s
+Benchmarking ipv4_recv/scalar/1472: Collecting 30 samples in estimated 3.0714 s (8370 iterations)
+Benchmarking ipv4_recv/scalar/1472: Analyzing
+ipv4_recv/scalar/1472   time:   [249.42 µs 258.58 µs 272.39 µs]
+                        thrpt:  [234.96 Kelem/s 247.50 Kelem/s 256.59 Kelem/s]
+Benchmarking ipv4_recv/batch/1472
+Benchmarking ipv4_recv/batch/1472: Warming up for 1.0000 s
+Benchmarking ipv4_recv/batch/1472: Collecting 30 samples in estimated 3.0898 s (13k iterations)
+Benchmarking ipv4_recv/batch/1472: Analyzing
+ipv4_recv/batch/1472    time:   [239.75 µs 250.81 µs 262.00 µs]
+                        thrpt:  [244.28 Kelem/s 255.17 Kelem/s 266.94 Kelem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking ipv4_recv/scalar/3972
+Benchmarking ipv4_recv/scalar/3972: Warming up for 1.0000 s
+Benchmarking ipv4_recv/scalar/3972: Collecting 30 samples in estimated 3.0072 s (12k iterations)
+Benchmarking ipv4_recv/scalar/3972: Analyzing
+ipv4_recv/scalar/3972   time:   [294.63 µs 317.10 µs 343.66 µs]
+                        thrpt:  [186.23 Kelem/s 201.83 Kelem/s 217.22 Kelem/s]
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+Benchmarking ipv4_recv/batch/3972
+Benchmarking ipv4_recv/batch/3972: Warming up for 1.0000 s
+Benchmarking ipv4_recv/batch/3972: Collecting 30 samples in estimated 3.0433 s (11k iterations)
+Benchmarking ipv4_recv/batch/3972: Analyzing
+ipv4_recv/batch/3972    time:   [268.32 µs 296.72 µs 334.80 µs]
+                        thrpt:  [191.16 Kelem/s 215.69 Kelem/s 238.52 Kelem/s]
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+
