@@ -135,10 +135,16 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
         written < payload.len(),
         "the oversized batch must hit backpressure"
     );
-    assert_eq!(
-        bridge.fast_path_conns[&key()].ooo_bytes,
-        payload.len() - written
-    );
+    let conn = &bridge.fast_path_conns[&key()];
+    let retained: Vec<_> = conn
+        .ooo_segs
+        .iter()
+        .flat_map(|(seq, data)| {
+            let overlap = conn.last_ack.wrapping_sub(*seq).cast_signed().max(0) as usize;
+            data[overlap..].iter().copied()
+        })
+        .collect();
+    assert_eq!(retained, payload[written..]);
     let fin = make_guest_segment(
         (key().src_port, key().dst_ip, key().dst_port),
         base.wrapping_add(payload.len() as u32),
@@ -192,4 +198,57 @@ async fn upload_batch_broken_pipe_resets_without_acking_the_batch() {
     assert_eq!(tcp_ack_of(&reply), 2000);
     assert_ne!(tcp_flags_of(&reply) & 0x04, 0);
     assert_eq!(bridge.fast_path_count(), 0);
+}
+
+#[tokio::test]
+async fn retained_upload_batches_clip_overlaps_and_stop_at_wrapping_gap() {
+    for (size, count) in [(257, 140), (40_000, 15)] {
+        let base = u32::MAX - 100;
+        let end = 5 + (count - 1) * (size / 2) + size;
+        let payload: Vec<_> = (0..end + 48).map(|i| (i % 251) as u8).collect();
+        let mut bridge = TcpBridge::new(GW_IP);
+        let mut server = fast_path_pair(&mut bridge, key(), base).await;
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            server.read_to_end(&mut got).unwrap();
+            got
+        });
+        let conn = bridge.fast_path_conns.get_mut(&key()).unwrap();
+        for index in 0..count {
+            let start = 5 + index * (size / 2);
+            conn.buffer_upload_segment(
+                base.wrapping_add(start as u32),
+                &payload[start..start + size],
+            );
+            // Nested retransmissions must not overwrite bytes from an earlier segment.
+            conn.buffer_upload_segment(base.wrapping_add(start as u32 + 1), &[0xff; 2]);
+        }
+        conn.buffer_upload_segment(base.wrapping_add(end as u32 + 17), &payload[end + 17..]);
+        let prefix = segments(base, &payload[..10], 10);
+        bridge.try_fast_path_intercept(&prefix[0]).unwrap();
+        let target = base.wrapping_add(end as u32);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while bridge.fast_path_conns[&key()].last_ack != target {
+                assert!(bridge.fast_path_conns[&key()].last_ack.wrapping_sub(base) < end as u32);
+                bridge.poll_fast_path();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
+        let conn = &bridge.fast_path_conns[&key()];
+        assert_eq!(conn.ooo_segs.len(), 1);
+        assert_eq!(conn.ooo_bytes, 31);
+        assert_eq!(conn.up_bytes, end as u64);
+        let gap = segments(target, &payload[end..end + 17], 17);
+        bridge.try_fast_path_intercept(&gap[0]).unwrap();
+        let conn = &bridge.fast_path_conns[&key()];
+        assert_eq!(conn.last_ack, base.wrapping_add(payload.len() as u32));
+        assert_eq!(conn.up_bytes, payload.len() as u64);
+        assert_eq!(conn.ooo_bytes, 0);
+        assert!(conn.ooo_segs.is_empty());
+        conn.stream.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(reader.join().unwrap(), payload);
+    }
 }

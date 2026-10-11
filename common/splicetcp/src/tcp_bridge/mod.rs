@@ -507,53 +507,6 @@ impl FastPathConn {
         self.ooo_segs
             .insert(idx.min(self.ooo_segs.len()), (seq, payload.to_vec()));
     }
-
-    /// Writes parked out-of-order segments that the advanced `last_ack` now
-    /// reaches, in sequence order, with the same partial-take semantics as
-    /// the in-order path: the cursor advances only over bytes the host
-    /// socket accepted. Stops at the first remaining hole, `WouldBlock`, or
-    /// short take. The poll path retries retained bytes when the host socket
-    /// drains. A hard write error propagates for the caller's RST teardown.
-    pub(super) fn drain_parked_segments(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
-        while let Some(&(seq, ref data)) = self.ooo_segs.front() {
-            let len = data.len();
-            let seg_end = seq.wrapping_add(len as u32);
-            let extends = seg_end.wrapping_sub(self.last_ack);
-            if extends == 0 || extends >= 0x8000_0000 {
-                // Fully at/behind the cursor: a retransmit landed in-order
-                // first and already covered these bytes.
-                if let Some((_, old)) = self.ooo_segs.pop_front() {
-                    self.ooo_bytes -= old.len();
-                }
-                continue;
-            }
-            let overlap = self.last_ack.wrapping_sub(seq);
-            if overlap >= 0x8000_0000 {
-                break; // a hole still precedes the first parked segment
-            }
-            let start = overlap as usize;
-            let take = match self.stream.write(&self.ooo_segs[0].1[start..]) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.up_would_block += 1;
-                    break;
-                }
-                Err(e) => return Err(e),
-            };
-            self.up_bytes += take as u64;
-            let new_ack = self.last_ack.wrapping_add(take as u32);
-            self.set_last_ack(new_ack);
-            if take < len - start {
-                self.up_short_writes += 1;
-                break; // remainder stays parked; overlap math resumes here
-            }
-            if let Some((_, old)) = self.ooo_segs.pop_front() {
-                self.ooo_bytes -= old.len();
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Bytes the shim may still send host→guest without exceeding the guest's
