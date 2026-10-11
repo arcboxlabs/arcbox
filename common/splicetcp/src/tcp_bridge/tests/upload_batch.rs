@@ -33,7 +33,7 @@ fn segments(base: u32, payload: &[u8], size: usize) -> Vec<Vec<u8>> {
 async fn upload_batch_wraps_sequence_and_acks_only_the_consumed_prefix() {
     let base = u32::MAX - 100;
     let payload: Vec<_> = (0..65 * 257).map(|i| (i % 251) as u8).collect();
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     let mut server = fast_path_pair(&mut bridge, key(), base).await;
     let frames = segments(base, &payload, 257);
     let (count, ack) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
@@ -102,7 +102,7 @@ async fn borrowed_ip_batch_validates_headers_and_splices_only_payload() {
 
     let base = u32::MAX - 100;
     let payload: Vec<_> = (0..65 * 33).map(|i| (i % 251) as u8).collect();
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     let mut server = fast_path_pair(&mut bridge, key(), base).await;
     let packets: Vec<_> = segments(base, &payload, 33)
         .into_iter()
@@ -172,7 +172,7 @@ async fn borrowed_ip_batch_validates_headers_and_splices_only_payload() {
 #[tokio::test]
 async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
     let base = u32::MAX - 1000;
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     let mut server = fast_path_pair(&mut bridge, key(), base).await;
     socket2::SockRef::from(&server)
         .set_recv_buffer_size(4096)
@@ -242,7 +242,7 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while bridge.fast_path_conns[&key()].last_ack != base.wrapping_add(payload.len() as u32) {
-            bridge.poll_fast_path();
+            bridge.poll_fast_path().unwrap();
             tokio::task::yield_now().await;
         }
     })
@@ -265,7 +265,7 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
 
 #[tokio::test]
 async fn upload_batch_broken_pipe_resets_without_acking_the_batch() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     let _server = fast_path_pair(&mut bridge, key(), 2000).await;
     bridge.fast_path_conns[&key()]
         .stream
@@ -285,7 +285,7 @@ async fn retained_upload_batches_clip_overlaps_and_stop_at_wrapping_gap() {
         let base = u32::MAX - 100;
         let end = 5 + (count - 1) * (size / 2) + size;
         let payload: Vec<_> = (0..end + 48).map(|i| (i % 251) as u8).collect();
-        let mut bridge = TcpBridge::new(GW_IP);
+        let mut bridge = TcpBridge::new(GW_IP).unwrap();
         let mut server = fast_path_pair(&mut bridge, key(), base).await;
         let reader = std::thread::spawn(move || {
             let mut got = Vec::new();
@@ -309,13 +309,13 @@ async fn retained_upload_batches_clip_overlaps_and_stop_at_wrapping_gap() {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while bridge.fast_path_conns[&key()].last_ack != target {
                 assert!(bridge.fast_path_conns[&key()].last_ack.wrapping_sub(base) < end as u32);
-                bridge.poll_fast_path();
+                bridge.poll_fast_path().unwrap();
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        assert!(bridge.poll_fast_path().is_empty());
+        assert!(bridge.poll_fast_path().unwrap().is_empty());
         let conn = &bridge.fast_path_conns[&key()];
         assert_eq!(conn.ooo_segs.len(), 1);
         assert_eq!(conn.ooo_bytes, 31);

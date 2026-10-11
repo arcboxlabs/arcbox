@@ -199,7 +199,7 @@ impl NetworkDatapath {
         device.set_gateway_mac(gateway_mac);
 
         // TCP shim: handshake synthesizer + fast-path data plane.
-        let mut tcp_bridge = TcpBridge::new(gateway_ip);
+        let mut tcp_bridge = TcpBridge::new(gateway_ip)?;
 
         // Enable large frame mode when using the channel-based FrameSink
         // (no socketpair 2048-byte datagram limit). This sends entire
@@ -502,7 +502,7 @@ impl NetworkDatapath {
             if guest_tx.has_backlog() {
                 guest_tx.stats.gated_polls += 1;
             } else {
-                for frame in tcp_bridge.poll_fast_path() {
+                for frame in tcp_bridge.poll_fast_path()? {
                     guest_tx.send(frame, DeliveryClass::Reliable);
                 }
             }

@@ -13,7 +13,7 @@ async fn large_frame_reads_stay_within_ipv4_and_read_limits() {
 }
 
 async fn check_download_batches(large_frames: bool) {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_fast_path_mtu(4000);
     if large_frames {
@@ -74,7 +74,7 @@ async fn check_download_batches(large_frames: bool) {
             bridge.try_fast_path_intercept(&ack).expect("guest ACK");
         }
         let before = keys.map(|key| bridge.fast_path_conns[&key].our_seq.load(Ordering::Relaxed));
-        let batch = bridge.poll_fast_path();
+        let batch = bridge.poll_fast_path().unwrap();
         let had_frames = !batch.is_empty();
         for frame in batch {
             let tcp = ETH_HEADER_LEN + 20;
@@ -140,7 +140,7 @@ async fn rejected_inline_flow_allocates_scratch_for_polling() {
             true
         }
     }
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_conn_sink(std::sync::Arc::new(AcceptFirst(std::sync::Mutex::new(
         None,
     ))));

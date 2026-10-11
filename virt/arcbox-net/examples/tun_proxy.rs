@@ -140,7 +140,7 @@ mod macos {
         // On a utun there is no real guest MAC; the shim's source MAC is fixed.
         let mut guest_mac: Option<[u8; 6]> = Some(HOST_MAC);
 
-        let mut tcp_bridge = TcpBridge::new(gateway_ip);
+        let mut tcp_bridge = TcpBridge::new(gateway_ip)?;
         tcp_bridge.set_fast_path_macs(GATEWAY_MAC, HOST_MAC);
 
         // Proxy awareness: a Fake-IP-active environment whose SOCKS5 upstream is
@@ -249,7 +249,7 @@ mod macos {
             for frame in tcp_bridge.poll_handshakes() {
                 write_frame(&sink, &frame);
             }
-            for frame in tcp_bridge.poll_fast_path() {
+            for frame in tcp_bridge.poll_fast_path()? {
                 write_frame(&sink, &frame);
             }
             tokio::task::yield_now().await;

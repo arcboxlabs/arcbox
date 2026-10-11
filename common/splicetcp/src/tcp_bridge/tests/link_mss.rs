@@ -19,7 +19,7 @@ fn assert_handshake_mss(frame: &[u8], expected: u16) {
 async fn passive_handshake_advertises_link_mss_and_retains_peer_mss() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_mtu(4000);
     let key = SynFlowKey {
         src_ip: GUEST_IP,
@@ -69,7 +69,7 @@ async fn active_handshake_advertises_bounded_link_mss_without_changing_peer_fall
             .await
             .unwrap();
         let (_server, _) = listener.accept().await.unwrap();
-        let mut bridge = TcpBridge::new(GW_IP);
+        let mut bridge = TcpBridge::new(GW_IP).unwrap();
         bridge.set_fast_path_mtu(mtu);
         let key = SynFlowKey {
             src_ip: GUEST_IP,

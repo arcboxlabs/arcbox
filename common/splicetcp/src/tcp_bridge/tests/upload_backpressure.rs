@@ -38,7 +38,7 @@ async fn check_upload_multi_hole_burst(segment_size: usize) {
         .map(|i| ((i * 31 + i / 251) % 256) as u8)
         .collect();
     let base = u32::MAX - 1000;
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let key = SynFlowKey {
         src_ip: GUEST_IP,
@@ -91,7 +91,7 @@ async fn check_upload_multi_hole_burst(segment_size: usize) {
         assert!(cursor >= offset && cursor <= next_hole);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while cursor < next_hole {
-                for frame in bridge.poll_fast_path() {
+                for frame in bridge.poll_fast_path().unwrap() {
                     let acked = tcp_ack_of(&frame).wrapping_sub(base) as usize;
                     assert!(acked >= cursor && acked <= next_hole);
                     cursor = acked;
@@ -102,7 +102,7 @@ async fn check_upload_multi_hole_burst(segment_size: usize) {
         .await
         .expect("poll must drain retained bytes up to the next missing range");
         assert_eq!(cursor, next_hole);
-        assert!(bridge.poll_fast_path().is_empty());
+        assert!(bridge.poll_fast_path().unwrap().is_empty());
     }
 
     assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
@@ -124,7 +124,7 @@ async fn upload_ooo_insert_preserves_partially_written_front() {
     use std::io::Read;
 
     for base in [2000u32, u32::MAX - 1000] {
-        let mut bridge = TcpBridge::new(GW_IP);
+        let mut bridge = TcpBridge::new(GW_IP).unwrap();
         bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
         let dst_ip = Ipv4Addr::new(198, 18, 30, 104);
         let key = SynFlowKey {
@@ -194,7 +194,7 @@ async fn upload_ooo_insert_preserves_partially_written_front() {
 async fn poll_drains_upload_after_host_backpressure() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 105);
     let key = SynFlowKey {
@@ -218,7 +218,7 @@ async fn poll_drains_upload_after_host_backpressure() {
     );
     bridge.try_fast_path_intercept(&parked).unwrap();
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "a gap must remain unACKed"
     );
     let fill = make_guest_segment(
@@ -242,7 +242,7 @@ async fn poll_drains_upload_after_host_backpressure() {
             if cursor == total {
                 break;
             }
-            for frame in bridge.poll_fast_path() {
+            for frame in bridge.poll_fast_path().unwrap() {
                 let acked = tcp_ack_of(&frame).wrapping_sub(base) as usize;
                 assert!(acked >= cursor && acked <= total);
                 cursor = acked;
@@ -264,7 +264,7 @@ async fn poll_recovers_in_order_upload_tails() {
     use std::io::{Read, Write};
 
     for prefill in [false, true] {
-        let mut bridge = TcpBridge::new(GW_IP);
+        let mut bridge = TcpBridge::new(GW_IP).unwrap();
         bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
         let key = SynFlowKey {
             src_ip: GUEST_IP,
@@ -341,7 +341,7 @@ async fn poll_recovers_in_order_upload_tails() {
                 if cursor == expected.len() {
                     break;
                 }
-                for frame in bridge.poll_fast_path() {
+                for frame in bridge.poll_fast_path().unwrap() {
                     let acked = tcp_ack_of(&frame).wrapping_sub(base) as usize;
                     assert!(acked >= cursor && acked <= expected.len());
                     cursor = acked;
@@ -361,7 +361,7 @@ async fn poll_recovers_in_order_upload_tails() {
 #[tokio::test]
 async fn upload_contiguous_tail_takes_priority_at_both_caps() {
     for byte_cap in [false, true] {
-        let mut bridge = TcpBridge::new(GW_IP);
+        let mut bridge = TcpBridge::new(GW_IP).unwrap();
         let key = SynFlowKey {
             src_ip: GUEST_IP,
             src_port: 40039,

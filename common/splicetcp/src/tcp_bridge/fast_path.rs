@@ -395,7 +395,7 @@ impl TcpBridge {
     /// to inject into the guest.
     ///
     /// Returns frames to be written to the guest FD via `enqueue_or_write`.
-    pub fn poll_fast_path(&mut self) -> Vec<Vec<u8>> {
+    pub fn poll_fast_path(&mut self) -> std::io::Result<Vec<Vec<u8>>> {
         let mut frames = Vec::new();
         let mut to_remove = Vec::new();
         let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
@@ -934,7 +934,7 @@ impl TcpBridge {
             self.close_fast_path(&key);
         }
 
-        frames
+        Ok(frames)
     }
 
     /// Removes a fast-path flow and reports its byte totals to the observer

@@ -108,7 +108,7 @@ async fn handshake_passive_open_registers_and_emits_syn_ack() {
     let addr = listener.local_addr().unwrap();
     let server_port = addr.port();
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     // Build a guest SYN with MSS + WScale + SACK-Permitted (12-byte options).
@@ -158,7 +158,7 @@ async fn handshake_passive_open_completes_on_guest_ack() {
     let addr = listener.local_addr().unwrap();
     let server_port = addr.port();
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let guest_isn = 0x1234_5678u32;
@@ -214,7 +214,7 @@ async fn handshake_active_open_emits_syn_and_completes() {
     let (_server, _) = listener.accept().await.unwrap();
     let host_stream = client.into_std().unwrap();
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let flow_key = SynFlowKey {
@@ -266,7 +266,7 @@ async fn active_open_host_eof_does_not_abort() {
     let (server, _) = listener.accept().await.unwrap();
     let host_stream = client.into_std().unwrap();
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let flow_key = SynFlowKey {
         src_ip: GUEST_IP,
@@ -307,7 +307,7 @@ async fn active_open_host_reset_aborts_with_guest_rst() {
     let (server, _) = listener.accept().await.unwrap();
     let host_stream = client.into_std().unwrap();
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let flow_key = SynFlowKey {
         src_ip: GUEST_IP,
@@ -360,7 +360,7 @@ async fn active_open_host_reset_aborts_with_guest_rst() {
 async fn handshake_rejects_mismatched_ack() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let guest_isn = 7777;
@@ -393,7 +393,7 @@ async fn handshake_rejects_mismatched_ack() {
 
 #[test]
 fn handshake_capacity_sends_rst() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     // Fill to capacity with fake entries.
     for i in 0..MAX_PENDING_SYNS {
         let k = SynFlowKey {
@@ -439,7 +439,7 @@ fn handshake_capacity_sends_rst() {
 async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -470,7 +470,7 @@ async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut frames: Vec<Vec<u8>> = Vec::new();
     loop {
-        let batch = bridge.poll_fast_path();
+        let batch = bridge.poll_fast_path().unwrap();
         let had_new = !batch.is_empty();
         frames.extend(batch);
         let received: usize = frames
@@ -502,7 +502,7 @@ async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
 async fn poll_fast_path_segments_frames_for_configured_mtu() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_fast_path_mtu(4000);
 
@@ -528,7 +528,7 @@ async fn poll_fast_path_segments_frames_for_configured_mtu() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut frames: Vec<Vec<u8>> = Vec::new();
     loop {
-        let batch = bridge.poll_fast_path();
+        let batch = bridge.poll_fast_path().unwrap();
         let had_new = !batch.is_empty();
         frames.extend(batch);
         let received: usize = frames
@@ -561,7 +561,7 @@ async fn poll_fast_path_segments_frames_for_configured_mtu() {
 async fn poll_fast_path_clamps_segments_to_peer_mss() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_fast_path_mtu(4000); // jumbo host-side budget…
 
@@ -587,7 +587,7 @@ async fn poll_fast_path_clamps_segments_to_peer_mss() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut frames: Vec<Vec<u8>> = Vec::new();
     loop {
-        let batch = bridge.poll_fast_path();
+        let batch = bridge.poll_fast_path().unwrap();
         let had_new = !batch.is_empty();
         frames.extend(batch);
         let received: usize = frames
@@ -627,7 +627,7 @@ async fn poll_fast_path_clamps_segments_to_peer_mss() {
 async fn large_frames_below_gso_mss_falls_back_to_clamped_segmentation() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.enable_large_frames(); // HV-style large-frame mode…
 
@@ -653,7 +653,7 @@ async fn large_frames_below_gso_mss_falls_back_to_clamped_segmentation() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut frames: Vec<Vec<u8>> = Vec::new();
     loop {
-        let batch = bridge.poll_fast_path();
+        let batch = bridge.poll_fast_path().unwrap();
         let had_new = !batch.is_empty();
         frames.extend(batch);
         let received: usize = frames
@@ -688,7 +688,7 @@ async fn large_frames_below_gso_mss_falls_back_to_clamped_segmentation() {
 /// ESTABLISHED forever (ABX-431).
 #[tokio::test]
 async fn poll_fast_path_read_error_emits_rst_and_removes_flow() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -718,7 +718,7 @@ async fn poll_fast_path_read_error_emits_rst_and_removes_flow() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut frames: Vec<Vec<u8>> = Vec::new();
     while frames.is_empty() && std::time::Instant::now() < deadline {
-        frames = bridge.poll_fast_path();
+        frames = bridge.poll_fast_path().unwrap();
         if frames.is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -748,7 +748,7 @@ async fn inline_dead_flag_reaps_bridge_entry() {
     }
 
     let sink = std::sync::Arc::new(CaptureSink(std::sync::Mutex::new(None)));
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_conn_sink(std::sync::Arc::clone(&sink) as _);
 
@@ -776,14 +776,14 @@ async fn inline_dead_flag_reaps_bridge_entry() {
         .expect("conn handed to the sink");
 
     // Alive: the inline-owned entry stays.
-    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
+    assert_eq!(bridge.poll_fast_path().unwrap(), Vec::<Vec<u8>>::new());
     assert_eq!(bridge.fast_path_count(), 1);
 
     // Sink owner marks the flow dead (it already emitted the FIN/RST).
     promoted
         .dead
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
+    assert_eq!(bridge.poll_fast_path().unwrap(), Vec::<Vec<u8>>::new());
     assert_eq!(
         bridge.fast_path_count(),
         0,
@@ -807,7 +807,7 @@ async fn inline_zero_window_persist_probes() {
     }
 
     let sink = std::sync::Arc::new(CaptureSink(std::sync::Mutex::new(None)));
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_conn_sink(std::sync::Arc::clone(&sink) as _);
 
@@ -848,7 +848,7 @@ async fn inline_zero_window_persist_probes() {
 
     // First poll arms the persist clock but emits nothing yet.
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "no probe before the persist interval"
     );
 
@@ -863,7 +863,7 @@ async fn inline_zero_window_persist_probes() {
         .window_stalled_at = Some(past);
 
     // Next poll emits one keepalive-style probe at our_seq-1.
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(frames.len(), 1, "one persist probe emitted");
     let tcp = ETH_HEADER_LEN + 20;
     let probe_seq = u32::from_be_bytes([
@@ -882,7 +882,7 @@ async fn inline_zero_window_persist_probes() {
         .guest_window
         .store(65535, std::sync::atomic::Ordering::Relaxed);
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "no probe once the window reopens"
     );
 }
@@ -892,7 +892,7 @@ async fn inline_zero_window_persist_probes() {
 /// gave up on (ABX-431).
 #[tokio::test]
 async fn handshake_ttl_abort_emits_rst() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     // TEST-NET-3 destination: the spawned connect never resolves quickly,
     // and the entry is expired manually below.
     let syn = make_guest_syn_frame(40000, Ipv4Addr::new(203, 0, 113, 1), 443, 7777, &[]);
@@ -992,7 +992,7 @@ fn tcp_ack_of(frame: &[u8]) -> u32 {
 async fn upload_hole_is_never_acked_or_written() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1076,7 +1076,7 @@ async fn fast_path_pair(
 async fn upload_ooo_reassembly_flushes_on_gap_fill() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 99);
     let key = SynFlowKey {
@@ -1116,7 +1116,7 @@ async fn upload_ooo_reassembly_flushes_on_gap_fill() {
 async fn upload_ooo_duplicate_parked_segment_writes_once() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 100);
     let key = SynFlowKey {
@@ -1155,7 +1155,7 @@ async fn upload_ooo_duplicate_parked_segment_writes_once() {
 /// recovers by retransmitting.
 #[tokio::test]
 async fn upload_ooo_beyond_cap_is_dropped() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 101);
     let key = SynFlowKey {
@@ -1197,7 +1197,7 @@ async fn upload_ooo_beyond_cap_is_dropped() {
 async fn upload_ooo_overlapping_segments_write_each_byte_once() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 104);
     let key = SynFlowKey {
@@ -1254,7 +1254,7 @@ async fn upload_ooo_overlapping_segments_write_each_byte_once() {
 /// cap, and excess segments fall back to drop-and-dup-ACK.
 #[tokio::test]
 async fn upload_ooo_segment_count_is_bounded() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 105);
     let key = SynFlowKey {
@@ -1297,7 +1297,7 @@ async fn upload_ooo_segment_count_is_bounded() {
 async fn upload_ooo_reassembly_across_seq_wraparound() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 102);
     let key = SynFlowKey {
@@ -1363,7 +1363,7 @@ fn guaranteed_oversized(granted_send: usize, granted_recv: usize) -> usize {
 async fn upload_ooo_drain_respects_host_writable() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1494,7 +1494,7 @@ async fn upload_ooo_drain_respects_host_writable() {
 /// the gap is filled, the retransmitted FIN completes the close.
 #[tokio::test]
 async fn upload_fin_with_gap_defers_teardown() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1566,7 +1566,7 @@ fn tcp_seq_of(frame: &[u8]) -> u32 {
 /// giving a just-closed host socket time to deliver its FIN.
 async fn poll_until_frame(bridge: &mut TcpBridge) -> Vec<u8> {
     for _ in 0..200 {
-        if let Some(frame) = bridge.poll_fast_path().into_iter().next() {
+        if let Some(frame) = bridge.poll_fast_path().unwrap().into_iter().next() {
             return frame;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1581,7 +1581,7 @@ async fn poll_until_frame(bridge: &mut TcpBridge) -> Vec<u8> {
 async fn guest_half_close_shuts_host_write_side() {
     use tokio::io::AsyncReadExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1631,7 +1631,7 @@ async fn guest_half_close_shuts_host_write_side() {
 /// guest ACKs it — no leaked entry.
 #[tokio::test]
 async fn half_closed_flow_reaps_after_host_eof() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1680,7 +1680,7 @@ async fn half_closed_flow_reaps_after_host_eof() {
         &[],
     );
     bridge.try_fast_path_intercept(&ack);
-    bridge.poll_fast_path();
+    bridge.poll_fast_path().unwrap();
     assert_eq!(
         bridge.fast_path_count(),
         0,
@@ -1696,7 +1696,7 @@ async fn half_closed_flow_reaps_after_host_eof() {
 async fn upload_ack_never_exceeds_host_writable() {
     use std::io::Read;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1798,7 +1798,7 @@ async fn upload_ack_never_exceeds_host_writable() {
 async fn poll_fast_path_respects_guest_window() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1828,7 +1828,7 @@ async fn poll_fast_path_respects_guest_window() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut idle = 0;
         while std::time::Instant::now() < deadline && idle < 10 {
-            let batch = bridge.poll_fast_path();
+            let batch = bridge.poll_fast_path().unwrap();
             if batch.is_empty() {
                 idle += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1875,7 +1875,7 @@ async fn poll_fast_path_respects_guest_window() {
 async fn poll_retransmits_unacked_data_after_rto() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1902,6 +1902,7 @@ async fn poll_retransmits_unacked_data_after_rto() {
     while sent < 4096 && std::time::Instant::now() < deadline {
         sent += bridge
             .poll_fast_path()
+            .unwrap()
             .iter()
             .map(|f| f.len().saturating_sub(ETH_HEADER_LEN + 40))
             .sum::<usize>();
@@ -1914,7 +1915,7 @@ async fn poll_retransmits_unacked_data_after_rto() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut retransmitted = Vec::new();
     while retransmitted.is_empty() && std::time::Instant::now() < deadline {
-        retransmitted = bridge.poll_fast_path();
+        retransmitted = bridge.poll_fast_path().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(
@@ -1937,7 +1938,7 @@ async fn poll_retransmits_unacked_data_after_rto() {
 async fn triple_dup_ack_triggers_fast_retransmit() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1962,6 +1963,7 @@ async fn triple_dup_ack_triggers_fast_retransmit() {
     while sent < 2920 && std::time::Instant::now() < deadline {
         sent += bridge
             .poll_fast_path()
+            .unwrap()
             .iter()
             .map(|f| f.len().saturating_sub(ETH_HEADER_LEN + 40))
             .sum::<usize>();
@@ -1975,7 +1977,7 @@ async fn triple_dup_ack_triggers_fast_retransmit() {
         let dup = make_guest_segment((40026, dst_ip, 443), 1, 1, 65535, 0x10, &[]);
         bridge.try_fast_path_intercept(&dup).expect("intercepted");
     }
-    let retransmitted = bridge.poll_fast_path();
+    let retransmitted = bridge.poll_fast_path().unwrap();
     assert!(
         !retransmitted.is_empty(),
         "three dup-ACKs must fast-retransmit without waiting for the RTO"
@@ -1997,7 +1999,7 @@ async fn triple_dup_ack_triggers_fast_retransmit() {
 async fn download_ack_beyond_sent_is_ignored() {
     use tokio::io::AsyncWriteExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2023,6 +2025,7 @@ async fn download_ack_beyond_sent_is_ignored() {
     while sent < 2920 && std::time::Instant::now() < deadline {
         sent += bridge
             .poll_fast_path()
+            .unwrap()
             .iter()
             .map(|f| f.len().saturating_sub(ETH_HEADER_LEN + 40))
             .sum::<usize>();
@@ -2039,7 +2042,7 @@ async fn download_ack_beyond_sent_is_ignored() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut retransmitted = Vec::new();
     while retransmitted.is_empty() && std::time::Instant::now() < deadline {
-        retransmitted = bridge.poll_fast_path();
+        retransmitted = bridge.poll_fast_path().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(
@@ -2064,7 +2067,7 @@ async fn download_ack_beyond_sent_is_ignored() {
 /// once it exceeds HALF_CLOSE_TIMEOUT with no host→guest progress.
 #[tokio::test]
 async fn half_closed_flow_reaped_after_idle_timeout() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2098,7 +2101,7 @@ async fn half_closed_flow_reaped_after_idle_timeout() {
     assert_eq!(bridge.fast_path_count(), 1, "half-closed flow retained");
 
     // Within the idle window it must survive a poll.
-    bridge.poll_fast_path();
+    bridge.poll_fast_path().unwrap();
     assert_eq!(
         bridge.fast_path_count(),
         1,
@@ -2110,7 +2113,7 @@ async fn half_closed_flow_reaped_after_idle_timeout() {
         .checked_sub(super::HALF_CLOSE_TIMEOUT + std::time::Duration::from_secs(1))
         .expect("test clock underflow");
     bridge.fast_path_conns.get_mut(&key).unwrap().guest_fin_at = Some(past);
-    bridge.poll_fast_path();
+    bridge.poll_fast_path().unwrap();
     assert_eq!(
         bridge.fast_path_count(),
         0,
@@ -2125,7 +2128,7 @@ async fn half_closed_flow_reaped_after_idle_timeout() {
 async fn malformed_data_offset_is_not_spliced_to_host() {
     use tokio::io::AsyncReadExt;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2169,7 +2172,7 @@ async fn malformed_data_offset_is_not_spliced_to_host() {
 /// retransmitting until it times out.
 #[tokio::test]
 async fn retransmitted_syn_ack_gets_reack() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2213,7 +2216,7 @@ async fn retransmitted_syn_ack_gets_reack() {
 /// from swallowing the ordinary pure-ACK suppression.
 #[tokio::test]
 async fn pure_ack_returns_no_frame() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2253,7 +2256,7 @@ async fn pure_ack_returns_no_frame() {
 async fn zero_window_stall_is_broken_by_a_persist_probe() {
     use std::io::Write;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2280,13 +2283,13 @@ async fn zero_window_stall_is_broken_by_a_persist_probe() {
 
     // Arm the stall timer; nothing is sent while the window is shut.
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "a closed window must not send before the persist timer fires"
     );
 
     // After the persist interval, a single-byte probe is emitted.
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(
         frames.len(),
         1,
@@ -2299,7 +2302,7 @@ async fn zero_window_stall_is_broken_by_a_persist_probe() {
     let reopen = make_guest_segment((40088, dst_ip, 443), 2000, 1001, 65535, 0x10, &[]);
     bridge.try_fast_path_intercept(&reopen);
     assert!(
-        !bridge.poll_fast_path().is_empty(),
+        !bridge.poll_fast_path().unwrap().is_empty(),
         "sending must resume once the window reopens"
     );
 }
@@ -2326,7 +2329,7 @@ fn backdate_dead_flow_clocks(bridge: &mut TcpBridge, key: &SynFlowKey, by: std::
 /// leg stays ESTABLISHED with empty queues forever.
 #[tokio::test]
 async fn promotion_arms_upstream_keepalive() {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2363,7 +2366,7 @@ async fn promotion_arms_upstream_keepalive() {
 async fn silent_guest_with_data_in_flight_is_rst_reaped() {
     use std::io::Write;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2394,7 +2397,7 @@ async fn silent_guest_with_data_in_flight_is_rst_reaped() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut in_flight = false;
     while !in_flight && std::time::Instant::now() < deadline {
-        in_flight = !bridge.poll_fast_path().is_empty();
+        in_flight = !bridge.poll_fast_path().unwrap().is_empty();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(in_flight, "data must go into flight toward the guest");
@@ -2402,7 +2405,7 @@ async fn silent_guest_with_data_in_flight_is_rst_reaped() {
     bridge.set_dead_flow_timeout(std::time::Duration::from_millis(100));
     backdate_dead_flow_clocks(&mut bridge, &key, std::time::Duration::from_millis(200));
 
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert!(
         frames.iter().any(|f| tcp_flags_of(f) & 0x04 != 0),
         "a dead soliciting flow must be RST-terminated"
@@ -2416,7 +2419,7 @@ async fn silent_guest_with_data_in_flight_is_rst_reaped() {
 async fn silent_guest_at_zero_window_is_rst_reaped() {
     use std::io::Write;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2447,14 +2450,14 @@ async fn silent_guest_at_zero_window_is_rst_reaped() {
     bridge.try_fast_path_intercept(&zero_win);
     server.write_all(b"pending").unwrap();
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "a closed window sends nothing (persist clock armed)"
     );
 
     bridge.set_dead_flow_timeout(std::time::Duration::from_millis(100));
     backdate_dead_flow_clocks(&mut bridge, &key, std::time::Duration::from_millis(200));
 
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert!(
         frames.iter().any(|f| tcp_flags_of(f) & 0x04 != 0),
         "a dead zero-window flow must be RST-terminated"
@@ -2468,7 +2471,7 @@ async fn silent_guest_at_zero_window_is_rst_reaped() {
 async fn guest_ack_refreshes_dead_flow_clock() {
     use std::io::Write;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2498,7 +2501,7 @@ async fn guest_ack_refreshes_dead_flow_clock() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut in_flight = false;
     while !in_flight && std::time::Instant::now() < deadline {
-        in_flight = !bridge.poll_fast_path().is_empty();
+        in_flight = !bridge.poll_fast_path().unwrap().is_empty();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(in_flight, "data must go into flight toward the guest");
@@ -2510,7 +2513,7 @@ async fn guest_ack_refreshes_dead_flow_clock() {
     let dup_ack = make_guest_segment((40103, dst_ip, 443), 2000, 1000, 65535, 0x10, &[]);
     bridge.try_fast_path_intercept(&dup_ack);
 
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert!(
         frames.iter().all(|f| tcp_flags_of(f) & 0x04 == 0),
         "a responding guest must not be RST"
@@ -2536,7 +2539,7 @@ async fn inline_silent_guest_with_data_in_flight_is_rst_reaped() {
     }
 
     let sink = std::sync::Arc::new(CaptureSink(std::sync::Mutex::new(None)));
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_conn_sink(std::sync::Arc::clone(&sink) as _);
 
@@ -2579,7 +2582,7 @@ async fn inline_silent_guest_with_data_in_flight_is_rst_reaped() {
     bridge.set_dead_flow_timeout(std::time::Duration::from_millis(100));
     backdate_dead_flow_clocks(&mut bridge, &key, std::time::Duration::from_millis(200));
 
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert!(
         frames.iter().any(|f| tcp_flags_of(f) & 0x04 != 0),
         "a dead inline flow must be RST-terminated"
@@ -2603,7 +2606,7 @@ async fn inline_silent_guest_with_data_in_flight_is_rst_reaped() {
 async fn long_idle_flow_survives_upstream_wakeup() {
     use std::io::Write;
 
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2645,7 +2648,7 @@ async fn long_idle_flow_survives_upstream_wakeup() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut woke = Vec::new();
     while woke.is_empty() && std::time::Instant::now() < deadline {
-        woke = bridge.poll_fast_path();
+        woke = bridge.poll_fast_path().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(!woke.is_empty(), "wakeup data must go into flight");
@@ -2656,7 +2659,7 @@ async fn long_idle_flow_survives_upstream_wakeup() {
 
     // Immediately after the wakeup the guest has not answered yet — the flow
     // must survive: the soliciting clock just started.
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert!(
         frames.iter().all(|f| tcp_flags_of(f) & 0x04 == 0),
         "a freshly woken flow must not be RST"
@@ -2689,7 +2692,7 @@ async fn inline_fixture(
     dst_ip: Ipv4Addr,
 ) -> (TcpBridge, crate::direct_rx::PromotedConn, SynFlowKey) {
     let sink = std::sync::Arc::new(CaptureSink(std::sync::Mutex::new(None)));
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     bridge.set_conn_sink(std::sync::Arc::clone(&sink) as _);
 
@@ -2745,12 +2748,12 @@ async fn inline_rto_retransmits_from_shared_ring() {
 
     owner_sends(&promoted, b"lost-inline-payload");
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "no retransmission before the RTO fires"
     );
 
     backdate_rto_clock(&mut bridge, &key);
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(frames.len(), 1, "one retransmission after the RTO");
     assert_eq!(tcp_seq_of(&frames[0]), 1000, "resent from the unACKed base");
     assert_eq!(
@@ -2775,7 +2778,7 @@ async fn inline_triple_dup_ack_fast_retransmits() {
         bridge.try_fast_path_intercept(&dup);
     }
 
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(frames.len(), 1, "fast retransmit fires without an RTO wait");
     assert_eq!(tcp_seq_of(&frames[0]), 1000);
 }
@@ -2794,7 +2797,7 @@ async fn inline_ack_drains_ring_and_stops_retransmit() {
 
     backdate_rto_clock(&mut bridge, &key);
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "a fully ACKed inline flow must not retransmit"
     );
     let ring = promoted.retx.lock().unwrap();
@@ -2822,10 +2825,10 @@ async fn inline_lost_fin_is_retransmitted() {
     bridge.try_fast_path_intercept(&ack);
     // First poll drains the ACKed data and restarts the RTO clock for the
     // still-unACKed FIN; only then can the timeout be simulated.
-    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
+    assert_eq!(bridge.poll_fast_path().unwrap(), Vec::<Vec<u8>>::new());
 
     backdate_rto_clock(&mut bridge, &key);
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(frames.len(), 1, "the lost FIN is re-emitted");
     assert_ne!(
         tcp_flags_of(&frames[0]) & 0x01,
@@ -2839,7 +2842,7 @@ async fn inline_lost_fin_is_retransmitted() {
     bridge.try_fast_path_intercept(&fin_ack);
     backdate_rto_clock(&mut bridge, &key);
     assert!(
-        bridge.poll_fast_path().is_empty(),
+        bridge.poll_fast_path().unwrap().is_empty(),
         "an ACKed FIN must not be retransmitted"
     );
 }
@@ -2860,7 +2863,7 @@ async fn inline_retransmit_never_exceeds_sent() {
         .fetch_add(40, std::sync::atomic::Ordering::Relaxed);
 
     backdate_rto_clock(&mut bridge, &key);
-    let frames = bridge.poll_fast_path();
+    let frames = bridge.poll_fast_path().unwrap();
     assert_eq!(frames.len(), 1);
     assert_eq!(
         tcp_payload_len(&frames[0]),

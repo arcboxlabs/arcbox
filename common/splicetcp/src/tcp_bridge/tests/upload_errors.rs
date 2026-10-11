@@ -5,7 +5,7 @@ use std::net::Shutdown;
 const ACCEPTED_ACK: u32 = 2004;
 
 async fn pair_after_host_fin() -> (TcpBridge, SynFlowKey, std::net::TcpStream) {
-    let mut bridge = TcpBridge::new(GW_IP);
+    let mut bridge = TcpBridge::new(GW_IP).unwrap();
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let key = SynFlowKey {
         src_ip: GUEST_IP,
@@ -80,7 +80,7 @@ async fn polled_broken_pipe_resets_without_acking_retained_bytes() {
     // Local write shutdown injects EPIPE without a reset-delivery race.
     conn.stream.shutdown(Shutdown::Write).unwrap();
 
-    let replies = bridge.poll_fast_path();
+    let replies = bridge.poll_fast_path().unwrap();
     assert_eq!(replies.len(), 1);
     assert_eq!(tcp_ack_of(&replies[0]), ACCEPTED_ACK);
     assert_ne!(

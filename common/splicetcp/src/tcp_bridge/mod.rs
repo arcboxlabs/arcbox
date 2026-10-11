@@ -526,8 +526,9 @@ pub(crate) fn send_budget(our_seq: u32, guest_acked: u32, guest_window: u32) -> 
 }
 
 impl TcpBridge {
-    pub fn new(gateway_ip: Ipv4Addr) -> Self {
-        Self {
+    /// Creates handshake and fast-path state.
+    pub fn new(gateway_ip: Ipv4Addr) -> std::io::Result<Self> {
+        Ok(Self {
             next_ephemeral: INBOUND_EPHEMERAL_START,
             dns_log: None,
             egress: std::sync::Arc::new(crate::egress::DefaultEgress::new(
@@ -548,7 +549,7 @@ impl TcpBridge {
             handshake_conns: HashMap::new(),
             handshake_waker: None,
             dead_flow_timeout: DEAD_FLOW_TIMEOUT,
-        }
+        })
     }
 
     #[cfg(test)]

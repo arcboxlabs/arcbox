@@ -114,12 +114,13 @@ use splicetcp::direct_rx::TokioFrameConnSink;
 use splicetcp::tcp_bridge::TcpBridge;
 
 # let gateway_ip = std::net::Ipv4Addr::new(10, 0, 2, 2);
-let mut bridge = TcpBridge::new(gateway_ip);
+let mut bridge = TcpBridge::new(gateway_ip)?;
 let (sink, mut frames) = TokioFrameConnSink::channel(1024);
 bridge.set_conn_sink(sink);
 
 // Await `frames.recv()` in the datapath loop and write each Ethernet frame to
 // the guest-facing sink.
+# Ok::<(), std::io::Error>(())
 ```
 
 `TokioFrameConnSink` turns each accepted `PromotedConn` into a Tokio read task
