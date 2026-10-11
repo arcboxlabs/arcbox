@@ -609,6 +609,7 @@ impl TcpBridge {
 
 mod fast_path;
 mod handshake;
+mod intercept;
 mod promotion;
 mod settings;
 mod upload_batch;

@@ -151,6 +151,11 @@ The `shim` module provides the adapter:
 - `FrameClassifier::classify_ip_packet` accepts bare IPv4 packets from push
   sources. Retained packets receive the synthetic Ethernet header directly in
   their owned buffer. IPv4 fragments use the same reassembler as Ethernet input.
+- `TcpBridge::try_fast_path_intercept_ip_batch` borrows established TCP packets
+  for synchronous socket writes, avoiding the classifier's owned-frame copy.
+  Callers must drain preceding classifier input before interception to preserve
+  handshake and fragment order. SYNs and fragments still use the classifier.
+  Backpressure and out-of-order segments retain owned payload copies.
 - `synthetic_l2_header` plus `l3_to_l2` remain available for consumers that need
   a contiguous Ethernet frame before classification.
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
