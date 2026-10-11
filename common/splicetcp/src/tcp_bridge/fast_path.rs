@@ -1,72 +1,10 @@
-use super::{FastPathConn, GSO_SEGMENT_MSS, SynFlowKey, TCP_MIN_MSS, TcpBridge};
-use crate::ethernet::ETH_HEADER_LEN;
+use super::{SynFlowKey, TcpBridge};
+use frames::{FrameCtx, emit_data_frames};
 use std::net::Ipv4Addr;
+#[cfg(target_os = "macos")]
+use std::os::fd::AsFd;
 
-/// Frame-construction context shared by the first-transmission and
-/// retransmission paths of `poll_fast_path`.
-struct FrameCtx {
-    large_frames: bool,
-    guest_mss: usize,
-    gw_mac: [u8; 6],
-    guest_mac: [u8; 6],
-}
-
-/// Builds guest-bound TCP data frames for `data` starting at `seq_start`:
-/// one GSO-style frame when enabled and the peer accepts 1460-byte
-/// segments, MSS-clamped segmentation otherwise (each emitted IP packet
-/// must fit every link on the path — e.g. a 1500-MTU docker bridge behind
-/// a 4000-MTU eth0). Does NOT advance `conn.our_seq` — retransmissions
-/// re-emit already-consumed sequence space.
-fn emit_data_frames(
-    ctx: &FrameCtx,
-    conn: &FastPathConn,
-    seq_start: u32,
-    data: &[u8],
-    frames: &mut Vec<Vec<u8>>,
-) {
-    if ctx.large_frames && conn.peer_mss >= GSO_SEGMENT_MSS {
-        let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
-        let params = crate::ethernet::TcpFrameParams {
-            src_ip: conn.remote_ip,
-            dst_ip: conn.guest_ip,
-            src_port: conn.remote_port,
-            dst_port: conn.guest_port,
-            seq: seq_start,
-            ack: conn.last_ack,
-            window: 65535,
-            src_mac: ctx.gw_mac,
-            dst_mac: ctx.guest_mac,
-        };
-        frames.push(if large {
-            crate::ethernet::build_tcp_data_frame_partial_csum(&params, data)
-        } else {
-            crate::ethernet::build_tcp_data_frame(&params, data)
-        });
-        return;
-    }
-    let seg = ctx
-        .guest_mss
-        .min(usize::from(conn.peer_mss.max(TCP_MIN_MSS)));
-    let mut offset = 0;
-    while offset < data.len() {
-        let chunk_end = (offset + seg).min(data.len());
-        frames.push(crate::ethernet::build_tcp_data_frame(
-            &crate::ethernet::TcpFrameParams {
-                src_ip: conn.remote_ip,
-                dst_ip: conn.guest_ip,
-                src_port: conn.remote_port,
-                dst_port: conn.guest_port,
-                seq: seq_start.wrapping_add(offset as u32),
-                ack: conn.last_ack,
-                window: 65535,
-                src_mac: ctx.gw_mac,
-                dst_mac: ctx.guest_mac,
-            },
-            &data[offset..chunk_end],
-        ));
-        offset = chunk_end;
-    }
-}
+mod frames;
 
 impl TcpBridge {
     pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
@@ -395,7 +333,10 @@ impl TcpBridge {
     /// to inject into the guest.
     ///
     /// Returns frames to be written to the guest FD via `enqueue_or_write`.
+    /// Returns an I/O error if macOS read-readiness polling fails.
     pub fn poll_fast_path(&mut self) -> std::io::Result<Vec<Vec<u8>>> {
+        #[cfg(target_os = "macos")]
+        self.poll_readiness()?;
         let mut frames = Vec::new();
         let mut to_remove = Vec::new();
         let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
@@ -856,6 +797,10 @@ impl TcpBridge {
                 budget.min(read_cap)
             };
 
+            #[cfg(target_os = "macos")]
+            if !self.readiness.is_ready(conn.stream.as_fd()) {
+                continue;
+            }
             use std::io::Read;
             match conn.stream.read(&mut read_buf[..cap]) {
                 Ok(0) => {

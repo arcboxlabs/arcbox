@@ -76,6 +76,12 @@ Without a `ConnSink`, host→guest bytes are drained by
 `TcpBridge::poll_fast_path`. This is simple and works in synchronous loops, but
 the caller must keep polling while fast-path connections are active.
 
+On macOS, each poll collects level-triggered read readiness with
+`kevent64(KEVENT_FLAG_IMMEDIATE)` before reading non-inline sockets. Unread data
+and EOF remain ready across bounded reads. Recovery and timers still run for
+all flows. `TcpBridge::new` and `poll_fast_path` return I/O errors if queue
+creation or readiness polling fails.
+
 Each poll reads at most once per connection, up to 128 KiB within the guest's
 available receive window. The bridge segments these bytes by the peer MSS and
 configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits

@@ -276,6 +276,8 @@ pub struct TcpBridge {
     fast_path_conns: HashMap<SynFlowKey, FastPathConn>,
     /// Shared read scratch, allocated when the first polled flow is promoted.
     fast_path_read_buf: Vec<u8>,
+    #[cfg(target_os = "macos")]
+    readiness: readiness::Readiness,
     /// Gateway MAC for constructing frames to the guest.
     fast_path_gateway_mac: [u8; 6],
     /// Guest MAC for constructing frames to the guest. Learned from inbound
@@ -315,6 +317,8 @@ pub struct TcpBridge {
 pub(super) struct FastPathConn {
     /// Host-side TCP stream (std blocking — used from the sync datapath loop).
     stream: std::net::TcpStream,
+    #[cfg(target_os = "macos")]
+    read_registered: bool,
     /// Our SEQ number for frames sent TO guest. Shared atomic with the
     /// inject thread so ACKs emitted by `try_fast_path_intercept` always
     /// carry a SEQ matching the guest's rcv_nxt for this flow (the inject
@@ -527,6 +531,7 @@ pub(crate) fn send_budget(our_seq: u32, guest_acked: u32, guest_window: u32) -> 
 
 impl TcpBridge {
     /// Creates handshake and fast-path state.
+    /// Returns an I/O error if the macOS read-readiness queue cannot be created.
     pub fn new(gateway_ip: Ipv4Addr) -> std::io::Result<Self> {
         Ok(Self {
             next_ephemeral: INBOUND_EPHEMERAL_START,
@@ -539,6 +544,8 @@ impl TcpBridge {
             gateway_ip,
             fast_path_conns: HashMap::new(),
             fast_path_read_buf: Vec::new(),
+            #[cfg(target_os = "macos")]
+            readiness: readiness::Readiness::new()?,
             fast_path_gateway_mac: [0; 6],
             fast_path_guest_mac: None,
             large_frames_enabled: false,
@@ -612,6 +619,8 @@ mod fast_path;
 mod handshake;
 mod intercept;
 mod promotion;
+#[cfg(target_os = "macos")]
+mod readiness;
 mod settings;
 mod upload_batch;
 

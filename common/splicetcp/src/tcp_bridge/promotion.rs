@@ -128,6 +128,8 @@ impl TcpBridge {
             key,
             FastPathConn {
                 stream,
+                #[cfg(target_os = "macos")]
+                read_registered: false,
                 our_seq: our_seq_atomic,
                 last_ack,
                 last_ack_shared: Some(std::sync::Arc::clone(&last_ack_atomic)),
