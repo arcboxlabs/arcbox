@@ -6,6 +6,8 @@
 //! workloads (e.g., L2 Ethernet frames over `AF_UNIX SOCK_DGRAM` socketpairs).
 //! [`BatchDgram::send_batch_to_v4`] sends to explicit IPv4 destinations without
 //! connecting the UDP socket. Partial sends return the accepted prefix count.
+//! [`BatchDgram::recv_batch_from_v4`] preserves the source address of every
+//! received datagram without changing the raw frame receive interfaces.
 //!
 //! # Platform support
 //!
@@ -41,7 +43,7 @@ pub(crate) mod ffi;
 #[cfg(any(feature = "tokio", test))]
 pub mod async_batch;
 
-pub use batch::{BatchDgram, MAX_BATCH, RxEntry};
+pub use batch::{BatchDgram, MAX_BATCH, RxDatagramV4, RxEntry};
 
 #[cfg(any(feature = "tokio", test))]
 pub use async_batch::AsyncBatchDgram;
