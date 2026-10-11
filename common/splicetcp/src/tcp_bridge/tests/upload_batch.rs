@@ -60,7 +60,7 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
     let first = &frames[0];
     let candidate = &frames[1];
     let mut batch = UploadBatch::new(&first[54..]);
-    batch.extend(first, &frames[1..], 2050);
+    batch.extend(first, &frames[1..], 2050, ETH_HEADER_LEN);
     assert_eq!(batch.count, 2);
     for (offset, value) in [
         (26, 99),
@@ -78,7 +78,7 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
         changed[offset] = value;
         let mut batch = UploadBatch::new(&first[54..]);
         let candidates = [changed];
-        batch.extend(first, &candidates, 2050);
+        batch.extend(first, &candidates, 2050, ETH_HEADER_LEN);
         assert_eq!(
             batch.count, 1,
             "changed offset {offset} must stop coalescing"
@@ -87,13 +87,86 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
     for length in 0..candidate.len() {
         let mut batch = UploadBatch::new(&first[54..]);
         let candidates = [&candidate[..length]];
-        batch.extend(first, &candidates, 2050);
+        batch.extend(first, &candidates, 2050, ETH_HEADER_LEN);
         assert_eq!(batch.count, 1);
     }
     let large = segments(2000, &vec![7; 280_000], 40_000);
     let mut batch = UploadBatch::new(&large[0][54..]);
-    batch.extend(&large[0], &large[1..], 42_000);
+    batch.extend(&large[0], &large[1..], 42_000, ETH_HEADER_LEN);
     assert_eq!(batch.count, 6, "batch payload must stay within 256 KiB");
+}
+
+#[tokio::test]
+async fn borrowed_ip_batch_validates_headers_and_splices_only_payload() {
+    use super::super::upload_batch::UploadBatch;
+
+    let base = u32::MAX - 100;
+    let payload: Vec<_> = (0..65 * 33).map(|i| (i % 251) as u8).collect();
+    let mut bridge = TcpBridge::new(GW_IP);
+    let mut server = fast_path_pair(&mut bridge, key(), base).await;
+    let packets: Vec<_> = segments(base, &payload, 33)
+        .into_iter()
+        .map(|frame| {
+            let mut ip = frame[ETH_HEADER_LEN..].to_vec();
+            ip.splice(20..20, [1; 4]);
+            ip[0] = 0x46;
+            ip.splice(44..44, [1; 4]);
+            ip[36] = 0x60;
+            let len = u16::try_from(ip.len()).unwrap();
+            ip[2..4].copy_from_slice(&len.to_be_bytes());
+            ip
+        })
+        .collect();
+    let mut invalid = Vec::new();
+    for (offset, value) in [
+        (0, 0x66),
+        (0, 0x44),
+        (0, 0x4f),
+        (2, 0xff),
+        (3, 39),
+        (6, 0x20),
+        (7, 1),
+        (9, 17),
+        (36, 0x40),
+        (36, 0xf0),
+        (37, 0x02),
+        (37, 0x12),
+    ] {
+        let mut ip = packets[1].clone();
+        ip[offset] = value;
+        invalid.push(ip);
+    }
+    invalid.extend((0..packets[1].len()).map(|len| packets[1][..len].to_vec()));
+    let mut oversized = packets[1].clone();
+    oversized.resize(65_536, 0);
+    invalid.push(oversized);
+    for ip in invalid {
+        let candidates = [ip];
+        assert!(
+            bridge
+                .try_fast_path_intercept_ip_batch(&candidates)
+                .is_none()
+        );
+        let mut batch = UploadBatch::new(&packets[0][48..]);
+        batch.extend(&packets[0], &candidates, base.wrapping_add(33), 0);
+        assert_eq!(
+            batch.count, 1,
+            "invalid following packets must stop coalescing"
+        );
+    }
+    assert_eq!(bridge.fast_path_conns[&key()].last_ack, base);
+    assert_eq!(bridge.fast_path_conns[&key()].up_bytes, 0);
+    let (count, ack) = bridge.try_fast_path_intercept_ip_batch(&packets).unwrap();
+    assert_eq!(count, 64);
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(64 * 33));
+    let (count, ack) = bridge
+        .try_fast_path_intercept_ip_batch(&packets[64..])
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(tcp_ack_of(&ack), base.wrapping_add(payload.len() as u32));
+    let mut got = vec![0; payload.len()];
+    server.read_exact(&mut got).unwrap();
+    assert_eq!(got, payload);
 }
 
 #[tokio::test]
@@ -128,7 +201,13 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
     }
     let payload: Vec<_> = (0..64 * 3960).map(|i| (i % 251) as u8).collect();
     let frames = segments(base, &payload, 3960);
-    let (count, reply) = bridge.try_fast_path_intercept_batch(&frames).unwrap();
+    let packets: Vec<_> = frames
+        .iter()
+        .map(|frame| &frame[ETH_HEADER_LEN..])
+        .collect();
+    let (count, reply) = bridge.try_fast_path_intercept_ip_batch(&packets).unwrap();
+    drop(packets);
+    drop(frames);
     assert_eq!(count, 64);
     let written = tcp_ack_of(&reply).wrapping_sub(base) as usize;
     assert!(
