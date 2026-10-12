@@ -265,7 +265,7 @@ impl FrameClassifier {
     /// in-progress shim handshake (guest ACK → PassiveOpen completion, or
     /// guest SYN-ACK → ActiveOpen completion). The callback returns
     /// `Some(reply_frames)` if consumed (the final ACK for ActiveOpen, or
-    /// empty for PassiveOpen); `None` to leave the frame in the queue.
+    /// replies from processing PassiveOpen payload); `None` leaves the frame queued.
     pub fn drain_handshake(
         &mut self,
         mut try_complete: impl FnMut(&[u8]) -> Option<Vec<Vec<u8>>>,
