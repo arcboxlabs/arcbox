@@ -386,7 +386,8 @@ impl TcpBridge {
 
     /// Called when a TCP frame arrives that matches a pending handshake
     /// (keyed on `SynFlowKey`). For PassiveOpen: consumes the guest's ACK
-    /// and promotes to `FastPathConn`. For ActiveOpen: consumes the
+    /// and promotes to `FastPathConn`, then processes the same frame's
+    /// payload and receive window through the fast path. For ActiveOpen: consumes the
     /// guest's SYN-ACK, emits our final ACK, and promotes.
     ///
     /// Returns `Some(Vec<frame>)` if the frame was consumed by the shim
@@ -476,7 +477,11 @@ impl TcpBridge {
                     return Some(Vec::new());
                 };
                 self.promote_to_fast_path(key, stream, our_seq, last_ack, peer_mss, peer_wscale);
-                Some(Vec::new())
+                // The final ACK can carry data; preserve the fast path's accepted-byte ACK discipline.
+                Some(match self.try_fast_path_intercept(frame) {
+                    Some(reply) if !reply.is_empty() => vec![reply],
+                    _ => Vec::new(),
+                })
             }
             HandshakeRole::ActiveOpen => {
                 // Expect SYN + ACK.
