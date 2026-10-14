@@ -13,6 +13,21 @@ const GW_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const GUEST_MAC: [u8; 6] = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 
+fn fast_path_init(
+    our_seq: u32,
+    last_ack: u32,
+    peer_mss: u16,
+    peer_wscale: Option<u8>,
+) -> FastPathInit {
+    FastPathInit {
+        our_seq,
+        last_ack,
+        peer_mss,
+        peer_wscale,
+        guest_window: 65535,
+    }
+}
+
 // -------- Handshake synthesizer tests --------
 
 #[test]
@@ -457,7 +472,11 @@ async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
         dst_port: 443,
     };
     // Jumbo peer MSS so the dgram limit — not the peer bound — drives sizing.
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 9000, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 9000, None),
+    );
 
     let payload = vec![0xAB; FAST_PATH_GUEST_MSS * 2 + 128];
     accepted.write_all(&payload).await.unwrap();
@@ -521,7 +540,11 @@ async fn poll_fast_path_segments_frames_for_configured_mtu() {
         dst_port: 443,
     };
     // Jumbo peer MSS so the configured MTU — not the peer bound — drives sizing.
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 9000, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 9000, None),
+    );
 
     let payload = vec![0xAB; 5000];
     accepted.write_all(&payload).await.unwrap();
@@ -580,7 +603,11 @@ async fn poll_fast_path_clamps_segments_to_peer_mss() {
         dst_port: 443,
     };
     // …but the peer (a 1500-MTU bridged container) advertised MSS 1460.
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1460, None),
+    );
 
     let payload = vec![0xAB; 5000];
     accepted.write_all(&payload).await.unwrap();
@@ -646,7 +673,11 @@ async fn large_frames_below_gso_mss_falls_back_to_clamped_segmentation() {
         dst_port: 443,
     };
     // …but the peer advertised MSS 1400, below the 1460 GSO segment size.
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1400, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1400, None),
+    );
 
     let payload = vec![0xAB; 5000];
     accepted.write_all(&payload).await.unwrap();
@@ -705,7 +736,11 @@ async fn poll_fast_path_read_error_emits_rst_and_removes_flow() {
         dst_ip: Ipv4Addr::new(198, 18, 30, 95),
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
     assert_eq!(bridge.fast_path_count(), 1);
 
     // Abortive close: SO_LINGER(0) turns the peer's close into a RST, so
@@ -767,7 +802,11 @@ async fn inline_dead_flag_reaps_bridge_entry() {
         dst_port: 443,
     };
     // peer_mss ≥ GSO_SEGMENT_MSS → inline-eligible, handed to the sink.
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 9000, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 9000, None),
+    );
     assert_eq!(bridge.fast_path_count(), 1);
     let promoted = sink
         .0
@@ -829,10 +868,7 @@ async fn inline_zero_window_persist_probes() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        9000,
-        None,
+        fast_path_init(1000, 2000, 9000, None),
     );
     let promoted = sink.0.lock().unwrap().take().expect("inline conn");
 
@@ -1010,7 +1046,11 @@ async fn upload_hole_is_never_acked_or_written() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // Out-of-order segment: 2000..2100 is missing.
     let ooo = make_guest_segment((40021, dst_ip, 443), 2100, 1000, 65535, 0x18, &[0xBB; 50]);
@@ -1057,10 +1097,7 @@ async fn fast_path_pair(
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        last_ack,
-        1460,
-        None,
+        fast_path_init(1000, last_ack, 1460, None),
     );
     let server = accepted.into_std().unwrap();
     server.set_nonblocking(false).unwrap();
@@ -1393,7 +1430,7 @@ async fn upload_ooo_drain_respects_host_writable() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(key, std_client, fast_path_init(1000, 2000, 1460, None));
 
     let mut server = accepted.into_std().unwrap();
     server.set_nonblocking(false).unwrap();
@@ -1512,7 +1549,11 @@ async fn upload_fin_with_gap_defers_teardown() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // FIN at 2100 while the cursor is still 2000: 100 bytes are missing.
     let early_fin = make_guest_segment((40022, dst_ip, 443), 2100, 1000, 65535, 0x11, &[]);
@@ -1599,7 +1640,11 @@ async fn guest_half_close_shuts_host_write_side() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // In-order guest FIN (no gap, no sink → non-inline).
     let fin = make_guest_segment((40044, dst_ip, 443), 2000, 1000, 65535, 0x11, &[]);
@@ -1649,7 +1694,11 @@ async fn half_closed_flow_reaps_after_host_eof() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // Guest half-closes.
     let fin = make_guest_segment((40055, dst_ip, 443), 2000, 1000, 65535, 0x11, &[]);
@@ -1727,7 +1776,7 @@ async fn upload_ack_never_exceeds_host_writable() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(key, std_client, fast_path_init(1000, 2000, 1460, None));
 
     let mut server = accepted.into_std().unwrap();
     server.set_nonblocking(false).unwrap();
@@ -1816,7 +1865,11 @@ async fn poll_fast_path_respects_guest_window() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1460, None),
+    );
 
     accepted.write_all(&vec![0xDD; 100_000]).await.unwrap();
 
@@ -1893,7 +1946,11 @@ async fn poll_retransmits_unacked_data_after_rto() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1460, None),
+    );
 
     accepted.write_all(&[0xEE; 4096]).await.unwrap();
 
@@ -1955,7 +2012,11 @@ async fn triple_dup_ack_triggers_fast_retransmit() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1460, None),
+    );
 
     accepted.write_all(&[0xEF; 2920]).await.unwrap();
     let mut sent = 0usize;
@@ -2015,7 +2076,11 @@ async fn download_ack_beyond_sent_is_ignored() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1, 1, 1460, None),
+    );
 
     // Send 2920 bytes downstream (our_seq goes 1 → 2921).
     accepted.write_all(&[0xF0; 2920]).await.unwrap();
@@ -2086,10 +2151,7 @@ async fn half_closed_flow_reaped_after_idle_timeout() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     // Guest half-closes with an in-order FIN → the flow is retained.
@@ -2143,7 +2205,11 @@ async fn malformed_data_offset_is_not_spliced_to_host() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // A PSH|ACK segment carrying 8 payload bytes, but with the TCP data-offset
     // nibble cleared (data offset = 0, < the 20-byte minimum).
@@ -2190,10 +2256,7 @@ async fn retransmitted_syn_ack_gets_reack() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     // Retransmitted SYN-ACK at the ISN, no payload.
@@ -2233,10 +2296,7 @@ async fn pure_ack_returns_no_frame() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     let pure_ack = make_guest_segment((40041, dst_ip, 443), 2000, 1000, 65535, 0x10, &[]);
@@ -2272,7 +2332,11 @@ async fn zero_window_stall_is_broken_by_a_persist_probe() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(
+        key,
+        client.into_std().unwrap(),
+        fast_path_init(1000, 2000, 1460, None),
+    );
 
     // Guest advertises a closed window (0), and the upstream has data to send.
     let zero_win = make_guest_segment((40088, dst_ip, 443), 2000, 1000, 0, 0x10, &[]);
@@ -2349,7 +2413,7 @@ async fn promotion_arms_upstream_keepalive() {
         dst_ip,
         dst_port: 443,
     };
-    bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
+    bridge.promote_to_fast_path(key, std_client, fast_path_init(1000, 2000, 1460, None));
 
     assert!(
         socket2::SockRef::from(&probe).keepalive().unwrap(),
@@ -2384,10 +2448,7 @@ async fn silent_guest_with_data_in_flight_is_rst_reaped() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     // Upstream data goes into flight; the guest never ACKs a byte of it.
@@ -2437,10 +2498,7 @@ async fn silent_guest_at_zero_window_is_rst_reaped() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     // Guest shuts its window with upstream data pending, then goes silent.
@@ -2489,10 +2547,7 @@ async fn guest_ack_refreshes_dead_flow_clock() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     server.write_all(b"unacked-data").unwrap();
@@ -2558,10 +2613,7 @@ async fn inline_silent_guest_with_data_in_flight_is_rst_reaped() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        9000,
-        None,
+        fast_path_init(1000, 2000, 9000, None),
     );
     let promoted = sink.0.lock().unwrap().take().expect("inline conn");
 
@@ -2624,10 +2676,7 @@ async fn long_idle_flow_survives_upstream_wakeup() {
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        1460,
-        None,
+        fast_path_init(1000, 2000, 1460, None),
     );
 
     // The flow has been quiescent far beyond the deadline: the guest's last
@@ -2710,10 +2759,7 @@ async fn inline_fixture(
     bridge.promote_to_fast_path(
         key,
         client.unwrap().into_std().unwrap(),
-        1000,
-        2000,
-        9000,
-        None,
+        fast_path_init(1000, 2000, 9000, None),
     );
     let promoted = sink.0.lock().unwrap().take().expect("inline conn");
     (bridge, promoted, key)

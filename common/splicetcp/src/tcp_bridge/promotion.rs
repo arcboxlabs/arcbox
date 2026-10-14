@@ -2,21 +2,41 @@
 
 use super::{FastPathConn, GSO_SEGMENT_MSS, SynFlowKey, TcpBridge};
 
+/// TCP state established by the completed guest-facing handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct FastPathInit {
+    /// Next sequence number sent toward the guest.
+    pub our_seq: u32,
+    /// Next guest sequence number accepted by the host socket.
+    pub last_ack: u32,
+    /// Maximum segment size advertised by the guest.
+    pub peer_mss: u16,
+    /// Negotiated shift in 0..=14 for subsequent guest receive-window updates.
+    pub peer_wscale: Option<u8>,
+    /// Initial receive window in bytes, already scaled for a non-SYN ACK.
+    pub guest_window: u32,
+}
+
 impl TcpBridge {
     /// Promotes a connection to the fast path.
     ///
     /// Called when a shim handshake reaches ESTABLISHED and has a
     /// pre-connected host stream. The connection is moved into
     /// `fast_path_conns` and subsequent data bypasses handshake bookkeeping.
+    /// The initial window must be valid before an inline reader receives the stream.
     pub fn promote_to_fast_path(
         &mut self,
         key: SynFlowKey,
         stream: std::net::TcpStream,
-        our_seq: u32,
-        last_ack: u32,
-        peer_mss: u16,
-        peer_wscale: Option<u8>,
+        init: FastPathInit,
     ) {
+        let FastPathInit {
+            our_seq,
+            last_ack,
+            peer_mss,
+            peer_wscale,
+            guest_window,
+        } = init;
         // Set non-blocking for polling in the event loop.
         stream.set_nonblocking(true).ok();
         stream.set_nodelay(true).ok();
@@ -34,12 +54,9 @@ impl TcpBridge {
 
         let last_ack_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(last_ack));
         let our_seq_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(our_seq));
-        // Download flow-control state: nothing of ours is unACKed yet, and
-        // until the guest's first post-handshake ACK arrives we assume one
-        // unscaled window (SYN windows are unscaled per RFC 7323) — the
-        // first real ACK replaces it within a round trip.
+        // Publish the handshake's window before the sink can start reading the host socket.
         let guest_acked = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(our_seq));
-        let guest_window = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(65535));
+        let guest_window = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(guest_window));
         // Shared host→guest byte counter — allocated ONLY when a flow observer is
         // installed, so an un-observed consumer (e.g. the VMM datapath) pays no
         // per-connection allocation or atomic. The inline inject thread increments

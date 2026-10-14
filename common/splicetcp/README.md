@@ -91,6 +91,10 @@ the original options, even if the configured MTU changes.
 and subsequent data. A passive-open completion ACK enters the fast path after
 promotion, including any payload and the advertised receive window. The bridge
 forwards these bytes once and acknowledges only bytes accepted by the host socket.
+Promotion requires explicit `FastPathInit` state. The bridge initializes the
+guest receive window before publishing the stream to a `ConnSink`. A passive-open
+completion ACK uses the negotiated window scale; an active-open SYN-ACK window
+remains unscaled. If the peer omits Window Scale, later updates remain unscaled.
 Established uploads coalesce at most 64 consecutive frames
 and 256 KiB into one vectored socket write and cumulative ACK. Coalescing requires
 the same connection, contiguous sequence numbers, identical download ACK/window

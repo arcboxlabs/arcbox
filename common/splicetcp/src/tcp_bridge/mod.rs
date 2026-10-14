@@ -611,6 +611,7 @@ mod fast_path;
 mod handshake;
 mod intercept;
 mod promotion;
+pub use promotion::FastPathInit;
 mod settings;
 mod upload_batch;
 

@@ -476,7 +476,18 @@ impl TcpBridge {
                 let Some(stream) = conn.host_stream else {
                     return Some(Vec::new());
                 };
-                self.promote_to_fast_path(key, stream, our_seq, last_ack, peer_mss, peer_wscale);
+                let window = u16::from_be_bytes([frame[l4_start + 14], frame[l4_start + 15]]);
+                self.promote_to_fast_path(
+                    key,
+                    stream,
+                    super::FastPathInit {
+                        our_seq,
+                        last_ack,
+                        peer_mss,
+                        peer_wscale,
+                        guest_window: u32::from(window) << peer_wscale.unwrap_or(0),
+                    },
+                );
                 // The final ACK can carry data; preserve the fast path's accepted-byte ACK discipline.
                 Some(match self.try_fast_path_intercept(frame) {
                     Some(reply) if !reply.is_empty() => vec![reply],
@@ -502,9 +513,7 @@ impl TcpBridge {
 
                 let mut conn = self.handshake_conns.remove(&key)?;
                 conn.peer_isn = guest_isn;
-                if peer_opts.wscale.is_some() {
-                    conn.peer_wscale = peer_opts.wscale;
-                }
+                conn.peer_wscale = peer_opts.wscale;
                 // Record the guest endpoint's real MSS so host→guest segments
                 // are sized to what it can forward (a bridged container behind
                 // eth0 advertises its own, smaller, veth MSS here).
@@ -534,7 +543,19 @@ impl TcpBridge {
                 let Some(stream) = conn.host_stream else {
                     return Some(vec![ack_frame]);
                 };
-                self.promote_to_fast_path(key, stream, our_seq, last_ack, peer_mss, peer_wscale);
+                let window = u16::from_be_bytes([frame[l4_start + 14], frame[l4_start + 15]]);
+                self.promote_to_fast_path(
+                    key,
+                    stream,
+                    super::FastPathInit {
+                        our_seq,
+                        last_ack,
+                        peer_mss,
+                        peer_wscale,
+                        // SYN windows are unscaled even when Window Scale was negotiated.
+                        guest_window: u32::from(window),
+                    },
+                );
                 Some(vec![ack_frame])
             }
         }

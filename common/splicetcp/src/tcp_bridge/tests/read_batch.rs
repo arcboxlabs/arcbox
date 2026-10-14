@@ -41,10 +41,7 @@ async fn check_download_batches(large_frames: bool) {
         bridge.promote_to_fast_path(
             *key,
             client.unwrap().into_std().unwrap(),
-            1000,
-            2000,
-            1460,
-            Some(2),
+            fast_path_init(1000, 2000, 1460, Some(2)),
         );
         let payload = payload.clone();
         writers.push(tokio::spawn(async move {

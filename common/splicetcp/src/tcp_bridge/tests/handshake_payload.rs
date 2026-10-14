@@ -21,7 +21,42 @@ struct PendingFlow {
 }
 
 impl PendingFlow {
+    async fn active() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (stream, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 8080,
+            dst_ip: GW_IP,
+            dst_port: 61500,
+        };
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+        bridge.initiate_active_handshake(
+            key,
+            stream.unwrap().into_std().unwrap(),
+            GW_MAC,
+            GUEST_MAC,
+        );
+        let syn = bridge.poll_handshakes();
+        assert_eq!(syn.len(), 1);
+        Self {
+            our_seq: tcp_seq_of(&syn[0]).wrapping_add(1),
+            bridge,
+            classifier: FrameClassifier::with_pool_capacity(GW_IP, 1500, 4),
+            upstream: accepted.unwrap().0,
+            key,
+        }
+    }
+
     async fn new() -> Self {
+        Self::with_scale(2).await
+    }
+
+    async fn with_scale(scale: u8) -> Self {
         tokio::time::timeout(TIMEOUT, async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let key = SynFlowKey {
@@ -40,7 +75,7 @@ impl PendingFlow {
                 key.dst_ip,
                 key.dst_port,
                 GUEST_ISN,
-                &[2, 4, 0x05, 0xB4, 1, 3, 3, 2],
+                &[2, 4, 0x05, 0xB4, 1, 3, 3, scale],
             );
             classify_guest_frame(&mut classifier, &mut syn);
             let gated = classifier.take_gated_syns();
@@ -225,4 +260,115 @@ async fn passive_open_payload_waits_for_missing_prefix() {
     let replies = flow.classifier.drain_tcp(&mut flow.bridge);
     flow.assert_received(payload).await;
     flow.assert_upload_ack(&replies, payload.len());
+}
+
+struct WindowSink {
+    expected: u32,
+    captured: std::sync::Mutex<Option<crate::direct_rx::PromotedConn>>,
+}
+
+impl crate::direct_rx::ConnSink for WindowSink {
+    fn send_conn(&self, conn: crate::direct_rx::PromotedConn) -> bool {
+        // Observe publication from another thread before promotion can return to the ACK handler.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(conn.guest_window.load(Ordering::Relaxed), self.expected);
+                    assert_eq!(
+                        send_budget(
+                            conn.our_seq.load(Ordering::Relaxed),
+                            conn.guest_acked.load(Ordering::Relaxed),
+                            conn.guest_window.load(Ordering::Relaxed),
+                        ),
+                        self.expected
+                    );
+                })
+                .join()
+                .unwrap();
+        });
+        *self.captured.lock().unwrap() = Some(conn);
+        true
+    }
+}
+
+fn assert_window_publication_and_reopen(
+    flow: &mut PendingFlow,
+    mut completion: Vec<u8>,
+    expected: u32,
+    scale: u8,
+) {
+    let sink = Arc::new(WindowSink {
+        expected,
+        captured: std::sync::Mutex::new(None),
+    });
+    flow.bridge.set_conn_sink(Arc::clone(&sink) as _);
+    classify_guest_frame(&mut flow.classifier, &mut completion);
+    flow.classifier.drain_tcp(&mut flow.bridge);
+    let promoted = sink.captured.lock().unwrap().take().unwrap();
+    assert!(flow.bridge.fast_path_conns[&flow.key].inline_owned);
+    assert_eq!(promoted.guest_window.load(Ordering::Relaxed), expected);
+    flow.queue(GUEST_SEQ, 0x10, 1234, &[]);
+    flow.classifier.drain_tcp(&mut flow.bridge);
+    assert_eq!(promoted.guest_window.load(Ordering::Relaxed), 1234 << scale);
+    assert_eq!(
+        send_budget(
+            promoted.our_seq.load(Ordering::Relaxed),
+            promoted.guest_acked.load(Ordering::Relaxed),
+            promoted.guest_window.load(Ordering::Relaxed),
+        ),
+        1234 << scale
+    );
+}
+
+#[tokio::test]
+async fn passive_initial_window_is_scaled_before_publication() {
+    for (offered, scale) in [(2, 2), (14, 14), (255, 14)] {
+        for window in [0, 7] {
+            let mut flow = PendingFlow::with_scale(offered).await;
+            let completion = make_guest_segment(
+                (flow.key.src_port, flow.key.dst_ip, flow.key.dst_port),
+                GUEST_SEQ,
+                flow.our_seq,
+                window,
+                0x10,
+                &[],
+            );
+            assert_window_publication_and_reopen(
+                &mut flow,
+                completion,
+                u32::from(window) << scale,
+                scale,
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn active_initial_window_is_unscaled_before_publication() {
+    for scale in [None, Some(2), Some(14), Some(255)] {
+        for window in [0u16, 7] {
+            let mut flow = PendingFlow::active().await;
+            let mut options = vec![2, 4, 0x05, 0xB4];
+            if let Some(scale) = scale {
+                options.extend_from_slice(&[1, 3, 3, scale]);
+            }
+            let mut completion = make_guest_syn_frame(
+                flow.key.src_port,
+                flow.key.dst_ip,
+                flow.key.dst_port,
+                GUEST_ISN,
+                &options,
+            );
+            let tcp = ETH_HEADER_LEN + 20;
+            completion[tcp + 13] = 0x12;
+            completion[tcp + 8..tcp + 12].copy_from_slice(&flow.our_seq.to_be_bytes());
+            completion[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
+            assert_window_publication_and_reopen(
+                &mut flow,
+                completion,
+                u32::from(window),
+                scale.unwrap_or(0).min(14),
+            );
+        }
+    }
 }

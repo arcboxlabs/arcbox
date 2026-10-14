@@ -28,7 +28,7 @@ async fn limited_fast_path_pair(
         sock.set_recv_buffer_size(4096).unwrap();
         sock.recv_buffer_size().unwrap()
     };
-    bridge.promote_to_fast_path(key, client, 1000, base, 1460, None);
+    bridge.promote_to_fast_path(key, client, fast_path_init(1000, base, 1460, None));
     server.set_nonblocking(false).unwrap();
     server
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
