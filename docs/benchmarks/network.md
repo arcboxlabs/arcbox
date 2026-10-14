@@ -200,7 +200,7 @@ iperf3 -c 127.0.0.1 -p 5201 -P 4 -b 2G -t 10
 
 The Ethernet TCP checksum builder used a scalar loop with a branch at each 16-bit word. The builder now calls the existing `checksum_add` dispatcher and subtracts the stored checksum field before folding. The change preserves checksum-field exclusion, odd-length input, and short-input behavior.
 
-Run `devenv shell -- cargo run --locked -p arcbox-packet --example checksum_bench --release` from the ArcBox checkout. Both sides used the same benchmark with `black_box` on the input and result. The baseline checksum implementation is from `72a59f9`; only the checksum implementation changed between the two release builds. Host: Apple M5 Max, macOS, Rust 1.96.0. These are single-run, warm-cache microbenchmarks.
+Run `devenv shell -- cargo run --locked -p arcbox-packet --example checksum_bench --release` from the ArcBox checkout. These historical measurements used ArcTap's downstream ArcBox commits `72a59f9` (baseline) and `8f14a07` (candidate), which are not upstream commit references. Both sides used the same benchmark with `black_box` on the input and result; only the checksum implementation changed between the two release builds. To reproduce the implementation comparison from upstream history, compare `f2516a6` with `7075f050`, using `common/arcbox-packet/examples/checksum_bench.rs` from `7075f050` in both checkouts. Their checksum implementations match the historical baseline and candidate. Host: Apple M5 Max, macOS, Rust 1.96.0. These are single-run, warm-cache microbenchmarks.
 
 | TCP segment bytes | Baseline ns/call | Shared dispatcher ns/call |
 | --- | ---: | ---: |
@@ -209,13 +209,13 @@ Run `devenv shell -- cargo run --locked -p arcbox-packet --example checksum_benc
 | 3,980 | 731.6 | 37.5 |
 | 65,535 | 12,195.0 | 745.2 |
 
-The scalar-oracle test covers unaligned input, nonzero checksum fields, odd lengths, the SIMD threshold, and the maximum IPv4 segment length. All 44 packet tests and 108 TCP bridge tests pass. Strict Clippy and formatting pass with Rust 1.98.1, which supports the workspace lint configuration. These measurements cover checksum computation only; they do not establish a network-throughput improvement.
+The scalar-oracle test covers unaligned input, nonzero checksum fields, odd lengths, the SIMD threshold, and the maximum IPv4 segment length. The original downstream validation record reported 44 packet tests and 108 splicetcp tests passing, plus strict Clippy and formatting with Rust 1.98.1. Those counts describe the downstream checkout; upstream validation is recorded below. These measurements cover checksum computation only; they do not establish a network-throughput improvement.
 
 ## 2026-10-10 — TCP frame initialization
 
 Both TCP data-frame builders allocated a zeroed frame and then copied the payload over those zeros. They now reserve the full capacity, initialize the 54-byte Ethernet/IPv4/TCP header, and append the payload. Reserved header fields remain zero. Frame contents, IPv4 length limits, and public interfaces remain unchanged.
 
-Run `devenv shell -- cargo run --locked -p arcbox-packet --example tcp_frame_bench --release`. The benchmark includes allocation, header writes, payload copy, checksum, and deallocation. Inputs and returned frames pass through `black_box`. Each binary runs seven rounds over seven payload sizes and both full and partial checksum builders. The baseline uses `8f14a07` plus the same benchmark. The candidate changes only frame initialization. Host: Apple M5 Max, macOS, Rust 1.96.0, warm allocator and cache.
+Run `devenv shell -- cargo run --locked -p arcbox-packet --example tcp_frame_bench --release`. The benchmark includes allocation, header writes, payload copy, checksum, and deallocation. Inputs and returned frames pass through `black_box`. Each binary runs seven rounds over seven payload sizes and both full and partial checksum builders. The historical downstream baseline uses `8f14a07` plus the same benchmark; the candidate is `c31f3706`. To reproduce the implementation comparison from upstream history, compare `7075f050` with `42b55314`, using `common/arcbox-packet/examples/tcp_frame_bench.rs` from `42b55314` in both checkouts. Their data-frame builders match the historical baseline and candidate; the candidate changes only frame initialization in these builders. Host: Apple M5 Max, macOS, Rust 1.96.0, warm allocator and cache.
 
 Two sequential baseline/candidate pairs produced these medians for full TCP checksums, in ns/frame:
 
@@ -231,4 +231,15 @@ Two sequential baseline/candidate pairs produced these medians for full TCP chec
 
 Packet-sized and larger payloads improved in both pairs. Very short payloads have no consistent improvement; the first 1-byte measurement regressed by 0.979 ns. These microbenchmarks do not prove a NE throughput or CPU/GB improvement. Runtime acceptance remains open.
 
-The existing frame test now compares every byte against a fixed wire-header fixture and scalar checksum oracle. Both checksum modes cover payload lengths 0 through 65, odd and even MTU-sized payloads, 32 KiB, and the maximum IPv4 payload. All 44 packet tests and 108 TCP bridge tests pass. Strict Clippy, including the benchmark target, and formatting pass with Rust 1.98.1.
+The existing frame test now compares every byte against a fixed wire-header fixture and scalar checksum oracle. Both checksum modes cover payload lengths 0 through 65, odd and even MTU-sized payloads, 32 KiB, and the maximum IPv4 payload. The original downstream validation record reported 44 packet tests and 108 splicetcp tests passing, plus strict Clippy, including the benchmark target, and formatting with Rust 1.98.1.
+
+### Upstream validation — 2026-10-14
+
+At upstream commit `42b55314`, validation on macOS Apple Silicon passed with the following commands. Tests and formatting used Rust 1.96.0; the Clippy command selected Clippy 0.1.99. Test counts depend on platform and feature flags.
+
+- `devenv shell -- cargo test -p arcbox-packet --all-features`: 44 unit tests passed.
+- `devenv shell -- cargo test -p splicetcp --all-features`: 101 unit tests passed.
+- `devenv shell -- cargo fmt --all -- --check`: passed.
+- `devenv shell -- cargo clippy -p arcbox-packet --all-targets --all-features -- -D warnings`: passed.
+
+The benchmark numbers above remain the original downstream measurements. No throughput or microbenchmark measurements were repeated for the upstream submission.
