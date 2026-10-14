@@ -174,6 +174,7 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
     let base = u32::MAX - 1000;
     let mut bridge = TcpBridge::new(GW_IP);
     let mut server = fast_path_pair(&mut bridge, key(), base).await;
+    let recv_size = socket2::SockRef::from(&server).recv_buffer_size().unwrap();
     socket2::SockRef::from(&server)
         .set_recv_buffer_size(4096)
         .unwrap();
@@ -235,6 +236,10 @@ async fn upload_batch_backpressure_retains_suffix_until_poll_and_fin() {
     let deferred = bridge.try_fast_path_intercept(&fin).unwrap();
     assert_eq!(tcp_ack_of(&deferred), base.wrapping_add(written as u32));
     assert!(bridge.fast_path_conns[&key()].guest_fin_at.is_none());
+    // Release the artificial receive limit after proving retained bytes and deferred FIN.
+    socket2::SockRef::from(&server)
+        .set_recv_buffer_size(recv_size)
+        .unwrap();
     let reader = std::thread::spawn(move || {
         let mut got = Vec::new();
         server.read_to_end(&mut got).unwrap();
