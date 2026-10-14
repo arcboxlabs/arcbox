@@ -87,6 +87,7 @@ from memory. Every new file is added to the index below.
 
 ### Benchmarks
 
+- [IPv4 UDP benchmark runner](../tests/bench/xnu-udp/README.md) — [driver](../tests/bench/xnu-udp/run.sh), environment capture, and Criterion send/receive modes
 - [IPv4 UDP receive](benchmarks/udp-receive.md) — batch receive contract and loopback measurements
 - [HV wake path](benchmarks/hv-wake.md) — host→guest vsock bulk, RPC latency, idle CPU
 - [VirtioFS datapath](benchmarks/virtiofs.md) — measured performance and known limits

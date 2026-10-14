@@ -246,9 +246,11 @@ The benchmark numbers above remain the original downstream measurements. No thro
 
 ## 2026-10-11 — IPv4 UDP batch sends
 
-`BatchDgram::send_batch_to_v4` sends to an explicit IPv4 destination without connecting the socket. The method uses the existing kernel cap and syscall error handling. Partial success returns the accepted prefix count. Tests cover destination changes, zero-length payloads, packet boundaries, and a valid packet followed by an oversized packet. All 24 crate tests, the documentation test, strict Clippy, and formatting pass.
+`BatchDgram::send_batch_to_v4` sends to an explicit IPv4 destination without connecting the socket. The method uses the existing kernel cap and syscall error handling. Partial success returns the accepted prefix count. Tests cover destination changes, zero-length payloads, packet boundaries, and a valid packet followed by an oversized packet. The original validation passed all 24 crate tests, the documentation test, strict Clippy, and formatting.
 
-Run `devenv shell -- cargo bench --manifest-path .source/arcbox/Cargo.toml -p arcbox-xnu-net --bench throughput -- ipv4 --sample-size 10 --warm-up-time 1 --measurement-time 2` from the ArcTap checkout. The benchmark sends 64 datagrams of 1472 bytes, then receives each datagram individually. Host: Apple M5 Max (Mac17,6), macOS 26.7.1 (25G241), Rust 1.96.0.
+The historical command was `devenv shell -- cargo bench --manifest-path .source/arcbox/Cargo.toml -p arcbox-xnu-net --bench throughput -- ipv4 --sample-size 10 --warm-up-time 1 --measurement-time 2` from the ArcTap checkout. The benchmark sends 64 datagrams of 1472 bytes, then receives each datagram individually. Host: Apple M5 Max (Mac17,6), macOS 26.7.1 (25G241), Rust 1.96.0.
+
+To repeat the send measurement from ArcBox, run `devenv shell -- tests/bench/xnu-udp/run.sh send`. The checked-in [driver](../../tests/bench/xnu-udp/README.md) retains these sampling settings and selects only `^ipv4/`; the historical `ipv4` filter also matches the newer receive group. The driver records the command, environment, output, status, and Criterion data.
 
 | Send method | Criterion time estimate per 64 datagrams | Estimate interval | Datagrams/s estimate |
 | --- | ---: | ---: | ---: |

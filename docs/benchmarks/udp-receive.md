@@ -8,15 +8,23 @@ The timed iteration includes sends, receive setup, readiness waits, and receives
 
 Before timing each payload size, the IPv4 benchmarks read back the effective `SO_RCVBUF` and check that the receiver accepts the complete 64-datagram burst. The check sends the whole burst before draining it, verifies payloads and sources, and stops after a two-second deadline. A failed check reports the requested and effective buffer sizes, platform, and sent/received counts. The benchmark does not shrink the burst or add a concurrent receiver. Buffer readback alone cannot prove capacity because the kernel also accounts for packet metadata. This setup check does not change the timed workload or the historical measurements below.
 
-From the ArcTap devenv environment, run:
+From the ArcBox checkout, run the checked-in [benchmark driver](../../tests/bench/xnu-udp/README.md):
 
 ```sh
-cargo bench --locked --manifest-path .source/arcbox/Cargo.toml -p arcbox-xnu-net --bench throughput -- ipv4_recv --warm-up-time 1 --measurement-time 3 --sample-size 30
+devenv shell -- tests/bench/xnu-udp/run.sh recv
 ```
+
+The driver preserves the workload and sampling settings, selects only the receive group, and records the command, environment, output, status, and Criterion data. Use `smoke` instead of `recv` to check all six IPv4 cases without measuring throughput.
 
 ## 2026-10-11
 
 Developer Mac, Darwin 25.6.0, Rust 1.96.0. Each cell has 30 Criterion samples after a one-second warmup. Local compilation finished before measurement. The remote Mac ran an independent loopback baseline during measurement.
+
+Historical command, run from the ArcTap devenv environment:
+
+```sh
+cargo bench --locked --manifest-path .source/arcbox/Cargo.toml -p arcbox-xnu-net --bench throughput -- ipv4_recv --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
 
 | Payload bytes | Scalar, µs per 64 packets | Batch, µs per 64 packets | Point-estimate reduction |
 | --- | --- | --- | --- |
