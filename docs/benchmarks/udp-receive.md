@@ -6,6 +6,8 @@ Run the Criterion `ipv4_recv` group in `common/arcbox-xnu-net/benches/throughput
 
 The timed iteration includes sends, receive setup, readiness waits, and receives. These results do not isolate receive CPU cost or measure a Network Extension. The benchmark checks datagram counts and scalar lengths. Unit tests separately check batch payloads, sources, header reuse, empty datagrams, and truncation boundaries.
 
+Before timing each payload size, the IPv4 benchmarks read back the effective `SO_RCVBUF` and check that the receiver accepts the complete 64-datagram burst. The check sends the whole burst before draining it, verifies payloads and sources, and stops after a two-second deadline. A failed check reports the requested and effective buffer sizes, platform, and sent/received counts. The benchmark does not shrink the burst or add a concurrent receiver. Buffer readback alone cannot prove capacity because the kernel also accounts for packet metadata. This setup check does not change the timed workload or the historical measurements below.
+
 From the ArcTap devenv environment, run:
 
 ```sh
