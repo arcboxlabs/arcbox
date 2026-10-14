@@ -5,9 +5,21 @@ async fn limited_fast_path_pair(
     key: SynFlowKey,
     base: u32,
 ) -> (std::net::TcpStream, usize) {
-    let server = fast_path_pair(bridge, key, base).await;
+    // Constrain the handshake window; shrinking buffers after connect leaves
+    // the peer's previously advertised window available to the first write.
+    let listener = tokio::net::TcpSocket::new_v4().unwrap();
+    listener.set_recv_buffer_size(4096).unwrap();
+    listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = listener.listen(1).unwrap();
+    let client = tokio::net::TcpSocket::new_v4().unwrap();
+    client.set_send_buffer_size(4096).unwrap();
+    let connect = client.connect(listener.local_addr().unwrap());
+    let (client, accepted) = tokio::join!(connect, listener.accept());
+    let client = client.unwrap().into_std().unwrap();
+    let server = accepted.unwrap().0.into_std().unwrap();
+    // Connecting can resize buffers; retain the limits after negotiation too.
     let send_size = {
-        let sock = socket2::SockRef::from(&bridge.fast_path_conns[&key].stream);
+        let sock = socket2::SockRef::from(&client);
         sock.set_send_buffer_size(4096).unwrap();
         sock.send_buffer_size().unwrap()
     };
@@ -16,6 +28,11 @@ async fn limited_fast_path_pair(
         sock.set_recv_buffer_size(4096).unwrap();
         sock.recv_buffer_size().unwrap()
     };
+    bridge.promote_to_fast_path(key, client, 1000, base, 1460, None);
+    server.set_nonblocking(false).unwrap();
+    server
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
     (server, guaranteed_oversized(send_size, recv_size))
 }
 
@@ -181,7 +198,7 @@ async fn upload_ooo_insert_preserves_partially_written_front() {
 /// waiting for the guest to retransmit bytes the bridge already holds.
 #[tokio::test]
 async fn poll_drains_upload_after_host_backpressure() {
-    use std::io::Read;
+    use tokio::io::AsyncReadExt;
 
     let mut bridge = TcpBridge::new(GW_IP);
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
@@ -193,7 +210,9 @@ async fn poll_drains_upload_after_host_backpressure() {
         dst_port: 443,
     };
     let base = 2000u32;
-    let (mut server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
+    let (server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
+    server.set_nonblocking(true).unwrap();
+    let mut server = tokio::net::TcpStream::from_std(server).unwrap();
     const HOLE: usize = 100;
     let total = HOLE + oversized;
     let payload: Vec<_> = (0..total).map(|i| (i % 251) as u8).collect();
@@ -226,7 +245,7 @@ async fn poll_drains_upload_after_host_backpressure() {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             let mut bytes = vec![0; cursor - received.len()];
-            server.read_exact(&mut bytes).unwrap();
+            server.read_exact(&mut bytes).await.unwrap();
             received.extend(bytes);
             if cursor == total {
                 break;
@@ -246,11 +265,12 @@ async fn poll_drains_upload_after_host_backpressure() {
     assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
 }
 
-/// Both an initial short write and a completely blocked in-order write
+/// Both a nonzero short write and a completely blocked in-order write
 /// retain their tails for poll-driven recovery.
 #[tokio::test]
 async fn poll_recovers_in_order_upload_tails() {
-    use std::io::{Read, Write};
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
 
     for prefill in [false, true] {
         let mut bridge = TcpBridge::new(GW_IP);
@@ -262,11 +282,13 @@ async fn poll_recovers_in_order_upload_tails() {
             dst_port: 443,
         };
         let base = 2000u32;
-        let (mut server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
+        let (server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
+        server.set_nonblocking(true).unwrap();
+        let mut server = tokio::net::TcpStream::from_std(server).unwrap();
         let mut expected = Vec::new();
         let conn = bridge.fast_path_conns.get_mut(&key).unwrap();
         if prefill {
-            // The handshake may have advertised more room before the buffers shrank.
+            // Fill until the socket itself reports backpressure.
             while expected.len() < OOO_REASSEMBLY_CAP {
                 match conn.stream.write(&[0xA5; 4096]) {
                     Ok(0) => panic!("host socket closed while filling its buffer"),
@@ -306,26 +328,36 @@ async fn poll_recovers_in_order_upload_tails() {
                 assert_eq!(acked, expected.len());
             }
         } else {
-            expected.extend((0..oversized).map(|i| (i % 251) as u8));
-            let segment = make_guest_segment(
-                (key.src_port, key.dst_ip, key.dst_port),
-                base,
-                1000,
-                65535,
-                0x18,
-                &expected,
-            );
-            let reply = bridge.try_fast_path_intercept(&segment).unwrap();
-            let cursor = tcp_ack_of(&reply).wrapping_sub(base) as usize;
-            assert!(cursor > 0 && cursor < expected.len());
-            assert!(bridge.fast_path_conns[&key].up_short_writes > 0);
-            cursor
+            loop {
+                assert!(
+                    expected.len() + oversized <= OOO_REASSEMBLY_CAP,
+                    "the host socket must produce a short write"
+                );
+                let before = expected.len();
+                expected.extend((before..before + oversized).map(|i| (i % 251) as u8));
+                let segment = make_guest_segment(
+                    (key.src_port, key.dst_ip, key.dst_port),
+                    base + before as u32,
+                    1000,
+                    65535,
+                    0x18,
+                    &expected[before..],
+                );
+                let reply = bridge.try_fast_path_intercept(&segment).unwrap();
+                let cursor = tcp_ack_of(&reply).wrapping_sub(base) as usize;
+                assert!(cursor >= before && cursor <= expected.len());
+                if cursor < expected.len() {
+                    assert!(cursor > before, "WouldBlock is not a nonzero short write");
+                    assert!(bridge.fast_path_conns[&key].up_short_writes > 0);
+                    break cursor;
+                }
+            }
         };
         let mut received = Vec::new();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 let mut bytes = vec![0; cursor - received.len()];
-                server.read_exact(&mut bytes).unwrap();
+                server.read_exact(&mut bytes).await.unwrap();
                 received.extend(bytes);
                 if cursor == expected.len() {
                     break;
