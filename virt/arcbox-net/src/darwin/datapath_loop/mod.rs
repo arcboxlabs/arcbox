@@ -53,8 +53,8 @@ use intercept::{handle_intercepted_frame, process_inbound_cmd};
 /// Async network datapath bridging guest ↔ host via `FrameClassifier`
 /// demultiplexing and socket proxying.
 ///
-/// `FrameClassifier` routes ARP (inline reply) and TCP (fast-path /
-/// handshake drains). DHCP, DNS, UDP, and ICMP are intercepted and handled
+/// `FrameClassifier` routes ARP (inline reply) and TCP (ordered handshake
+/// and fast-path drain). DHCP, DNS, UDP, and ICMP are intercepted and handled
 /// by the corresponding proxy modules.
 pub struct NetworkDatapath {
     /// Host end of the socketpair (guest L2 Ethernet frames).
@@ -336,23 +336,8 @@ impl NetworkDatapath {
                         tcp_bridge.set_fast_path_macs(gateway_mac, gmac);
                     }
 
-                    // Fast-path intercept: extract TCP data frames for established
-                    // fast-path connections and synthesize ACKs inline.
-                    let fast_acks = device.drain_fast_path(|frame_data| {
-                        tcp_bridge.try_fast_path_intercept(frame_data)
-                    });
-                    for ack in fast_acks {
-                        guest_tx.send(ack, DeliveryClass::Reliable);
-                    }
-
-                    // Handshake intercept: complete in-progress shim handshakes
-                    // (guest ACK → PassiveOpen promotion, guest SYN-ACK →
-                    // ActiveOpen promotion). Frames that match are consumed
-                    // here.
-                    let hs_replies = device.drain_handshake(|frame_data| {
-                        tcp_bridge.try_complete_handshake(frame_data)
-                    });
-                    for reply in hs_replies {
+                    // Promote handshake ACKs before processing later data in the same source drain.
+                    for reply in device.drain_tcp(&mut tcp_bridge) {
                         guest_tx.send(reply, DeliveryClass::Reliable);
                     }
 
@@ -360,11 +345,6 @@ impl NetworkDatapath {
                     for reply in device.take_arp_replies() {
                         guest_tx.send(reply, DeliveryClass::Lossy);
                     }
-
-                    // Discard any TCP frames left in the rx queue that didn't
-                    // match a fast-path or handshake entry — there is no
-                    // userspace TCP stack to consume them.
-                    device.clear_unmatched_rx();
 
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();

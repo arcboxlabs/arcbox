@@ -284,3 +284,119 @@ fn test_build_dns_servfail_response() {
     assert_eq!(&response[10..12], &0u16.to_be_bytes()); // ARCOUNT=0
     assert_eq!(&response[12..], &query[12..]); // Question echoed
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn guest_batch_promotes_handshake_before_following_payload() {
+    use arcbox_packet::ethernet::{
+        SynParams, TcpFrameParams, build_tcp_ack_frame, build_tcp_data_frame, build_tcp_fin_frame,
+        build_tcp_syn_frame,
+    };
+    use tokio::io::AsyncReadExt;
+
+    let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
+    let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
+    let gateway_mac = [2, 0, 0, 0, 0, 1];
+    let guest_mac = [2, 0, 0, 0, 0, 2];
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let (host_fd, guest_fd) = socketpair();
+    let guest = std::os::unix::net::UnixDatagram::from(guest_fd);
+    guest.set_nonblocking(true).unwrap();
+    let guest = tokio::net::UnixDatagram::from_std(guest).unwrap();
+    let cancel = CancellationToken::new();
+    let (reply_tx, reply_rx) = mpsc::channel(16);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+    let datapath = NetworkDatapath::new(
+        host_fd,
+        HostEgress::new(
+            gateway_ip,
+            gateway_mac,
+            guest_ip,
+            reply_tx,
+            cancel.clone(),
+            1500,
+        ),
+        reply_rx,
+        cmd_rx,
+        DhcpServer::new(crate::dhcp::DhcpConfig::new(
+            gateway_ip,
+            Ipv4Addr::new(255, 255, 255, 0),
+        )),
+        DnsForwarder::new(crate::dns::DnsConfig::default()),
+        gateway_ip,
+        guest_ip,
+        gateway_mac,
+        cancel.clone(),
+        1500,
+    );
+    let running = tokio::spawn(datapath.run());
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut params = TcpFrameParams {
+            src_ip: guest_ip,
+            dst_ip: Ipv4Addr::LOCALHOST,
+            src_port: 40400,
+            dst_port: listener.local_addr().unwrap().port(),
+            seq: 1001,
+            ack: 0,
+            window: 65535,
+            src_mac: guest_mac,
+            dst_mac: gateway_mac,
+        };
+        let syn = build_tcp_syn_frame(&SynParams {
+            src_ip: params.src_ip,
+            dst_ip: params.dst_ip,
+            src_port: params.src_port,
+            dst_port: params.dst_port,
+            seq: params.seq - 1,
+            src_mac: guest_mac,
+            dst_mac: gateway_mac,
+            mss: 1460,
+            wscale: None,
+            sack_permitted: false,
+        });
+        assert_eq!(fd_write(guest.as_raw_fd(), &syn).unwrap(), syn.len());
+        let (mut upstream, _) = listener.accept().await.unwrap();
+        let mut frame = [0; 1500];
+        let n = guest.recv(&mut frame).await.unwrap();
+        assert!(n >= 54);
+        assert_eq!(frame[47], 0x12);
+        params.ack = u32::from_be_bytes(frame[38..42].try_into().unwrap()).wrapping_add(1);
+
+        // No await here: the current-thread runtime delivers all four frames in one source drain.
+        let ack = build_tcp_ack_frame(&params);
+        assert_eq!(fd_write(guest.as_raw_fd(), &ack).unwrap(), ack.len());
+        let payload = b"first segment;second segment";
+        for part in [&payload[..14], &payload[14..]] {
+            let data = build_tcp_data_frame(&params, part);
+            assert_eq!(fd_write(guest.as_raw_fd(), &data).unwrap(), data.len());
+            params.seq += u32::try_from(part.len()).unwrap();
+        }
+        let fin = build_tcp_fin_frame(&params);
+        assert_eq!(fd_write(guest.as_raw_fd(), &fin).unwrap(), fin.len());
+
+        let mut received = Vec::new();
+        upstream.read_to_end(&mut received).await.unwrap();
+        assert_eq!(
+            received, payload,
+            "payload must arrive once, without guest retransmission"
+        );
+        loop {
+            let n = guest.recv(&mut frame).await.unwrap();
+            assert!(n >= 54);
+            let ack = u32::from_be_bytes(frame[42..46].try_into().unwrap());
+            assert!(ack <= params.seq + 1, "ACK must not exceed payload and FIN");
+            if ack == params.seq + 1 {
+                break;
+            }
+        }
+    })
+    .await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    result.expect("one guest batch must deliver payload and FIN after handshake promotion");
+}

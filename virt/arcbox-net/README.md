@@ -65,6 +65,8 @@ let ip = manager.allocate_ip();
 - **NAT Engine**: Connection tracking with 256-entry fast-path cache
 - **Incremental checksum**: RFC 1624 compliant, no full packet recalculation
 
+The macOS VM datapath and the `tun_proxy` harness use `FrameClassifier::drain_tcp` to process queued TCP frames in arrival order. A handshake completion promotes the flow before later payload in the same input batch. Established uploads use the bridge's bounded vectored writes and cumulative ACKs. VM replies retain reliable queuing and the existing flush points; the harness retains best-effort writes.
+
 ## Platform Support
 
 | Platform | Backend |

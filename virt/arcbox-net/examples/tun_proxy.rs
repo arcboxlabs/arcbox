@@ -203,13 +203,9 @@ mod macos {
                     source.drain(|frame| classifier.classify_frame(frame, &mut guest_mac));
                     guard.clear_ready();
 
-                    for ack in classifier.drain_fast_path(|f| tcp_bridge.try_fast_path_intercept(f)) {
-                        write_frame(&sink, &ack);
-                    }
-                    for reply in classifier.drain_handshake(|f| tcp_bridge.try_complete_handshake(f)) {
+                    for reply in classifier.drain_tcp(&mut tcp_bridge) {
                         write_frame(&sink, &reply);
                     }
-                    classifier.clear_unmatched_rx();
 
                     for intercepted in classifier.take_intercepted() {
                         match intercepted.kind {
