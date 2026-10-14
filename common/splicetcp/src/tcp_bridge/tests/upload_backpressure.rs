@@ -91,7 +91,7 @@ async fn upload_multi_hole_burst_advances_to_each_missing_range() {
         .await
         .expect("poll must drain retained bytes up to the next missing range");
         assert_eq!(cursor, next_hole);
-        assert!(bridge.poll_fast_path().is_empty());
+        assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
     }
 
     assert!(bridge.fast_path_conns[&key].ooo_segs.is_empty());
