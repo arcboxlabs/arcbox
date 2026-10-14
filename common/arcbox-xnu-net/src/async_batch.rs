@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use tokio::io::unix::AsyncFd;
 
-use crate::batch::{BatchDgram, RxEntry};
+use crate::batch::{BatchDgram, RxDatagramV4, RxEntry};
 
 /// Async batch datagram I/O backed by tokio's [`AsyncFd`].
 ///
@@ -76,6 +76,45 @@ impl AsyncBatchDgram {
         Ok(self.batch.last_entries(n))
     }
 
+    /// Waits for IPv4 UDP datagrams and receives a prefix of caller-owned slots.
+    ///
+    /// Returns the datagram count, capped at [`BatchDgram::recv_capacity`]. Only
+    /// the returned prefix has valid length and source metadata. Empty datagrams
+    /// count as one; empty `slots` return zero without waiting for readiness.
+    ///
+    /// Each buffer must accommodate the largest datagram the caller accepts.
+    /// Darwin silently truncates oversized datagrams without `MSG_TRUNC`.
+    /// To reject datagrams above a size limit, provide at least one extra byte
+    /// and reject a returned length above that limit.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancelling a pending receive does not consume datagrams. The method does
+    /// not yield between a successful receive and returning its count.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`BatchDgram::recv_batch_from_v4`]. `WouldBlock`
+    /// clears readiness and waits again. A non-IPv4 source returns `InvalidData`
+    /// after consuming the batch.
+    pub async fn recv_batch_from_v4(
+        &mut self,
+        slots: &mut [RxDatagramV4<'_>],
+    ) -> io::Result<usize> {
+        if slots.is_empty() {
+            return Ok(0);
+        }
+        let Self { inner, batch } = self;
+        loop {
+            let mut guard = inner.readable().await?;
+            match batch.recv_batch_from_v4(guard.get_inner().as_raw_fd(), slots) {
+                Ok(count) => return Ok(count),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => guard.clear_ready(),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Sends `bufs` in full, looping over readiness as needed.
     ///
     /// Partial sends (where the kernel accepts only some datagrams before
@@ -128,7 +167,11 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{SocketAddr, UdpSocket};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Duration;
+
+    use tokio::time::timeout;
 
     use super::*;
 
@@ -208,5 +251,113 @@ mod tests {
             total += entries.len();
         }
         assert_eq!(total, 50);
+    }
+
+    #[tokio::test]
+    async fn addressed_receive_preserves_sources_empty_datagrams_and_slot_limits() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut receiver = AsyncBatchDgram::new(socket.into()).unwrap();
+        let first = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let second = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peers = [&first, &second, &first];
+        let payloads: [&[u8]; 3] = [b"first", b"", b"longer-than-slot"];
+        for (peer, payload) in peers.iter().zip(payloads) {
+            assert_eq!(peer.send_to(payload, address).unwrap(), payload.len());
+        }
+
+        timeout(Duration::from_secs(2), async {
+            let mut buffers = [[0xA5; 16]; 3];
+            let mut offset = 0;
+            while offset < payloads.len() {
+                let mut chunks = buffers.iter_mut();
+                let mut slots: [_; 3] =
+                    std::array::from_fn(|_| RxDatagramV4::new(&mut chunks.next().unwrap()[..8]));
+                let count = receiver
+                    .recv_batch_from_v4(&mut slots[..payloads.len() - offset])
+                    .await
+                    .unwrap();
+                assert!(count > 0);
+                for (i, slot) in slots[..count].iter().enumerate() {
+                    let expected = payloads[offset + i];
+                    assert_eq!(slot.len, expected.len().min(8));
+                    assert_eq!(&slot.buffer[..slot.len], &expected[..slot.len]);
+                    assert_eq!(
+                        SocketAddr::V4(slot.source),
+                        peers[offset + i].local_addr().unwrap()
+                    );
+                }
+                offset += count;
+            }
+            for buffer in buffers {
+                assert_eq!(&buffer[8..], &[0xA5; 8]);
+            }
+        })
+        .await
+        .expect("IPv4 batch receive stalled");
+    }
+
+    #[tokio::test]
+    async fn addressed_receive_cancels_while_idle_and_rearms_after_drain() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut receiver = AsyncBatchDgram::new(socket.into()).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), receiver.recv_batch_from_v4(&mut []))
+                .await
+                .expect("empty slots waited for readiness")
+                .unwrap(),
+            0
+        );
+
+        let mut buffer = [0; 8];
+        let mut slots = [RxDatagramV4::new(&mut buffer)];
+        for payload in [b"first".as_slice(), b"second"] {
+            assert!(
+                timeout(
+                    Duration::from_millis(20),
+                    receiver.recv_batch_from_v4(&mut slots)
+                )
+                .await
+                .is_err()
+            );
+            sender.send_to(payload, address).unwrap();
+            assert_eq!(
+                timeout(
+                    Duration::from_secs(2),
+                    receiver.recv_batch_from_v4(&mut slots)
+                )
+                .await
+                .expect("IPv4 receive did not recover after cancellation")
+                .unwrap(),
+                1
+            );
+            assert_eq!(&slots[0].buffer[..slots[0].len], payload);
+            assert_eq!(
+                SocketAddr::V4(slots[0].source),
+                sender.local_addr().unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn addressed_receive_propagates_invalid_source_errors() {
+        let (sender, socket) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        let mut receiver = AsyncBatchDgram::new(socket.into()).unwrap();
+        sender.send(b"not-ipv4").unwrap();
+        let mut buffer = [0; 16];
+        let mut slots = [RxDatagramV4::new(&mut buffer)];
+        assert_eq!(
+            timeout(
+                Duration::from_secs(2),
+                receiver.recv_batch_from_v4(&mut slots)
+            )
+            .await
+            .expect("invalid source stalled the receiver")
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

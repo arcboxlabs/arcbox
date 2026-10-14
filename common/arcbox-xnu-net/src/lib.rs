@@ -8,6 +8,8 @@
 //! connecting the UDP socket. Partial sends return the accepted prefix count.
 //! [`BatchDgram::recv_batch_from_v4`] preserves the source address of every
 //! received datagram without changing the raw frame receive interfaces.
+//! With the `tokio` feature, `AsyncBatchDgram::recv_batch_from_v4` integrates
+//! source-aware receive with readiness polling and caller-owned buffers.
 //!
 //! # Platform support
 //!
