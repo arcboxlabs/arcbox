@@ -311,7 +311,8 @@ pub fn parse_tcp_syn_options(tcp_segment: &[u8]) -> TcpSynOptions {
                 if i + 3 > options.len() || options[i + 1] != 3 {
                     break;
                 }
-                opts.wscale = Some(options[i + 2]);
+                // RFC 7323 limits the negotiated window shift to 14.
+                opts.wscale = Some(options[i + 2].min(14));
                 i += 3;
             }
             4 => {

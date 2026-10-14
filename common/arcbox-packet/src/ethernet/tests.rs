@@ -511,6 +511,14 @@ fn test_parse_syn_options_empty() {
 }
 
 #[test]
+fn test_parse_syn_window_scale_is_limited_to_14() {
+    for (offered, expected) in [(0, 0), (7, 7), (14, 14), (15, 14), (31, 14), (255, 14)] {
+        let frame = make_syn_with_options(&[1, 3, 3, offered]);
+        assert_eq!(parse_tcp_syn_options(&frame[34..]).wscale, Some(expected));
+    }
+}
+
+#[test]
 fn test_parse_syn_options_unknown_skipped() {
     // Unknown kind=99, length=4, data=0xAA 0xBB. Followed by MSS=1460.
     let opts = &[
