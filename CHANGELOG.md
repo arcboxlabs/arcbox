@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/arcboxlabs/arcbox/compare/v0.9.0...v0.10.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **splicetcp:** TcpBridge::promote_to_fast_path now accepts FastPathInit, including an explicit initial guest receive window.
+
+### Features
+
+* **xnu-net:** preserve IPv4 sources in batch receive ([8132ba3](https://github.com/arcboxlabs/arcbox/commit/8132ba36c04a9ab27910c9e0a36e30a662466c6b))
+* **xnu-net:** receive IPv4 UDP batches asynchronously ([1968a27](https://github.com/arcboxlabs/arcbox/commit/1968a27dbdc1a5c233130de4c8ace5feee9656a3))
+
+
+### Bug Fixes
+
+* **bench:** validate UDP burst capacity before timing ([108ae52](https://github.com/arcboxlabs/arcbox/commit/108ae52bacfe906bba2e24432cb35eb7ee579ebd))
+* **docker:** allocate /24 networks from the container pool ([01247c7](https://github.com/arcboxlabs/arcbox/commit/01247c713fb9eaf6ae7822d9ebc48515ddcd1d3c))
+* **net:** preserve TCP batch order through handshakes ([c0e150b](https://github.com/arcboxlabs/arcbox/commit/c0e150b22d57bd72ec3849766abafcd3ddb9d635))
+* **packet:** clamp negotiated TCP window scale to 14 ([43c180e](https://github.com/arcboxlabs/arcbox/commit/43c180e801f202e9d45c2262a4bd3ef21fa533ef))
+* **splicetcp:** initialize receive windows before promotion ([7e159f5](https://github.com/arcboxlabs/arcbox/commit/7e159f5ebfe70574ad00bf0fc21baeae9161e6ee))
+* **splicetcp:** process payload on passive-open completion ([8c806ed](https://github.com/arcboxlabs/arcbox/commit/8c806edfbbe9f92ba016141fb2c74649b2dd6309))
+* **splicetcp:** reset uploads on broken pipes ([34836f7](https://github.com/arcboxlabs/arcbox/commit/34836f7b3c72845a0d2ce8264d9f1761a02f2b00))
+* **splicetcp:** retry uploads after host backpressure ([4c39573](https://github.com/arcboxlabs/arcbox/commit/4c3957368c0d299cadbab9cc041c603e53d7d240))
+* **splicetcp:** stop negotiating unsupported SACK ([c0aa9b5](https://github.com/arcboxlabs/arcbox/commit/c0aa9b55c8b4baceb0f1765e0de94dca5f3a2780))
+
+
+### Performance Improvements
+
+* **net:** batch sends to unconnected IPv4 UDP peers ([2d01bd2](https://github.com/arcboxlabs/arcbox/commit/2d01bd2749d8ed6386646de96c92c36b542a049a))
+* **packet:** initialize only TCP frame headers ([d9b0f00](https://github.com/arcboxlabs/arcbox/commit/d9b0f007a70f3aa14209239403cb4b76feb68580))
+* **packet:** reuse SIMD checksums for TCP frames ([966b0cb](https://github.com/arcboxlabs/arcbox/commit/966b0cba9cfbf6bf3d25c9e63722e02ab3c2d1e5))
+* **splicetcp:** advertise MSS from the configured link MTU ([1b93b02](https://github.com/arcboxlabs/arcbox/commit/1b93b0259bc3333e82ef95992ff81c505a5f730b))
+* **splicetcp:** batch polled reads in shared scratch ([a82e341](https://github.com/arcboxlabs/arcbox/commit/a82e341f7c85563ce35349977216472b6b0e94bd))
+* **splicetcp:** batch retained upload recovery writes ([e5aac7a](https://github.com/arcboxlabs/arcbox/commit/e5aac7ac7adc9d2c3f91ec03378785487327e997))
+* **splicetcp:** borrow established IP upload batches ([84d9ae3](https://github.com/arcboxlabs/arcbox/commit/84d9ae333e6c34c874065562f869c1839d9062c7))
+* **splicetcp:** coalesce consecutive TCP upload writes ([9740b72](https://github.com/arcboxlabs/arcbox/commit/9740b722f064c86eadf1b807aac2bc81ec66210b))
+* **splicetcp:** coalesce up to 64 upload segments ([da5a9a1](https://github.com/arcboxlabs/arcbox/commit/da5a9a130328b6f7b23403c9adfbdfc78af87d91))
+* **splicetcp:** frame pushed IP packets directly in the pool ([d0ac95d](https://github.com/arcboxlabs/arcbox/commit/d0ac95d117c90789447b2d047eb319e9a80374c4))
+* **xnu-net:** measure IPv4 UDP batch receive ([531144b](https://github.com/arcboxlabs/arcbox/commit/531144b11b8030a9f77c544fa45655a449c5d5ad))
+
+
+### Code Refactoring
+
+* **splicetcp:** separate connection promotion ([6ae13ed](https://github.com/arcboxlabs/arcbox/commit/6ae13ede45c5d69cafa5d7158b4148f415c81801))
+
+
+### Tests
+
+* **splicetcp:** cover upload holes and reassembly limits ([67d674a](https://github.com/arcboxlabs/arcbox/commit/67d674a56ed1e6adae4112f89d0e9a32d1fdfb01))
+* **splicetcp:** establish backpressure before recovery checks ([bba9274](https://github.com/arcboxlabs/arcbox/commit/bba9274bd882e037fdf7440439e1dfab6ededb86))
+* **splicetcp:** release receive pressure before batch recovery ([810c6b0](https://github.com/arcboxlabs/arcbox/commit/810c6b025ebab8f7592bec4a36e7ed1a9df4bb8d))
+* **splicetcp:** report retained frames in empty assertions ([12852b1](https://github.com/arcboxlabs/arcbox/commit/12852b14adb6e32706c2a80073cd98f2b415b408))
+* **xnu-net:** add reproducible UDP benchmark runner ([787a4d7](https://github.com/arcboxlabs/arcbox/commit/787a4d79b91fe7fe76c97d258d00942417f70da4))
+
+
+### Documentation
+
+* **packet:** clarify benchmark provenance and validation ([c568a3c](https://github.com/arcboxlabs/arcbox/commit/c568a3c1322fdd86676835b9c07094c362520ad4))
+
 ## [0.9.0](https://github.com/arcboxlabs/arcbox/compare/v0.8.2...v0.9.0) (2026-10-07)
 
 
