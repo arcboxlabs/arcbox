@@ -117,6 +117,14 @@ impl TcpBridge {
         };
 
         let conn = self.fast_path_conns.get_mut(&key)?;
+        if conn.stream.is_cancelled() {
+            let rst = conn.reset_frame(
+                self.fast_path_gateway_mac,
+                self.fast_path_guest_mac.unwrap_or([0xFF; 6]),
+            );
+            self.close_fast_path(&key);
+            return Some((1, rst));
+        }
         // Any guest frame for the flow — data, ACK, dup-ACK, even a bare
         // window probe — is its sign of life for the dead-flow reaper.
         conn.last_guest_activity = std::time::Instant::now();
@@ -416,6 +424,11 @@ impl TcpBridge {
         };
 
         for (key, conn) in &mut self.fast_path_conns {
+            if conn.stream.is_cancelled() {
+                frames.push(conn.reset_frame(gw_mac, guest_mac));
+                to_remove.push(*key);
+                continue;
+            }
             // Failed inline readers mark the shared stream dead before poll reaps it.
             if conn
                 .dead
@@ -937,24 +950,12 @@ impl TcpBridge {
         frames
     }
 
-    /// Removes a fast-path flow and reports its byte totals to the observer
-    /// (exactly once). The single choke point for fast-path teardown.
+    /// Removes a fast-path flow and reports its byte totals to the observer.
+    /// Native owners also close when map replacement or bridge drop removes the primary.
     fn close_fast_path(&mut self, key: &SynFlowKey) {
         let Some(conn) = self.fast_path_conns.remove(key) else {
             return;
         };
-        // An inline flow shares its host socket with an independent reader (the
-        // inject thread / direct_rx task) holding a cloned fd. Dropping only our
-        // clone leaves that reader running on the sibling fd — spinning forever
-        // once its send window freezes. Signal its cancel flag and shut the
-        // socket so it exits and releases the fd (guest-initiated FIN/RST, and
-        // the host-error paths, all funnel through here).
-        if conn.inline_owned {
-            if let Some(dead) = &conn.dead {
-                dead.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
-        }
         if conn.up_would_block + conn.up_short_writes + conn.up_out_of_order + conn.retransmits > 0
         {
             tracing::debug!(
@@ -987,5 +988,21 @@ impl TcpBridge {
                 down,
             );
         }
+    }
+}
+
+impl FastPathConn {
+    fn reset_frame(&self, gateway_mac: [u8; 6], guest_mac: [u8; 6]) -> Vec<u8> {
+        crate::ethernet::build_tcp_rst_frame(&crate::ethernet::TcpFrameParams {
+            src_ip: self.remote_ip,
+            dst_ip: self.guest_ip,
+            src_port: self.remote_port,
+            dst_port: self.guest_port,
+            seq: self.our_seq.load(std::sync::atomic::Ordering::Relaxed),
+            ack: self.last_ack,
+            window: 0,
+            src_mac: gateway_mac,
+            dst_mac: guest_mac,
+        })
     }
 }

@@ -12,8 +12,12 @@ pub(super) struct InlineConnSinkAdapter {
 
 impl arcbox_net::direct_rx::ConnSink for InlineConnSinkAdapter {
     fn send_conn(&self, conn: arcbox_net::direct_rx::PromotedConn) -> bool {
+        // This sink cannot retain managed owner leases; use the bridge polling path.
+        let Ok(stream) = conn.stream.into_unmanaged() else {
+            return false;
+        };
         let inline = arcbox_net_inject::inline_conn::InlineConn {
-            stream: conn.stream,
+            stream,
             remote_ip: conn.remote_ip,
             guest_ip: conn.guest_ip,
             remote_port: conn.remote_port,

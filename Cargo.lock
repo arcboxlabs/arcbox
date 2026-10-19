@@ -6261,6 +6261,7 @@ dependencies = [
  "libc",
  "socket2 0.6.4",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -6693,6 +6694,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",

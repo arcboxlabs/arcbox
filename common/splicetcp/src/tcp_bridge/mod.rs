@@ -234,7 +234,7 @@ pub(super) struct HandshakeConn {
     /// Host-side TCP stream. For PassiveOpen: populated once the async host
     /// connect completes. For ActiveOpen: set from the already-accepted
     /// stream at registration time.
-    host_stream: Option<std::net::TcpStream>,
+    host_stream: Option<crate::NativeTcp<std::net::TcpStream>>,
     /// Oneshot receiver for async host connect (PassiveOpen only).
     /// Consumed when connect resolves.
     connect_rx: Option<oneshot::Receiver<Option<crate::egress::EgressConn>>>,
@@ -314,7 +314,9 @@ pub struct TcpBridge {
 /// intercepted inline or polled from the host stream.
 pub(super) struct FastPathConn {
     /// Host-side TCP stream (std blocking — used from the sync datapath loop).
-    stream: std::net::TcpStream,
+    stream: crate::NativeTcp<std::net::TcpStream>,
+    /// Only the primary owns this guard; reader EOF must preserve the upload half.
+    _reader_guard: Option<tokio_util::sync::DropGuard>,
     /// Our SEQ number for frames sent TO guest. Shared atomic with the
     /// inject thread so ACKs emitted by `try_fast_path_intercept` always
     /// carry a SEQ matching the guest's rcv_nxt for this flow (the inject
@@ -447,6 +449,19 @@ pub(super) struct FastPathConn {
     /// re-emits on dup-ACK/RTO — the inline counterpart of
     /// `retransmit_buf`. See [`crate::direct_rx::RetxRing`].
     retx: Option<crate::direct_rx::RetxRing>,
+}
+
+impl Drop for FastPathConn {
+    fn drop(&mut self) {
+        // Native sinks can outlive a replaced map entry or the whole bridge.
+        // The legacy inline sink observes `dead`; Tokio readers observe the guard.
+        if self.inline_owned {
+            if let Some(dead) = &self.dead {
+                dead.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 impl FastPathConn {

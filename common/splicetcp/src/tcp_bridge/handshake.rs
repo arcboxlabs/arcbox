@@ -114,11 +114,16 @@ impl TcpBridge {
         // connection's latency (sequential fetches ran at ~2 s/request).
         let result_rx = if let Some(waker) = &self.handshake_waker {
             let waker = std::sync::Arc::clone(waker);
-            let (tx, rx) = oneshot::channel();
+            let (mut tx, rx) = oneshot::channel();
             tokio::spawn(async move {
-                let value = result_rx.await.unwrap_or(None);
-                let _ = tx.send(value);
-                waker.notify_one();
+                tokio::select! {
+                    biased;
+                    () = tx.closed() => {}
+                    result = result_rx => {
+                        let _ = tx.send(result.unwrap_or(None));
+                        waker.notify_one();
+                    }
+                }
             });
             rx
         } else {
@@ -179,7 +184,7 @@ impl TcpBridge {
                 role: HandshakeRole::ActiveOpen,
                 our_isn,
                 peer_isn: 0, // filled in when SYN-ACK arrives
-                host_stream: Some(host_stream),
+                host_stream: Some(crate::NativeTcp::new(host_stream)),
                 connect_rx: None,
                 peer_wscale: Some(SHIM_WSCALE),
                 peer_mss: SHIM_MSS,
@@ -208,6 +213,15 @@ impl TcpBridge {
         let now = StdInstant::now();
 
         for (key, conn) in &mut self.handshake_conns {
+            if conn
+                .host_stream
+                .as_ref()
+                .is_some_and(crate::NativeTcp::is_cancelled)
+            {
+                out.push(handshake_abort_rst(key, conn));
+                to_abort.push(*key);
+                continue;
+            }
             // Global TTL — abort stuck handshakes, telling the guest: without
             // the RST it retries SYNs against a flow we already gave up on
             // and its socket only dies by its own (much longer) timeout.
@@ -230,6 +244,11 @@ impl TcpBridge {
                         };
                         match rx.try_recv() {
                             Ok(Some(crate::egress::EgressConn::Tcp(tokio_stream))) => {
+                                if tokio_stream.is_cancelled() {
+                                    out.push(handshake_abort_rst(key, conn));
+                                    to_abort.push(*key);
+                                    continue;
+                                }
                                 match tokio_stream.into_std() {
                                     Ok(std_stream) => {
                                         std_stream.set_nonblocking(true).ok();
@@ -442,6 +461,15 @@ impl TcpBridge {
             dst_port,
         };
         let conn = self.handshake_conns.get(&key)?;
+        if conn
+            .host_stream
+            .as_ref()
+            .is_some_and(crate::NativeTcp::is_cancelled)
+        {
+            let rst = handshake_abort_rst(&key, conn);
+            self.handshake_conns.remove(&key);
+            return Some(vec![rst]);
+        }
 
         match conn.role {
             HandshakeRole::PassiveOpen => {

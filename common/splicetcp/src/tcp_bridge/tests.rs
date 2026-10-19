@@ -2,6 +2,7 @@ use super::*;
 use crate::ethernet::ETH_HEADER_LEN;
 
 mod handshake_payload;
+mod lifecycle;
 mod link_mss;
 mod read_batch;
 mod upload_backpressure;

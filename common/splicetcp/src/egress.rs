@@ -14,6 +14,8 @@ use std::net::Ipv4Addr;
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use tokio::sync::oneshot;
 
+pub use crate::native_tcp::NativeTcp;
+
 /// The flow a SYN opened — everything a resolver needs to decide egress.
 #[derive(Clone, Debug)]
 pub struct FlowMeta {
@@ -33,7 +35,7 @@ pub struct FlowMeta {
 /// a consumer.
 pub enum EgressConn {
     /// Has a real fd → the bridge splices it on the fast path.
-    Tcp(tokio::net::TcpStream),
+    Tcp(NativeTcp<tokio::net::TcpStream>),
 }
 
 /// Decides + establishes egress for a flow. Injected into the bridge so a
@@ -188,7 +190,7 @@ impl EgressResolver for DefaultEgress {
                     .await
                     .ok()
                     .and_then(Result::ok);
-            let _ = tx.send(stream.map(EgressConn::Tcp));
+            let _ = tx.send(stream.map(|stream| EgressConn::Tcp(NativeTcp::new(stream))));
         });
         rx
     }

@@ -63,8 +63,9 @@ Consumers typically wrap their router/outbound layer behind this trait:
 1. classify a SYN,
 2. map `FlowMeta` to routing metadata,
 3. dial an outbound,
-4. return `Some(EgressConn::Tcp(stream))` for a real fd that the bridge can
-   splice.
+4. wrap an unmanaged socket with `NativeTcp::new(stream)`, or attach its opaque
+   owner lease and cancellation token with `NativeTcp::with_lifecycle`,
+5. return `Some(EgressConn::Tcp(stream))` for the wrapped native socket.
 
 For event-driven loops, wrap the resolver and notify the loop when the inner
 receiver completes. The wake should be sent **after** forwarding the result so
@@ -142,6 +143,24 @@ The first connection that requires polling allocates one shared 128 KiB read
 buffer. The bridge reuses this buffer across connections and keeps it until
 the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
 does not allocate this buffer.
+
+## Managed native sockets
+
+`NativeTcp` preserves an opaque owner lease across Tokio/std conversion and
+descriptor cloning. Cancellation observers retain only a token. Each native
+socket closes before its lease is released; token cancellation alone does not
+mean that every descriptor has closed. A retained oneshot result, unpolled
+bridge, or retained sink item can delay owner release.
+
+Bridge polling and interception remove cancelled native flows with a reset.
+The primary owns the promoted reader's cancellation guard, so replacing a flow
+or dropping the bridge also stops that reader. Clean reader EOF preserves the
+primary upload half. The Tokio sink selects cancellation around the entire
+reader, including receive-window waits and blocked frame-channel sends.
+
+Consumers that cannot retain the lease must call `into_unmanaged` and reject a
+managed socket. The VMM inline sink uses that rejection to keep managed flows
+on the existing native polling path.
 
 ## L3 tunnel shim
 
