@@ -23,16 +23,16 @@ manifest_sha256 = "f2003a5919551afd3f34ebeea6b20acdf0ba2bd55fd855068cc33fd8b7aa0
 [[tools]]
 name = "docker"
 group = "docker"
-version = "29.8.2"
-arch.arm64.sha256 = "5ffa2bafbabe073470f0333f4a129599230b73d1170bb61146b3d9b08e1d1325"
-arch.x86_64.sha256 = "384d9b259c1efd2265e6a0ff05512d5998035df0877053cb7763405caf17ca23"
+version = "29.9.1"
+arch.arm64.sha256 = "7f2c1637313578046e7dd61153e4e4cd1188d83a1e4b71825ab914776c208460"
+arch.x86_64.sha256 = "9fc063bfae58ecf3c46e7528beaad9814968f7e624e9ba04a7f5cba5becad26c"
 
 [[tools]]
 name = "docker-buildx"
 group = "docker"
-version = "0.37.2"
-arch.arm64.sha256 = "149e6a006edaa430f297b2bdcf65baaa6d7ee5ccfc7aa67dd50ce1c2b1db47e2"
-arch.x86_64.sha256 = "91cfde39945b0a76f0320db72d16f22ddf320da1d7a967b6871369041577cb88"
+version = "0.38.0"
+arch.arm64.sha256 = "85989b895add5f119c1ccf8eada2f6892fc33ccf16bd8917638eae404ef26344"
+arch.x86_64.sha256 = "b123dc6fb51f88e47d37223938e2acd66edec73105459f65f19f15cc912ee559"
 
 [[tools]]
 name = "docker-compose"
@@ -44,9 +44,9 @@ arch.x86_64.sha256 = "c76e3abf5fde1aeb3bd7c7306ff15bef2246afc1f9e54832a0a050dd7c
 [[tools]]
 name = "docker-credential-osxkeychain"
 group = "docker"
-version = "0.9.9"
-arch.arm64.sha256 = "3585188b1df1c3568ae536999eddb48ad2c781b3cf07a2f7d7181262d045820c"
-arch.x86_64.sha256 = "1be33ae30c8c80277bea3364d0d71afad411fa22e88bcabf3375550b989fd272"
+version = "0.9.10"
+arch.arm64.sha256 = "773d22547e96c3a3a60303ad9dd419bcf1449cc0627de3314be10f612d325b24"
+arch.x86_64.sha256 = "39daf2d29e30dc2e218bcaaf37ab1aeb06f630e71792dbcfa2afa6fe169e7aaf"
 
 [[tools]]
 name = "pstramp"
