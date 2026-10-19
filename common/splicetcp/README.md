@@ -143,6 +143,16 @@ buffer. The bridge reuses this buffer across connections and keeps it until
 the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
 does not allocate this buffer.
 
+## Managed native sockets
+
+`NativeTcp` preserves an opaque owner lease across Tokio/std conversion and
+descriptor cloning. Cancellation observers retain only a token. Each native
+socket closes before its lease is released; token cancellation alone does not
+mean that every descriptor has closed.
+
+Consumers that cannot retain the lease must call `into_unmanaged` and reject a
+managed socket.
+
 ## L3 tunnel shim
 
 `FrameClassifier` and `TcpBridge` operate on Ethernet frames. Host tunnel links
