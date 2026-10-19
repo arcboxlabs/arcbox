@@ -7,6 +7,10 @@ use core::str::FromStr;
 /// Production-compatible container address pool.
 pub const DEFAULT_CONTAINER_NETWORK_CIDR: &str = "172.16.0.0/12";
 
+/// Widest network Docker allocates from the pool: 254 addresses, the size
+/// Docker's own global pools hand out and more than a Compose project uses.
+const DOCKER_NETWORK_PREFIX: u8 = 24;
+
 const RESERVED_GUEST_NETWORKS: [(Ipv4Addr, u8, &str); 3] = [
     (Ipv4Addr::new(10, 0, 2, 0), 24, "10.0.2.0/24"),
     (Ipv4Addr::new(10, 42, 0, 0), 16, "10.42.0.0/16"),
@@ -15,9 +19,9 @@ const RESERVED_GUEST_NETWORKS: [(Ipv4Addr, u8, &str); 3] = [
 
 /// A validated private IPv4 address pool for Docker networks.
 ///
-/// The prefix range leaves enough space for Docker to divide the pool into
-/// sixteen bridge networks while avoiding host-wide private routes such as
-/// `10.0.0.0/8`.
+/// The prefix range leaves room for the default bridge, one sixteenth of the
+/// pool, beside the networks Docker allocates, while avoiding host-wide
+/// private routes such as `10.0.0.0/8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContainerNetwork {
     addr: Ipv4Addr,
@@ -98,20 +102,38 @@ impl ContainerNetwork {
         self.prefix
     }
 
-    /// Returns the prefix Docker uses for each bridge network in this pool.
+    /// Returns the prefix Docker uses for each network it allocates from
+    /// this pool.
+    ///
+    /// Networks are /24 wherever the pool holds sixteen of them, so the
+    /// production pool yields thousands instead of sixteen. A narrower pool
+    /// is split into sixteenths, the size of the default bridge.
     #[must_use]
     pub const fn docker_network_prefix(self) -> u8 {
+        let bridge = self.docker_bridge_prefix();
+        if bridge > DOCKER_NETWORK_PREFIX {
+            bridge
+        } else {
+            DOCKER_NETWORK_PREFIX
+        }
+    }
+
+    /// Returns the prefix of Docker's default bridge: one sixteenth of the
+    /// pool.
+    #[must_use]
+    pub const fn docker_bridge_prefix(self) -> u8 {
         self.prefix + 4
     }
 
     /// Returns the gateway address assigned to Docker's default bridge.
     ///
-    /// The second of the sixteen child networks is used so the production
-    /// default remains `172.17.0.1/16`.
+    /// The bridge takes the second sixteenth of the pool so the production
+    /// default remains `172.17.0.1/16`. Docker allocates its other networks
+    /// around it.
     #[must_use]
     pub fn docker_bridge_gateway(self) -> Ipv4Addr {
-        let child_size = 1_u32 << (32 - self.docker_network_prefix());
-        Ipv4Addr::from(u32::from(self.addr) + child_size + 1)
+        let bridge_size = 1_u32 << (32 - self.docker_bridge_prefix());
+        Ipv4Addr::from(u32::from(self.addr) + bridge_size + 1)
     }
 }
 
@@ -237,7 +259,7 @@ mod tests {
         let network = ContainerNetwork::default();
 
         assert_eq!(network, DEFAULT_CONTAINER_NETWORK_CIDR.parse().unwrap());
-        assert_eq!(network.docker_network_prefix(), 16);
+        assert_eq!(network.docker_bridge_prefix(), 16);
         assert_eq!(
             network.docker_bridge_gateway(),
             Ipv4Addr::new(172, 17, 0, 1)
@@ -245,10 +267,25 @@ mod tests {
     }
 
     #[test]
+    fn docker_networks_are_slash_24_unless_the_pool_is_narrower() {
+        for (pool, bridge, network) in [
+            ("172.16.0.0/12", 16, 24),
+            ("10.64.0.0/16", 20, 24),
+            ("10.64.0.0/20", 24, 24),
+            ("10.64.0.0/22", 26, 26),
+            ("192.168.100.0/24", 28, 28),
+        ] {
+            let pool: ContainerNetwork = pool.parse().unwrap();
+            assert_eq!(pool.docker_bridge_prefix(), bridge, "{pool} bridge");
+            assert_eq!(pool.docker_network_prefix(), network, "{pool} networks");
+        }
+    }
+
+    #[test]
     fn custom_private_pool_derives_docker_and_route_networks() {
         let network: ContainerNetwork = "10.64.0.0/16".parse().unwrap();
 
-        assert_eq!(network.docker_network_prefix(), 20);
+        assert_eq!(network.docker_bridge_prefix(), 20);
         assert_eq!(
             network.docker_bridge_gateway(),
             Ipv4Addr::new(10, 64, 16, 1)

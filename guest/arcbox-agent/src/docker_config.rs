@@ -77,7 +77,7 @@ fn owned_keys(network: ContainerNetwork) -> Map<String, Value> {
     let bridge = format!(
         "{}/{}",
         network.docker_bridge_gateway(),
-        network.docker_network_prefix()
+        network.docker_bridge_prefix()
     );
     let Value::Object(map) = json!({
         "dns": ["10.0.2.1"],
@@ -160,7 +160,7 @@ mod tests {
         let value = default_daemon_json();
         assert_eq!(value["bip"], "172.17.0.1/16");
         assert_eq!(value["default-address-pools"][0]["base"], "172.16.0.0/12");
-        assert_eq!(value["default-address-pools"][0]["size"], 16);
+        assert_eq!(value["default-address-pools"][0]["size"], 24);
     }
 
     #[test]

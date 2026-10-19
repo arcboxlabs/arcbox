@@ -18,7 +18,8 @@
 //!
 //! Covers ABX-305 (run & exit), #268 (stdin EOF reaches the container),
 //! ABX-306 (published port), ABX-308 (name resolution), ABX-309 (boot
-//! budget), CORE-67 (setup phase progression).
+//! budget), CORE-67 (setup phase progression), and the default address
+//! pool's capacity for user-defined networks.
 //!
 //! Deliberately **not** covered: **ABX-307** (L3 direct routing to a
 //! container IP via bridge100). The host route is installed by the
@@ -114,6 +115,9 @@ fn smoke_suite() -> Result<()> {
         tracing::info!(host_port, "published port verified");
         metrics.time("name_resolution", || {
             name_resolves_from_sibling(data_dir, &image, &server_name)
+        })?;
+        metrics.time("network_pool", || {
+            networks_allocate_from_the_pool(data_dir, &image, suffix)
         })?;
 
         drop(guard);
@@ -316,6 +320,107 @@ fn name_resolves_from_sibling(data_dir: &std::path::Path, image: &str, target: &
     Ok(())
 }
 
+/// Networks Docker must allocate from the default pool: more than the
+/// sixteen a /16 split allowed, so a regression to that split fails on the
+/// sixteenth create with "all predefined address pools have been fully
+/// subnetted".
+const POOL_NETWORKS: usize = 20;
+
+/// The default pool hands out /24 networks inside 172.16.0.0/12, none of
+/// them on the default bridge's 172.17.0.0/16, and a container attached to
+/// one still reaches its siblings by name.
+fn networks_allocate_from_the_pool(
+    data_dir: &std::path::Path,
+    image: &str,
+    suffix: u32,
+) -> Result<()> {
+    let names: Vec<String> = (0..POOL_NETWORKS)
+        .map(|index| format!("arcbox-smoke-pool-{suffix}-{index}"))
+        .collect();
+    let _guard = NetworkGuard {
+        data_dir,
+        names: names.clone(),
+    };
+
+    for name in &names {
+        docker_output(data_dir, &["network", "create", name], DOCKER_TIMEOUT)
+            .with_context(|| format!("creating network {name} from the default pool"))?;
+    }
+
+    let mut inspect = vec![
+        "network",
+        "inspect",
+        "--format",
+        "{{range .IPAM.Config}}{{.Subnet}}{{end}}",
+    ];
+    inspect.extend(names.iter().map(String::as_str));
+    let subnets = docker_output(data_dir, &inspect, DOCKER_TIMEOUT)?;
+    let subnets: Vec<&str> = subnets.lines().collect();
+    if subnets.len() != names.len() {
+        bail!(
+            "expected one subnet per network ({}), got {subnets:?}",
+            names.len()
+        );
+    }
+    for subnet in subnets {
+        let [172, second, _, _] = subnet
+            .strip_suffix("/24")
+            .and_then(|addr| addr.parse::<std::net::Ipv4Addr>().ok())
+            .map(|addr| addr.octets())
+            .unwrap_or_default()
+        else {
+            bail!("expected a /24 in 172.16.0.0/12, got {subnet}");
+        };
+        if !(16..=31).contains(&second) || second == 17 {
+            bail!("expected a /24 in 172.16.0.0/12 outside the default bridge, got {subnet}");
+        }
+    }
+
+    let target = format!("{}-target", names[0]);
+    docker_output(
+        data_dir,
+        &[
+            "run",
+            "-d",
+            "--name",
+            &target,
+            "--network",
+            &names[0],
+            image,
+            "sh",
+            "-c",
+            &httpd_command(),
+        ],
+        DOCKER_TIMEOUT,
+    )
+    .context("starting a server on an allocated network")?;
+    let _target = ContainerGuard::new(data_dir, &target);
+    let url = format!("http://{target}/");
+    let out = docker_output(
+        data_dir,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            &names[0],
+            image,
+            "wget",
+            "-q",
+            "-T",
+            "20",
+            "-O",
+            "-",
+            &url,
+        ],
+        DOCKER_TIMEOUT,
+    )
+    .with_context(|| format!("a sibling on {} could not reach {target}", names[0]))?;
+    if !out.contains(MARKER) {
+        bail!("reached {target} on a /24 network but body lacked {MARKER:?}; got: {out:?}");
+    }
+    Ok(())
+}
+
 /// A one-file HTTP server on busybox `nc`, serving [`MARKER`].
 ///
 /// Uses what alpine already ships rather than pulling nginx, so the suite
@@ -363,5 +468,19 @@ impl Drop for ContainerGuard<'_> {
             self.data_dir,
             &["rm".to_owned(), "-f".to_owned(), self.name.clone()],
         );
+    }
+}
+
+/// Removes networks on drop, for the same reason as [`ContainerGuard`].
+struct NetworkGuard<'a> {
+    data_dir: &'a std::path::Path,
+    names: Vec<String>,
+}
+
+impl Drop for NetworkGuard<'_> {
+    fn drop(&mut self) {
+        let mut args = vec!["network".to_owned(), "rm".to_owned()];
+        args.extend(self.names.iter().cloned());
+        docker_ignore(self.data_dir, &args);
     }
 }
