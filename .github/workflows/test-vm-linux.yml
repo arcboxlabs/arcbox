@@ -68,6 +68,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
 
       - uses: actions/cache@v4
         with:
@@ -139,6 +141,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
 
       - uses: actions/cache@v4
         with:
@@ -190,6 +194,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
 
       - uses: actions/cache@v4
         with:
@@ -315,6 +321,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
 
       - name: Install protoc
         run: |
