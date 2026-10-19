@@ -137,11 +137,7 @@ mod tests {
     use crate::runtime::storage_recovery::StorageRecovery;
 
     fn runtime(directory: &Path) -> Runtime {
-        Runtime::new(crate::config::Config {
-            data_dir: directory.to_owned(),
-            ..Default::default()
-        })
-        .unwrap()
+        Runtime::new(crate::config::Config::for_test(directory)).unwrap()
     }
 
     #[test]

@@ -370,11 +370,7 @@ mod tests {
             .unwrap();
         drop(state);
 
-        let runtime = Runtime::new(crate::config::Config {
-            data_dir: directory.path().to_owned(),
-            ..Default::default()
-        })
-        .unwrap();
+        let runtime = Runtime::new(crate::config::Config::for_test(directory.path())).unwrap();
         let progress = runtime.subscribe_storage_recovery().0.unwrap();
         assert_eq!(progress.phase, Phase::Failed);
         assert_eq!(progress.operation_id, "interrupted-runtime-check");
@@ -396,13 +392,8 @@ mod tests {
     #[tokio::test]
     async fn a_previous_worker_panic_retains_protection_and_blocks_the_next_operation() {
         let directory = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            Runtime::new(crate::config::Config {
-                data_dir: directory.path().to_owned(),
-                ..Default::default()
-            })
-            .unwrap(),
-        );
+        let runtime =
+            Arc::new(Runtime::new(crate::config::Config::for_test(directory.path())).unwrap());
         runtime
             .persist_storage_protection(StorageRecoveryProgress {
                 operation_id: "interrupted".into(),
@@ -430,11 +421,7 @@ mod tests {
     async fn shutdown_reports_disposable_vm_cleanup_failure_and_keeps_the_hold() {
         for cleanup_fails in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let runtime = Runtime::new(crate::config::Config {
-                data_dir: directory.path().to_owned(),
-                ..Default::default()
-            })
-            .unwrap();
+            let runtime = Runtime::new(crate::config::Config::for_test(directory.path())).unwrap();
             runtime
                 .persist_storage_protection(StorageRecoveryProgress {
                     operation_id: "cancelled".into(),
@@ -463,13 +450,8 @@ mod tests {
     async fn initialization_write_failures_publish_protection() {
         for path in ["hold", "status.json"] {
             let directory = tempfile::tempdir().unwrap();
-            let runtime = Arc::new(
-                Runtime::new(crate::config::Config {
-                    data_dir: directory.path().to_owned(),
-                    ..Default::default()
-                })
-                .unwrap(),
-            );
+            let runtime =
+                Arc::new(Runtime::new(crate::config::Config::for_test(directory.path())).unwrap());
             fs::create_dir_all(directory.path().join("storage-recovery").join(path)).unwrap();
             assert!(runtime.recover_storage(Action::CheckOnly).await.is_err());
             let progress = runtime.subscribe_storage_recovery().0.unwrap();
@@ -483,13 +465,8 @@ mod tests {
     #[tokio::test]
     async fn detached_failure_is_replayed_after_the_request_receiver_is_dropped() {
         let directory = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            Runtime::new(crate::config::Config {
-                data_dir: directory.path().to_owned(),
-                ..Default::default()
-            })
-            .unwrap(),
-        );
+        let runtime =
+            Arc::new(Runtime::new(crate::config::Config::for_test(directory.path())).unwrap());
         let (started, updates) = runtime.recover_storage(Action::CheckOnly).await.unwrap();
         drop(updates);
         let (initial, mut replay) = runtime.subscribe_storage_recovery();

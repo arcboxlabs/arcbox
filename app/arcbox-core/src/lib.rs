@@ -31,6 +31,8 @@ pub mod migration;
 pub mod route_reconciler;
 pub mod runtime;
 pub mod stats_hub;
+#[cfg(test)]
+mod test_support;
 
 // Image management and the engine core moved to the engine layer
 // (arcbox-image, arcbox-engine); the module paths and crate-root items

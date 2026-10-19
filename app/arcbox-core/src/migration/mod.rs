@@ -431,19 +431,18 @@ fn map_migration_error(error: MigrationError) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::CHILD_PROCESSES;
     use arcbox_migration::{MigrationPlan, ReplacementSummary, SourceInfo};
     use buffa::Message as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
-    /// Serializes the tests that repoint `PATH` at a `docker` stand-in.
-    ///
-    /// A tokio mutex so it can be held across the awaits it guards; `PATH` is
-    /// process-global, so releasing it earlier would let concurrent tests
-    /// observe each other's shim.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     /// Installs an executable `docker` in `dir` and points `PATH` at it.
+    ///
+    /// The caller holds the write half of [`CHILD_PROCESSES`] until it has
+    /// restored `PATH`: the lock is exclusive, so no concurrent test observes
+    /// this shim, and the shim's processes cannot inherit a socket that a
+    /// concurrent test watches close.
     ///
     /// Returns the previous `PATH` so the caller can restore it.
     fn install_docker_shim(dir: &Path, script: &str) -> Option<std::ffi::OsString> {
@@ -454,13 +453,13 @@ mod tests {
         std::fs::set_permissions(&docker_path, permissions).unwrap();
 
         let previous = std::env::var_os("PATH");
-        // SAFETY: env mutation in tests is serialized by ENV_LOCK.
+        // SAFETY: env mutation in tests is serialized by CHILD_PROCESSES.
         unsafe { std::env::set_var("PATH", dir) };
         previous
     }
 
     fn restore_path(previous: Option<std::ffi::OsString>) {
-        // SAFETY: env mutation in tests is serialized by ENV_LOCK.
+        // SAFETY: env mutation in tests is serialized by CHILD_PROCESSES.
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("PATH", value),
@@ -657,7 +656,7 @@ exit 0
             },
         );
 
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), FAILING_SHIM);
 
@@ -709,7 +708,7 @@ exit 0
         let manager = MigrationManager::new(PathBuf::from("/tmp/arcbox-docker.sock"));
         prepare_unsupported(&manager, "test-plan", "container 'vpn-client' shares").await;
 
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), FAILING_SHIM);
 
@@ -734,7 +733,7 @@ exit 0
         let manager = MigrationManager::new(PathBuf::from("/tmp/arcbox-docker.sock"));
         prepare_unsupported(&manager, "test-plan", "container 'vpn-client' shares").await;
 
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), FAILING_SHIM);
 
@@ -802,7 +801,7 @@ exit 0
 
     #[tokio::test]
     async fn dry_run_returns_the_plan_without_storing_it() {
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), EMPTY_DAEMON_SHIM);
         let socket = temp_dir.path().join("docker.sock");
@@ -832,7 +831,7 @@ exit 0
 
     #[tokio::test]
     async fn a_real_prepare_stores_the_plan_and_issues_an_id() {
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), EMPTY_DAEMON_SHIM);
         let socket = temp_dir.path().join("docker.sock");
@@ -866,7 +865,7 @@ exit 0
 
     #[tokio::test]
     async fn a_real_prepare_reports_replacements_from_the_saved_plan() {
-        let _env_lock = ENV_LOCK.lock().await;
+        let _children = CHILD_PROCESSES.write().await;
         let temp_dir = tempfile::tempdir().unwrap();
         let previous_path = install_docker_shim(temp_dir.path(), REPLACED_VOLUME_SHIM);
         let socket = temp_dir.path().join("docker.sock");

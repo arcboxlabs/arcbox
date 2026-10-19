@@ -74,10 +74,7 @@ mod listeners {
     /// taken, as after a successful start.
     async fn runtime() -> (Runtime, mpsc::Receiver<InboundCommand>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config {
-            data_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        };
+        let mut config = Config::for_test(dir.path());
         config.docker.expose_ports_to_lan = false;
         let runtime = Runtime::new(config).unwrap();
         let (commands_tx, commands) = mpsc::channel(16);
@@ -112,6 +109,7 @@ mod listeners {
 
     #[tokio::test]
     async fn listeners_follow_the_published_ports() {
+        let _children = crate::test_support::CHILD_PROCESSES.read().await;
         let (runtime, _commands, _dir) = runtime().await;
         let (web, api) = (u32::from(free_port()), u32::from(free_port()));
 
@@ -175,6 +173,7 @@ mod listeners {
 
     #[tokio::test]
     async fn a_listing_that_raced_a_stop_opens_nothing() {
+        let _children = crate::test_support::CHILD_PROCESSES.read().await;
         let (runtime, _commands, _dir) = runtime().await;
         let port = u32::from(free_port());
         runtime.release_kubernetes().await;
@@ -193,6 +192,7 @@ mod listeners {
 
     #[tokio::test]
     async fn ports_the_host_cannot_bind_say_why_and_failures_are_retried() {
+        let _children = crate::test_support::CHILD_PROCESSES.read().await;
         let (runtime, _commands, _dir) = runtime().await;
         let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let busy = u32::from(taken.local_addr().unwrap().port());

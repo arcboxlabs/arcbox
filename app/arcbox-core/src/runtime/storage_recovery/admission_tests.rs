@@ -3,13 +3,8 @@ use std::time::Duration;
 
 fn runtime() -> (tempfile::TempDir, Arc<Runtime>) {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(
-        Runtime::new(crate::config::Config {
-            data_dir: directory.path().to_owned(),
-            ..Default::default()
-        })
-        .unwrap(),
-    );
+    let runtime =
+        Arc::new(Runtime::new(crate::config::Config::for_test(directory.path())).unwrap());
     (directory, runtime)
 }
 

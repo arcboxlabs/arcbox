@@ -84,11 +84,7 @@ fn test_rewrite_kubeconfig_updates_endpoint_and_context() {
 #[tokio::test]
 async fn kubernetes_status_uses_the_bound_host_port() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let runtime = Runtime::new(Config {
-        data_dir: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .unwrap();
+    let runtime = Runtime::new(Config::for_test(temp_dir.path())).unwrap();
     runtime
         .set_kubernetes_host_endpoint(24_123, "arcbox-dev-worktree-1".to_owned())
         .unwrap();
@@ -118,11 +114,8 @@ fn test_check_executable_not_executable() {
 
 fn networking_test_runtime() -> (Runtime, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let config = Config {
-        data_dir: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    let runtime = Runtime::new(config).expect("runtime init should succeed");
+    let runtime =
+        Runtime::new(Config::for_test(temp_dir.path())).expect("runtime init should succeed");
     (runtime, temp_dir)
 }
 
@@ -136,10 +129,7 @@ fn networking_test_runtime() -> (Runtime, tempfile::TempDir) {
 #[tokio::test]
 async fn init_reports_no_milestones_without_a_linux_vm() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = Config {
-        data_dir: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
+    let mut config = Config::for_test(temp_dir.path());
     config.vm.autostart = false;
     let runtime = Runtime::new(config).expect("runtime init should succeed");
 
@@ -529,6 +519,7 @@ async fn sandbox_port_mappings_filter_sort_and_fence_cleanup() {
 async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     use arcbox_net::darwin::inbound_relay::{InboundCommand, InboundListenerManager};
 
+    let _children = crate::test_support::CHILD_PROCESSES.read().await;
     let (runtime, _tmp) = networking_test_runtime();
     let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let host_port = reservation.local_addr().unwrap().port();
@@ -568,8 +559,9 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
 }
 
 /// Whether something accepts TCP connections on `port` at loopback. A port
-/// whose listener is gone refuses; it is not re-bound here, because macOS
-/// can refuse to re-bind a port for a moment after its listener closed.
+/// whose listener is gone refuses. The caller holds the read half of
+/// [`crate::test_support::CHILD_PROCESSES`], or a child spawned elsewhere in
+/// the process can keep the listener alive.
 #[cfg(target_os = "macos")]
 async fn accepting(port: u16) -> bool {
     tokio::time::timeout(
@@ -589,6 +581,7 @@ async fn accepting(port: u16) -> bool {
 async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() {
     use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
 
+    let _children = crate::test_support::CHILD_PROCESSES.read().await;
     let (runtime, _tmp) = networking_test_runtime();
     let localhost = std::net::Ipv4Addr::LOCALHOST;
 
@@ -642,6 +635,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
 async fn retiring_system_vm_container_networking_drops_every_trace_of_its_containers() {
     use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
 
+    let _children = crate::test_support::CHILD_PROCESSES.read().await;
     let (runtime, _tmp) = networking_test_runtime();
     let localhost = std::net::Ipv4Addr::LOCALHOST;
     let (commands_tx, _commands_rx) = tokio::sync::mpsc::channel(4);
@@ -688,10 +682,7 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
 fn test_runtime_new_propagates_config_vm_defaults() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let mut config = Config {
-        data_dir: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    };
+    let mut config = Config::for_test(temp_dir.path());
     config.vm.cpus = 6;
     config.vm.memory_mb = 3072;
     config.vm.kernel_path = Some(PathBuf::from("/tmp/arcbox-test-kernel"));

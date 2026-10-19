@@ -106,6 +106,22 @@ impl Config {
         }
     }
 
+    /// Default configuration rooted at `data_dir`, for tests that build a
+    /// [`crate::runtime::Runtime`].
+    ///
+    /// The proxy policy is `none`: under `system`, `Runtime::new` spawns
+    /// `scutil` and `ifconfig`, and a spawn can keep another test's socket
+    /// open (see [`crate::test_support::CHILD_PROCESSES`]).
+    #[cfg(test)]
+    pub(crate) fn for_test(data_dir: &Path) -> Self {
+        let mut config = Self {
+            data_dir: data_dir.to_path_buf(),
+            ..Self::default()
+        };
+        config.network.proxy = ProxyPolicy::None;
+        config
+    }
+
     /// Loads configuration from files and environment.
     ///
     /// Configuration sources (in order of precedence):
