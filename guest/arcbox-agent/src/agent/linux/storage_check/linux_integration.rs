@@ -178,3 +178,26 @@ async fn kernel_io_failure_forces_btrfs_read_only_and_health_reports_it() -> Res
     restored?;
     result
 }
+
+#[tokio::test]
+#[ignore = "Requires the stale free space tree fixture from tests/storage-recovery-linux.sh"]
+async fn stale_free_space_tree_is_classified_repaired_and_rechecked() -> Result<()> {
+    let device = fixture("STALE_FST_DEVICE")?;
+    let tools = fixture("TOOLS")?;
+    let tools = Path::new(&tools);
+    let before = check_data(&device, tools).await;
+    ensure!(
+        !before.passed && before.finding.as_known() == Some(Finding::StaleFreeSpaceTree),
+        "the fixture was not classified as stale free space tree entries: {before:?}"
+    );
+    let repaired = repair_free_space_tree(&device, tools).await?;
+    ensure!(repaired.passed, "repair did not pass: {repaired:?}");
+    let after = check_data(&device, tools).await;
+    ensure!(after.passed, "the repaired fixture still fails: {after:?}");
+    ensure!(
+        repair_free_space_tree(&device, tools).await.is_err(),
+        "a clean volume was repaired again"
+    );
+    eprintln!("{}", repaired.detail);
+    Ok(())
+}
