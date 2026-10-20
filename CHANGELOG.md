@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1](https://github.com/arcboxlabs/arcbox/compare/v0.10.0...v0.10.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **engine:** boot storage recovery on the pinned boot bundle ([46a9eb5](https://github.com/arcboxlabs/arcbox/commit/46a9eb59ed569c44e760ccd88d7ae8cb9e97ea3e))
+* **storage:** rebind a moved image pair during recovery ([0f22f02](https://github.com/arcboxlabs/arcbox/commit/0f22f0253ffef9931dbdff0a4ae7e7bf34a4c6f0))
+
+
+### Tests
+
+* **core:** keep child processes off sockets other tests watch ([a993b8e](https://github.com/arcboxlabs/arcbox/commit/a993b8e18377c6de07405432cc0d42c46dacaa2d))
+
+
+### Documentation
+
+* **logs:** correct the storage recovery e2e teardown follow-up ([9578b0d](https://github.com/arcboxlabs/arcbox/commit/9578b0d6248133bad7ccf9b95f1acd9ea2fb4824))
+
 ## [0.10.0](https://github.com/arcboxlabs/arcbox/compare/v0.9.0...v0.10.0) (2026-10-19)
 
 
