@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3](https://github.com/arcboxlabs/arcbox/compare/v0.10.2...v0.10.3) (2026-10-20)
+
+
+### Features
+
+* **agent:** repair a stale Btrfs free space tree in the recovery guest ([3182b98](https://github.com/arcboxlabs/arcbox/commit/3182b986da2431553f42c00d7bfd53589ac33adc))
+* **core:** rebuild a stale free space tree during storage recovery ([43f7065](https://github.com/arcboxlabs/arcbox/commit/43f70655f9df561622cd705fc6931cc954ffaf2e))
+* **proto:** add the free space tree repair storage check ([808ba32](https://github.com/arcboxlabs/arcbox/commit/808ba32a542b29ff91d60084198f43951b3a8e55))
+
+
+### Documentation
+
+* **storage:** record the free space tree repair and its ADR ([6635ed1](https://github.com/arcboxlabs/arcbox/commit/6635ed1cba9a20e5178e29656b32c7cf658b9b9e))
+
 ## [0.10.2](https://github.com/arcboxlabs/arcbox/compare/v0.10.1...v0.10.2) (2026-10-20)
 
 
