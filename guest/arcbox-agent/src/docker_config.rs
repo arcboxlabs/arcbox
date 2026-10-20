@@ -1,15 +1,15 @@
 //! The guest `dockerd` configuration.
 //!
 //! `/etc/docker/daemon.json` is the union of two sources. ArcBox owns the
-//! keys the runtime depends on — container DNS through the gateway, the
-//! bridge address pool the host routes to, direct routing, the `nofile`
-//! ulimit, and the containerd image store — and the operator supplies the
-//! rest (`registry-mirrors`, `insecure-registries`, anything else dockerd
-//! accepts) through `[docker]` in the host's `config.toml`, which the host
-//! renders into the shared data directory before boot. The operator's
-//! keys are merged last, but never over an owned key: a wrong `bip` would
-//! break every container's connectivity, so those are dropped with a
-//! warning rather than honoured.
+//! keys the runtime depends on — container DNS and `host-gateway` through
+//! the gateway, the bridge address pool the host routes to, direct
+//! routing, the `nofile` ulimit, and the containerd image store — and the
+//! operator supplies the rest (`registry-mirrors`, `insecure-registries`,
+//! anything else dockerd accepts) through `[docker]` in the host's
+//! `config.toml`, which the host renders into the shared data directory
+//! before boot. The operator's keys are merged last, but never over an
+//! owned key: a wrong `bip` would break every container's connectivity, so
+//! those are dropped with a warning rather than honoured.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,11 +22,20 @@ use serde_json::{Map, Value, json};
 /// Used by both the init-time rlimit raise and the `daemon.json` ulimit.
 pub const NOFILE_LIMIT: u64 = 1_048_576;
 
+/// The guest's uplink gateway. The host datapath answers DNS on it and
+/// splices TCP and UDP addressed to it into the Mac's loopback
+/// (`splicetcp::egress::DefaultEgress`), which is why the host registers
+/// `host.docker.internal` at this address.
+const UPLINK_GATEWAY: &str = "10.0.2.1";
+
 /// Keys ArcBox manages; an operator value for one is dropped.
 ///
 /// `features` is owned as a whole: dockerd rejects a `features` map that is
 /// also set on the command line, and `containerd-snapshotter` must stay
-/// pinned (see [`owned_keys`]).
+/// pinned (see [`owned_keys`]). `host-gateway-ip` is the legacy
+/// single-address spelling of `host-gateway-ips`; dockerd refuses to start
+/// when `daemon.json` names both, so an operator value for either is
+/// dropped.
 pub const OWNED_KEYS: &[&str] = &[
     "dns",
     "allow-direct-routing",
@@ -34,6 +43,8 @@ pub const OWNED_KEYS: &[&str] = &[
     "default-address-pools",
     "default-ulimits",
     "features",
+    "host-gateway-ip",
+    "host-gateway-ips",
 ];
 
 /// Guest path of the host-rendered override file.
@@ -73,6 +84,12 @@ pub fn read_overrides(path: &Path) -> Result<Map<String, Value>, String> {
 /// the data volume (`graphdriver-prior`), which would silently flip a machine
 /// with stale overlay2 remnants back to the legacy store. dockerd 29 logs a
 /// benign "no longer needed" warning for it.
+///
+/// `host-gateway-ips` sends `--add-host <name>:host-gateway` to the Mac, as
+/// Docker Desktop and OrbStack do. Unset, dockerd uses the default bridge's
+/// gateway, which is the guest's own `docker0`: the entry reached the VM,
+/// and because it lands in the container's `/etc/hosts` it also shadowed
+/// the DNS answer for `host.docker.internal`.
 fn owned_keys(network: ContainerNetwork) -> Map<String, Value> {
     let bridge = format!(
         "{}/{}",
@@ -80,7 +97,8 @@ fn owned_keys(network: ContainerNetwork) -> Map<String, Value> {
         network.docker_bridge_prefix()
     );
     let Value::Object(map) = json!({
-        "dns": ["10.0.2.1"],
+        "dns": [UPLINK_GATEWAY],
+        "host-gateway-ips": [UPLINK_GATEWAY],
         "allow-direct-routing": true,
         "bip": bridge,
         "default-address-pools": [{
@@ -148,6 +166,31 @@ mod tests {
     #[test]
     fn daemon_json_contains_dns() {
         assert_eq!(default_daemon_json()["dns"][0], "10.0.2.1");
+    }
+
+    #[test]
+    fn daemon_json_points_host_gateway_at_the_mac() {
+        assert_eq!(
+            default_daemon_json()["host-gateway-ips"],
+            json!(["10.0.2.1"])
+        );
+    }
+
+    #[test]
+    fn operator_host_gateway_is_refused_in_either_spelling() {
+        for (key, operator_value) in [
+            ("host-gateway-ip", json!("192.0.2.1")),
+            ("host-gateway-ips", json!(["192.0.2.1"])),
+        ] {
+            let overrides = Map::from_iter([(key.to_owned(), operator_value)]);
+            let rendered = render(ContainerNetwork::default(), overrides);
+            let value: Value = serde_json::from_str(&rendered.content).unwrap();
+
+            assert_eq!(rendered.refused, vec![key]);
+            assert_eq!(value["host-gateway-ips"], json!(["10.0.2.1"]), "{key}");
+            // dockerd refuses to start when both spellings are present.
+            assert!(value.get("host-gateway-ip").is_none(), "{key}");
+        }
     }
 
     #[test]
