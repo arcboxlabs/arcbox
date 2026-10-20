@@ -71,6 +71,7 @@ from memory. Every new file is added to the index below.
 - [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03; decisions 4 and 5 superseded by ADR 0003)
 - [0003 — One host mount root: `~/ArcBox` is a plain directory, with the docker export at `docker/` and every running machine's root at `machines/<name>`](adr/0003-single-host-mount-root.md) (2026-10-04)
 - [0004 — ArcBox is a local macOS product](adr/0004-macos-local-product.md) (2026-10-08)
+- [0005 — Storage recovery repairs only listed findings, and only on a copy](adr/0005-storage-recovery-repairs-listed-findings-on-a-copy.md) (2026-10-20)
 
 ### Plans
 
@@ -96,6 +97,7 @@ from memory. Every new file is added to the index below.
 ### Logs
 
 - [2026-10-20 — Storage recovery rebinds a moved pair and boots the current recovery init](logs/2026-10-20-storage-recovery-moved-pair.md)
+- [2026-10-20 — Storage recovery rebuilds a stale Btrfs free space tree](logs/2026-10-20-storage-recovery-fst-repair.md)
 - [2026-10-19 — Child processes kept closed test listeners alive on macOS](logs/2026-10-19-test-listeners-held-by-children.md)
 - [2026-10-19 — Docker allocates /24 networks from the container pool](logs/2026-10-19-docker-network-pool-size.md)
 - [2026-10-14 — TCP promotion and receive batches preserve protocol state](logs/2026-10-14-network-followups.md)
