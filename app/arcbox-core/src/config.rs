@@ -414,10 +414,11 @@ pub struct DockerConfig {
     /// Registries reached over plain HTTP or with an untrusted certificate.
     /// Written to `insecure-registries`.
     pub insecure_registries: Vec<String>,
-    /// Further `daemon.json` keys, merged last. ArcBox owns `dns`, `bip`,
-    /// `default-address-pools`, `allow-direct-routing`, the `nofile` ulimit
-    /// and `features.containerd-snapshotter`; a value for one of those here
-    /// is ignored with a warning in the guest log.
+    /// Further `daemon.json` keys, merged last. ArcBox owns `dns`,
+    /// `host-gateway-ip(s)`, `bip`, `default-address-pools`,
+    /// `allow-direct-routing`, the `nofile` ulimit and
+    /// `features.containerd-snapshotter`; a value for one of those here is
+    /// ignored with a warning in the guest log.
     pub engine: serde_json::Map<String, serde_json::Value>,
 }
 

@@ -139,8 +139,12 @@ non-obvious invariants and failure signatures.
   keys, then merges `/arcbox/config/docker-engine.json` — the daemon's
   rendering of `[docker]` from the user's `config.toml` — over the rest.
   `OWNED_KEYS` (`dns`, `bip`, `default-address-pools`, `allow-direct-routing`,
-  `default-ulimits`, `features`) are refused with a warning; a key the runtime
-  depends on goes there, or an operator can break it from config.
+  `default-ulimits`, `features`, `host-gateway-ip`, `host-gateway-ips`) are
+  refused with a warning; a key the runtime depends on goes there, or an
+  operator can break it from config. `host-gateway-ips` is `10.0.2.1`, the
+  address the datapath splices into the Mac's loopback: dockerd's default,
+  the guest's `docker0`, sends `--add-host x:host-gateway` (compose
+  `extra_hosts`, workerd's egress sidecar) to the VM instead of the Mac.
 - **A distro machine's agent serves RPC and nothing else.** The machine boot
   shim starts the same `arcbox-agent serve` as the System VM;
   `agent::Guest::detect` tells them apart by `arcbox.machine_rootfs=` on the

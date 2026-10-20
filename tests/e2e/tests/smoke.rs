@@ -18,8 +18,9 @@
 //!
 //! Covers ABX-305 (run & exit), #268 (stdin EOF reaches the container),
 //! ABX-306 (published port), ABX-308 (name resolution), ABX-309 (boot
-//! budget), CORE-67 (setup phase progression), and the default address
-//! pool's capacity for user-defined networks.
+//! budget), CORE-67 (setup phase progression), the default address pool's
+//! capacity for user-defined networks, and `host-gateway` reaching the Mac's
+//! loopback.
 //!
 //! Deliberately **not** covered: **ABX-307** (L3 direct routing to a
 //! container IP via bridge100). The host route is installed by the
@@ -34,6 +35,7 @@ use anyhow::{Context, Result, bail};
 use arcbox_e2e::daemon::PhaseMarks;
 use arcbox_e2e::docker::{docker_ignore, docker_output, docker_output_with_input, ensure_image};
 use arcbox_e2e::metrics::RunMetrics;
+use arcbox_e2e::net_fixtures::spawn_blob_server;
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_protocol::v1::setup_status::Phase;
 
@@ -118,6 +120,9 @@ fn smoke_suite() -> Result<()> {
         })?;
         metrics.time("network_pool", || {
             networks_allocate_from_the_pool(data_dir, &image, suffix)
+        })?;
+        metrics.time("host_gateway", || {
+            host_gateway_reaches_mac_loopback(data_dir, &image)
         })?;
 
         drop(guard);
@@ -417,6 +422,56 @@ fn networks_allocate_from_the_pool(
     .with_context(|| format!("a sibling on {} could not reach {target}", names[0]))?;
     if !out.contains(MARKER) {
         bail!("reached {target} on a /24 network but body lacked {MARKER:?}; got: {out:?}");
+    }
+    Ok(())
+}
+
+/// Body size of the host-loopback origin the `host_gateway` phase fetches.
+const HOST_BLOB_BYTES: usize = 64 * 1024;
+
+/// `--add-host <name>:host-gateway` reaches a server bound to the Mac's
+/// loopback, as it does on Docker Desktop and OrbStack.
+///
+/// The entry lands in the container's `/etc/hosts`, so it shadows the DNS
+/// answer for `host.docker.internal`; compose `extra_hosts` and workerd's
+/// egress sidecar use this shape. dockerd's default host gateway is the
+/// guest's own `docker0`, which refuses the connection, so the guest's
+/// `daemon.json` sets `host-gateway-ips` to the uplink gateway
+/// (`guest/arcbox-agent/src/docker_config.rs`).
+fn host_gateway_reaches_mac_loopback(data_dir: &std::path::Path, image: &str) -> Result<()> {
+    let origin = spawn_blob_server(HOST_BLOB_BYTES)?;
+    let script = format!(
+        "getent hosts host.docker.internal; \
+         wget -q -T 20 -O - http://host.docker.internal:{}/blob | wc -c",
+        origin.port()
+    );
+    let out = docker_output(
+        data_dir,
+        &[
+            "run",
+            "--rm",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            image,
+            "sh",
+            "-c",
+            &script,
+        ],
+        DOCKER_TIMEOUT,
+    )
+    .context("running the host-gateway client container")?;
+
+    // A pipeline exits with its last stage's status, so a failed `wget`
+    // still exits 0: the byte count is the gate.
+    let received = out
+        .lines()
+        .next_back()
+        .and_then(|line| line.trim().parse::<usize>().ok());
+    if received != Some(HOST_BLOB_BYTES) {
+        bail!(
+            "a container fetched {received:?} of {HOST_BLOB_BYTES} bytes from the Mac's loopback \
+             through host-gateway; output (getent first): {out:?}"
+        );
     }
     Ok(())
 }
