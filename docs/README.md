@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-20 — Storage recovery rebinds a moved pair and boots the current recovery init](logs/2026-10-20-storage-recovery-moved-pair.md)
 - [2026-10-19 — Child processes kept closed test listeners alive on macOS](logs/2026-10-19-test-listeners-held-by-children.md)
 - [2026-10-19 — Docker allocates /24 networks from the container pool](logs/2026-10-19-docker-network-pool-size.md)
 - [2026-10-14 — TCP promotion and receive batches preserve protocol state](logs/2026-10-14-network-followups.md)

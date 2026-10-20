@@ -60,7 +60,7 @@ Defined in `app/arcbox-core/src/config.rs`.
 | `data/docker-meta.img` | Docker metadata disk image (ext4, fsync-hot boltdb state); paired with `docker.img` — back up or move the two together | daemon |
 | `data/docker.storage.json` | Paired image identities, filesystem UUIDs, and durable initialization/migration state | daemon and guest agent |
 
-Runtime storage is a set of two images and one manifest. The Rosetta VM uses `docker-rosetta.img`, `docker-rosetta-meta.img`, and `docker-rosetta.storage.json`. Stop the VM before preserving the complete set. A copy has new host file identities; recovery must verify its filesystem UUIDs and explicitly rebind those identities before normal boot. Do not delete a manifest to bypass a failed identity check.
+Runtime storage is a set of two images and one manifest. The Rosetta VM uses `docker-rosetta.img`, `docker-rosetta-meta.img`, and `docker-rosetta.storage.json`. Stop the VM before preserving the complete set. A copy has new host file identities; recovery must verify its filesystem UUIDs and explicitly rebind those identities before normal boot. Copying or restoring the pair in place is the same case: startup reports the image as replaced and holds the runtime, and `abctl disk recover` rebinds the pair once its preserved copies pass the offline check. Do not delete a manifest to bypass a failed identity check.
 
 Normal startup never reformats an existing image or recreates a missing member of a recorded pair. New images receive an exclusive provisioning identity; the guest consumes that authority durably before formatting. An unreadable signature, damaged filesystem, or interrupted format enters recovery instead of starting an empty Docker state. Ordinary boot does not run `e2fsck -y`.
 

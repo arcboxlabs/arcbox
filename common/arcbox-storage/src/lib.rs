@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use probe::{ImageIdentity, filesystem_uuid, verify_new_volume};
-pub use provision::{prepare_pair, verify_pair};
+pub use provision::{prepare_pair, rebind_pair, verify_pair};
 
 /// Kernel command-line key naming the manifest on the host's VirtioFS share.
 pub const MANIFEST_CMDLINE_KEY: &str = "arcbox.storage_manifest=";

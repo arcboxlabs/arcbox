@@ -17,6 +17,32 @@ mod tests;
 /// # Errors
 /// Returns an error if the paths, file identities, or filesystems do not match.
 pub fn verify_pair(data: &Path, metadata: &Path) -> Result<StorageManifest> {
+    let (manifest, directory) = load_pair(data, metadata)?;
+    manifest.verify_images(directory)?;
+    Ok(manifest)
+}
+
+/// Binds the manifest to the pair's current host file identities.
+///
+/// A copy, a move across volumes, or a restore from backup gives both images
+/// new inodes while their filesystems stay the same. The caller must stop the
+/// VM, preserve and check the pair, and save the replaced manifest bytes
+/// before this operation. Both filesystem UUIDs must still match; nothing
+/// else in the manifest changes.
+///
+/// # Errors
+/// Returns an error if the paths or filesystems do not match, or the rebound
+/// manifest cannot be saved.
+pub fn rebind_pair(data: &Path, metadata: &Path) -> Result<StorageManifest> {
+    let (manifest, directory) = load_pair(data, metadata)?;
+    let rebound = manifest.rebind_images(directory)?;
+    if rebound != manifest {
+        rebound.save(&manifest_path(data))?;
+    }
+    Ok(rebound)
+}
+
+fn load_pair<'a>(data: &'a Path, metadata: &Path) -> Result<(StorageManifest, &'a Path)> {
     let manifest = StorageManifest::load(&manifest_path(data))?;
     let directory = data
         .parent()
@@ -29,8 +55,7 @@ pub fn verify_pair(data: &Path, metadata: &Path) -> Result<StorageManifest> {
             "image paths do not match the storage manifest".into(),
         ));
     }
-    manifest.verify_images(directory)?;
-    Ok(manifest)
+    Ok((manifest, directory))
 }
 
 /// Provisions a new pair or adopts recognized existing filesystems.

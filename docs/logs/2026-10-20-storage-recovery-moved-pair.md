@@ -1,0 +1,30 @@
+# 2026-10-20 — Storage recovery rebinds a moved pair and boots the current recovery init
+
+- Type: incident
+- Area: `arcbox-storage` (`provision`), `arcbox-engine` (`vm_lifecycle::storage`, `machine::maintenance`), `arcbox-core` (`runtime::storage_recovery`), `arcbox-e2e` (`storage_recovery`)
+- Commits / PRs: this change
+- Related: none
+
+## Problem or trigger
+
+After a developer machine upgraded to the 0.9.0 daemon, the System VM did not start and Docker requests failed with `System VM storage is held for recovery`. The startup check reported `docker.img was replaced; restore the paired images`. The storage manifest recorded inodes 3002681 and 86041802; the images had inodes 244339291 and 244339290. Both superblocks still carried the recorded filesystem UUIDs (btrfs `5ab1f1b7-…`, ext4 `4702ab65-…`), and the files' birth times were unchanged. The pair was therefore the same data with new host identities, most likely from a copy or restore on 2026-10-10. Daemons before 0.9.0 do not check host identities, so the drift showed only at the upgrade.
+
+`abctl disk recover` then failed in two places:
+
+1. The offline check VM never answered (`vsock connect failed … port 1024 timed out`). Recovery boots the persisted System VM record, which still named the boot 0.8.8 kernel and rootfs. The 0.8.8 rootfs has no `/sbin/arcbox-storage-recovery`; 0.8.9 has it. Normal boot replaces such a record through its drift check, but a held VM never boots normally, so the record never moved forward.
+2. After a passing check, recovery called `verify_pair` on the originals before restart. That repeats the same identity comparison that started the hold, so a moved pair could never leave recovery. `StorageManifest::rebind_images` existed but only tests called it.
+
+## What was done
+
+- `VmLifecycleManager::storage_recovery_machine` builds the record from the pinned, verified boot cache. It replaces an existing record whose kernel or rootfs differs, through the new `StorageMaintenance::replace_system_machine`. If the boot cache cannot be verified, it keeps the existing record so the disks can still be preserved. Only the record changes; the disk pair is reused unchanged.
+- `arcbox_storage::rebind_pair` rebinds the live pair to its current host identities after both filesystem UUIDs match, and saves the manifest only when an identity changed. Recovery calls it in place of `verify_pair` after the offline check passes. The preserve step has already copied the replaced manifest into the recovery directory.
+
+## Evidence
+
+- `cargo test -p arcbox-storage`: `a_moved_pair_rebinds_in_place_and_a_foreign_one_does_not` covers a copied-back pair and a foreign metadata filesystem, which is refused with the manifest unchanged.
+- `cargo test -p arcbox-engine --lib vm_lifecycle::storage`: `replaces_a_record_that_names_an_older_boot_bundle` fails without the change and passes with it; the existing tests still pass.
+- `storage_recovery` e2e has a new `moved_pair_rebinds` phase: copy both stopped images out and back, observe the `was replaced` hold, run recover, and require `Complete`, a released hold and a preserved manifest. On 2026-10-20 (VZ, boot 0.8.9) the whole scenario passed in 66 s with the test daemon started with `--no-mount-nfs`. Without that flag, the scenario fails at the existing `recovered daemon teardown` step on master too (SIGKILL after the `~/ArcBox/docker` unmount returns `Resource busy`), before the new phase; that failure is separate from this change.
+
+## Follow-ups
+
+- The `storage_recovery` e2e teardown fails on master when the docker NFS export is mounted: the daemon's unmount returns `Resource busy`, and the 15 s grace ends in SIGKILL. A stale mount stays behind and needs `diskutil unmount force`.

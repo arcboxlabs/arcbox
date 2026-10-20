@@ -160,6 +160,34 @@ fn replaced_image_requires_explicit_verified_rebind() {
     assert!(manifest.rebind_images(&copy).is_err());
 }
 
+/// Copying both images out and back gives them new inodes but the same
+/// filesystems: recovery rebinds the pair in place. A foreign filesystem is
+/// refused and leaves the manifest as it was.
+#[test]
+fn a_moved_pair_rebinds_in_place_and_a_foreign_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    write_filesystem(&data, VolumeRole::Data, Uuid::new_v4());
+    write_filesystem(&metadata, VolumeRole::Metadata, Uuid::new_v4());
+    let manifest = prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    for image in [&data, &metadata] {
+        let moved = image.with_extension("moved");
+        fs::copy(image, &moved).unwrap();
+        fs::rename(&moved, image).unwrap();
+    }
+    assert!(verify_pair(&data, &metadata).is_err());
+
+    let rebound = rebind_pair(&data, &metadata).unwrap();
+    assert_eq!(rebound.data.filesystem_uuid, manifest.data.filesystem_uuid);
+    assert_eq!(rebound.layout, manifest.layout);
+    assert_eq!(verify_pair(&data, &metadata).unwrap(), rebound);
+
+    let saved = fs::read(manifest_path(&data)).unwrap();
+    write_filesystem(&metadata, VolumeRole::Metadata, Uuid::new_v4());
+    assert!(rebind_pair(&data, &metadata).is_err());
+    assert_eq!(fs::read(manifest_path(&data)).unwrap(), saved);
+}
+
 #[test]
 fn data_filesystem_without_metadata_requires_verified_legacy_migration() {
     let dir = tempfile::tempdir().unwrap();

@@ -209,13 +209,16 @@ impl Runtime {
             self.recovery_phase(progress, Phase::Complete, "Offline checks passed. The System VM remains stopped; choose Recover to restart and verify writes.")?;
             return Ok(());
         }
-        // The check uses copies; verify that the original attachments still identify the same pair.
+        // The check used copies. The originals must still hold the same
+        // filesystems; a copy or restore of the pair changes only their host
+        // identities, which the manifest now records. The recovery directory
+        // keeps the replaced manifest.
         let [_, data, metadata, ..] = machine.block_devices.as_slice() else {
             return Err(CoreError::invalid_state(
                 "paired disk configuration is missing",
             ));
         };
-        arcbox_storage::verify_pair(data.path.as_ref(), metadata.path.as_ref())?;
+        arcbox_storage::rebind_pair(data.path.as_ref(), metadata.path.as_ref())?;
         self.recovery_phase(
             progress,
             Phase::Restarting,

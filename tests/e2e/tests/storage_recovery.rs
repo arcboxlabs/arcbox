@@ -140,6 +140,7 @@ async fn scenario(
         status.success(),
         "recovered daemon teardown failed: {status}"
     );
+    moved_pair_rebinds(root, directory, version, daemon).await?;
     let metadata = directory.join("data/docker-meta.img");
     mount_failure(root, directory, version, daemon).await?;
     let saved = directory.join("data/docker-meta.removed-by-test");
@@ -163,6 +164,50 @@ async fn scenario(
     );
     ensure!(saved.is_file(), "removed member was changed");
     ensure!(directory.join("storage-recovery/hold").is_file());
+    Ok(())
+}
+
+/// Copying the stopped pair out and back gives both images new inodes and
+/// keeps their filesystems. Startup holds the runtime as "replaced";
+/// recovery checks the copies, rebinds the pair, and boots it.
+async fn moved_pair_rebinds(
+    root: &Path,
+    directory: &Path,
+    version: &str,
+    daemon: &mut Option<DaemonHandle>,
+) -> Result<()> {
+    for name in ["docker.img", "docker-meta.img"] {
+        let image = directory.join("data").join(name);
+        let moved = image.with_extension("moved-by-test");
+        std::fs::copy(&image, &moved)?;
+        std::fs::rename(&moved, &image)?;
+    }
+    start(root, directory, version, daemon).await?;
+    let mut client = client(directory).await?;
+    let status = client.get_setup_status(Empty {}).await?.into_inner();
+    ensure!(!status.vm_running, "a moved pair booted without recovery");
+    let held = status.storage_recovery.context("moved pair protection")?;
+    ensure!(
+        held.message.contains("was replaced"),
+        "unexpected protection for a moved pair: {}",
+        held.message
+    );
+    let recovered = run(&mut client, Action::Recover).await?;
+    ensure!(
+        recovered.phase() == Phase::Complete,
+        "moved pair recovery failed: {}",
+        recovered.message
+    );
+    ensure!(!directory.join("storage-recovery/hold").exists());
+    ensure!(
+        Path::new(&recovered.recovery_directory)
+            .join("docker.storage.json")
+            .is_file(),
+        "the replaced manifest was not preserved"
+    );
+    let original = daemon.take().context("rebound daemon")?;
+    let status = tokio::task::block_in_place(|| original.shutdown())?;
+    ensure!(status.success(), "rebound daemon teardown failed: {status}");
     Ok(())
 }
 
