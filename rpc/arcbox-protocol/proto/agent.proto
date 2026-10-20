@@ -765,14 +765,28 @@ message StorageCheckRequest {
         UNSPECIFIED = 0;
         OFFLINE_CHECK = 1;
         VERIFY_WRITES = 2;
+        // Recovery guest only. Rebuilds the Btrfs free space tree on the data
+        // device after the guest re-verifies that stale free space entries are
+        // the only finding, then requires a clean read-only check. The host
+        // attaches a writable copy, never the original image.
+        REPAIR_FREE_SPACE_TREE = 3;
     }
     Action action = 1;
 }
 
 message StorageCheckResult {
+    // A classified, repairable failure. Absent means the failure, if any, is
+    // not repairable by any controlled action.
+    enum Finding {
+        FINDING_UNSPECIFIED = 0;
+        // Btrfs check reported only free space tree entries without a
+        // matching block group.
+        STALE_FREE_SPACE_TREE = 1;
+    }
     StorageVolumeHealth.Role role = 1;
     bool passed = 2;
     string detail = 3;
+    Finding finding = 4;
 }
 
 message StorageCheckResponse {

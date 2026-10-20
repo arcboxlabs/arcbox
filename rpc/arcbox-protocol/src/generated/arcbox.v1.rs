@@ -4246,6 +4246,11 @@ pub mod storage_check_request {
         Unspecified = 0,
         OfflineCheck = 1,
         VerifyWrites = 2,
+        /// Recovery guest only. Rebuilds the Btrfs free space tree on the data
+        /// device after the guest re-verifies that stale free space entries are
+        /// the only finding, then requires a clean read-only check. The host
+        /// attaches a writable copy, never the original image.
+        RepairFreeSpaceTree = 3,
     }
     impl Action {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -4257,6 +4262,7 @@ pub mod storage_check_request {
                 Self::Unspecified => "UNSPECIFIED",
                 Self::OfflineCheck => "OFFLINE_CHECK",
                 Self::VerifyWrites => "VERIFY_WRITES",
+                Self::RepairFreeSpaceTree => "REPAIR_FREE_SPACE_TREE",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -4265,6 +4271,7 @@ pub mod storage_check_request {
                 "UNSPECIFIED" => Some(Self::Unspecified),
                 "OFFLINE_CHECK" => Some(Self::OfflineCheck),
                 "VERIFY_WRITES" => Some(Self::VerifyWrites),
+                "REPAIR_FREE_SPACE_TREE" => Some(Self::RepairFreeSpaceTree),
                 _ => None,
             }
         }
@@ -4278,6 +4285,41 @@ pub struct StorageCheckResult {
     pub passed: bool,
     #[prost(string, tag = "3")]
     pub detail: ::prost::alloc::string::String,
+    #[prost(enumeration = "storage_check_result::Finding", tag = "4")]
+    pub finding: i32,
+}
+/// Nested message and enum types in `StorageCheckResult`.
+pub mod storage_check_result {
+    /// A classified, repairable failure. Absent means the failure, if any, is
+    /// not repairable by any controlled action.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Finding {
+        Unspecified = 0,
+        /// Btrfs check reported only free space tree entries without a
+        /// matching block group.
+        StaleFreeSpaceTree = 1,
+    }
+    impl Finding {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "FINDING_UNSPECIFIED",
+                Self::StaleFreeSpaceTree => "STALE_FREE_SPACE_TREE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "FINDING_UNSPECIFIED" => Some(Self::Unspecified),
+                "STALE_FREE_SPACE_TREE" => Some(Self::StaleFreeSpaceTree),
+                _ => None,
+            }
+        }
+    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StorageCheckResponse {
