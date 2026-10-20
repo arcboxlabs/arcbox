@@ -4,31 +4,45 @@ use crate::machine::{MachineInfo, StorageMaintenance};
 use super::VmLifecycleManager;
 
 impl VmLifecycleManager {
-    /// Rebuilds a missing System VM record from verified assets and its existing pair.
-    /// The caller must retain the reservation and stop the VM before copying disks.
+    /// Returns the System VM record recovery boots.
+    ///
+    /// A missing record is rebuilt from the pinned and verified boot assets.
+    /// An existing record that names other boot images is replaced, because
+    /// the offline check boots the record's rootfs and only current rootfs
+    /// images carry the recovery init. When the boot cache cannot be verified
+    /// the existing record is kept, so the disks can still be preserved and
+    /// inspected. The disk pair is reused unchanged in every case. The caller
+    /// must retain the reservation and stop the VM before copying disks.
     pub async fn storage_recovery_machine(
         &self,
         reservation: &StorageMaintenance,
     ) -> Result<MachineInfo> {
         self.check_storage_maintenance(reservation).await?;
-        if let Some(machine) = self.shared.machine_manager.get(&self.shared.machine_name) {
-            return Ok(machine);
-        }
-        let assets = self
-            .shared
-            .boot_assets
-            .verified_cached_assets()
-            .await
-            .map_err(|error| {
-                EngineError::config(format!(
+        let existing = self.shared.machine_manager.get(&self.shared.machine_name);
+        let assets = match self.shared.boot_assets.verified_cached_assets().await {
+            Ok(assets) => assets,
+            Err(error) => {
+                if let Some(machine) = existing {
+                    tracing::warn!(%error, "boot cache unverified; recovery keeps the existing System VM record");
+                    return Ok(machine);
+                }
+                return Err(EngineError::config(format!(
                     "cannot rebuild System VM storage configuration: {error}"
-                ))
-            })?;
+                )));
+            }
+        };
         let config = self
             .shared
             .default_machine_config(self.shared.desired_boot(assets));
+        if let Some(machine) = existing
+            && machine.kernel == config.kernel
+            && machine.block_devices.first().map(|disk| &disk.path)
+                == config.block_devices.first().map(|disk| &disk.path)
+        {
+            return Ok(machine);
+        }
         let reservation = reservation.clone();
-        tokio::task::spawn_blocking(move || reservation.create_system_machine(config))
+        tokio::task::spawn_blocking(move || reservation.replace_system_machine(config))
             .await
             .map_err(|error| {
                 EngineError::Machine(format!("restore System VM configuration: {error}"))
@@ -145,6 +159,48 @@ mod tests {
             .unwrap();
         assert_eq!(existing.vm_id, machine.vm_id);
         assert_eq!(snapshot(directory.path()), original);
+    }
+
+    /// A record created before a boot bundle upgrade names a rootfs without
+    /// the recovery init; the offline check could never reach its agent.
+    #[tokio::test]
+    async fn replaces_a_record_that_names_an_older_boot_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let lifecycle = fixture(directory.path());
+        let machines = &lifecycle.shared.machine_manager;
+        let reservation = machines.reserve_storage().unwrap();
+        let current = lifecycle
+            .storage_recovery_machine(&reservation)
+            .await
+            .unwrap();
+        let stale = directory.path().join("boot/0.0.0-old");
+        fs::create_dir(&stale).unwrap();
+        let mut config = crate::machine::MachineConfig {
+            name: current.name.clone(),
+            kernel: Some(stale.join("kernel").to_string_lossy().into_owned()),
+            block_devices: current.block_devices.clone(),
+            ..Default::default()
+        };
+        config.block_devices[0].path = stale.join("rootfs.erofs").to_string_lossy().into_owned();
+        reservation.replace_system_machine(config).unwrap();
+
+        let original = snapshot(directory.path());
+        let replaced = lifecycle
+            .storage_recovery_machine(&reservation)
+            .await
+            .unwrap();
+        let paths = |machine: &MachineInfo| {
+            machine
+                .block_devices
+                .iter()
+                .map(|disk| (disk.path.clone(), disk.read_only))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(replaced.kernel, current.kernel);
+        assert_eq!(paths(&replaced), paths(&current));
+        assert_eq!(replaced.state, MachineState::Created);
+        assert_eq!(snapshot(directory.path()), original, "disks stay untouched");
+        assert!(machines.storage_is_held().unwrap());
     }
 
     #[tokio::test]

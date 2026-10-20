@@ -44,6 +44,24 @@ impl StorageMaintenance {
         Ok(())
     }
 
+    /// Replaces a stopped System VM record whose boot assets differ from
+    /// `config`. Only the record changes; the disk pair stays where it is.
+    pub(crate) fn replace_system_machine(&self, config: super::MachineConfig) -> Result<()> {
+        let manager = &self.0.0;
+        match manager.get(&config.name) {
+            Some(existing) if existing.state == super::MachineState::Running => {
+                return Err(EngineError::invalid_state(
+                    "storage recovery cannot replace a running System VM",
+                ));
+            }
+            Some(_) => {
+                manager.remove_admitted(&config.name, false)?;
+            }
+            None => {}
+        }
+        self.create_system_machine(config)
+    }
+
     pub(crate) fn belongs_to(&self, manager: &Arc<MachineManager>) -> bool {
         Arc::ptr_eq(&self.0.0, manager)
     }

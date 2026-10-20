@@ -1769,6 +1769,10 @@ impl MachineManager {
     /// machine must propagate, including a missing VM or a persistence failure.
     pub(crate) fn remove_if_present(&self, name: &str, force: bool) -> Result<bool> {
         let _storage = self.storage_permit(name)?;
+        self.remove_admitted(name, force)
+    }
+
+    fn remove_admitted(&self, name: &str, force: bool) -> Result<bool> {
         let mut machines = self
             .machines
             .write()
