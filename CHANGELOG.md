@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4](https://github.com/arcboxlabs/arcbox/compare/v0.10.3...v0.10.4) (2026-10-20)
+
+
+### Bug Fixes
+
+* **docker:** point host-gateway at the Mac ([#754](https://github.com/arcboxlabs/arcbox/issues/754)) ([2cfe84e](https://github.com/arcboxlabs/arcbox/commit/2cfe84ed1edd0f2f8a1f04ee7dbf829405968a76))
+
+
+### Documentation
+
+* **logs:** trace the stale free space tree entries to mkfs.btrfs 6.12 ([2a55bd4](https://github.com/arcboxlabs/arcbox/commit/2a55bd4de1681a319162f2e182ef992bc5a28c44))
+
+
+### Continuous Integration
+
+* **release:** give the guest build 20 minutes ([de340f8](https://github.com/arcboxlabs/arcbox/commit/de340f88496dc7b0ba3e7aa59ad70b313fbaf33c))
+
+
+### Miscellaneous Chores
+
+* **boot:** pin boot bundle 0.8.10 ([9346faf](https://github.com/arcboxlabs/arcbox/commit/9346faf6b3e6ac410e3cc7fbcca7c06e4364a3f3))
+
 ## [0.10.3](https://github.com/arcboxlabs/arcbox/compare/v0.10.2...v0.10.3) (2026-10-20)
 
 
