@@ -22,6 +22,20 @@ pub fn verify_pair(data: &Path, metadata: &Path) -> Result<StorageManifest> {
     Ok(manifest)
 }
 
+/// Verifies the manifest paths and both filesystems, but not the host file
+/// identities that a copy or restore of the pair changes.
+///
+/// Recovery accepts such a pair before its offline check; only
+/// [`rebind_pair`] records the new identities, after that check passes.
+///
+/// # Errors
+/// Returns an error if the paths or filesystems do not match.
+pub fn verify_pair_filesystems(data: &Path, metadata: &Path) -> Result<StorageManifest> {
+    let (manifest, directory) = load_pair(data, metadata)?;
+    manifest.verify_filesystems(directory)?;
+    Ok(manifest)
+}
+
 /// Binds the manifest to the pair's current host file identities.
 ///
 /// A copy, a move across volumes, or a restore from backup gives both images

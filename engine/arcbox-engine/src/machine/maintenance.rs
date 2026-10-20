@@ -25,6 +25,10 @@ impl Drop for MaintenanceOwner {
 }
 
 impl StorageMaintenance {
+    /// Creates the System VM record recovery boots.
+    ///
+    /// The pair may have new host identities after a copy or restore; that is
+    /// what recovery repairs, so only the filesystems are checked here.
     pub(crate) fn create_system_machine(&self, config: super::MachineConfig) -> Result<()> {
         if !is_system_machine(&config.name) || config.rootfs.is_some() {
             return Err(EngineError::invalid_state(
@@ -36,7 +40,7 @@ impl StorageMaintenance {
                 "storage recovery requires exactly three block devices",
             ));
         };
-        arcbox_storage::verify_pair(data.path.as_ref(), metadata.path.as_ref())
+        arcbox_storage::verify_pair_filesystems(data.path.as_ref(), metadata.path.as_ref())
             .map_err(|error| EngineError::Machine(error.to_string()))?;
         self.0
             .0

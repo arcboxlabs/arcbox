@@ -169,7 +169,9 @@ async fn scenario(
 
 /// Copying the stopped pair out and back gives both images new inodes and
 /// keeps their filesystems. Startup holds the runtime as "replaced";
-/// recovery checks the copies, rebinds the pair, and boots it.
+/// recovery checks the copies, rebinds the pair, and boots it. The System VM
+/// record is removed as well, as when recovery replaces a record that names
+/// an older boot bundle: rebuilding it must accept the moved pair.
 async fn moved_pair_rebinds(
     root: &Path,
     directory: &Path,
@@ -182,6 +184,7 @@ async fn moved_pair_rebinds(
         std::fs::copy(&image, &moved)?;
         std::fs::rename(&moved, &image)?;
     }
+    std::fs::remove_file(directory.join("machines/default/config.toml"))?;
     start(root, directory, version, daemon).await?;
     let mut client = client(directory).await?;
     let status = client.get_setup_status(Empty {}).await?.into_inner();

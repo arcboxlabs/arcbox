@@ -203,6 +203,39 @@ mod tests {
         assert!(machines.storage_is_held().unwrap());
     }
 
+    /// A copied or restored pair is what recovery exists to rebind, so its
+    /// record must be creatable before the offline check; the manifest keeps
+    /// the old identities until the check passes.
+    #[tokio::test]
+    async fn builds_the_record_for_a_pair_with_new_host_identities() {
+        let directory = tempfile::tempdir().unwrap();
+        let lifecycle = fixture(directory.path());
+        for name in ["docker.img", "docker-meta.img"] {
+            let image = directory.path().join("data").join(name);
+            let moved = image.with_extension("moved");
+            fs::copy(&image, &moved).unwrap();
+            fs::rename(&moved, &image).unwrap();
+        }
+        let data = directory.path().join("data/docker.img");
+        let metadata = directory.path().join("data/docker-meta.img");
+        assert!(arcbox_storage::verify_pair(&data, &metadata).is_err());
+        let machines = &lifecycle.shared.machine_manager;
+        let reservation = machines.reserve_storage().unwrap();
+        let original = snapshot(directory.path());
+
+        let machine = lifecycle
+            .storage_recovery_machine(&reservation)
+            .await
+            .unwrap();
+        assert_eq!(machine.state, MachineState::Created);
+        assert_eq!(snapshot(directory.path()), original, "disks stay untouched");
+        assert!(
+            arcbox_storage::verify_pair(&data, &metadata).is_err(),
+            "only a passed offline check may rebind"
+        );
+        assert!(machines.storage_is_held().unwrap());
+    }
+
     #[tokio::test]
     async fn refuses_missing_or_invalid_inputs_without_creating_a_record_or_modifying_files() {
         for (file, remove) in [

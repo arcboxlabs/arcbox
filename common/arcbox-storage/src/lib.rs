@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use probe::{ImageIdentity, filesystem_uuid, verify_new_volume};
-pub use provision::{prepare_pair, rebind_pair, verify_pair};
+pub use provision::{prepare_pair, rebind_pair, verify_pair, verify_pair_filesystems};
 
 /// Kernel command-line key naming the manifest on the host's VirtioFS share.
 pub const MANIFEST_CMDLINE_KEY: &str = "arcbox.storage_manifest=";
@@ -206,6 +206,18 @@ impl StorageManifest {
         Ok(())
     }
 
+    /// Verifies both filesystems in `directory` and ignores host file
+    /// identities, which a copy or restore of the pair changes.
+    ///
+    /// # Errors
+    /// Returns an error for missing, unreadable, or unrecognized images.
+    pub fn verify_filesystems(&self, directory: &Path) -> Result<()> {
+        for role in [VolumeRole::Data, VolumeRole::Metadata] {
+            self.verify_volume(role, &directory.join(&self.volume(role).filename))?;
+        }
+        Ok(())
+    }
+
     /// Rebinds a verified recovery copy to its new host file identities.
     ///
     /// The caller must stop the VM and clone both images before this operation.
@@ -214,11 +226,11 @@ impl StorageManifest {
     /// # Errors
     /// Returns an error unless both copies retain the expected filesystem identity.
     pub fn rebind_images(&self, directory: &Path) -> Result<Self> {
+        self.verify_filesystems(directory)?;
         let mut rebound = self.clone();
         for role in [VolumeRole::Data, VolumeRole::Metadata] {
-            let path = directory.join(&self.volume(role).filename);
-            self.verify_volume(role, &path)?;
-            rebound.volume_mut(role).image = ImageIdentity::read(&path)?;
+            rebound.volume_mut(role).image =
+                ImageIdentity::read(&directory.join(&self.volume(role).filename))?;
         }
         Ok(rebound)
     }
