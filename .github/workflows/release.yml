@@ -343,7 +343,7 @@ jobs:
   build-agent:
     name: Build guest binaries (Linux musl)
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -371,8 +371,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-agent-musl-
 
+      # This step took 7-8 minutes in v0.10.1 and v0.10.2; v0.10.3's first
+      # attempt ran past the former 10-minute limit while compiling
+      # arcbox-agent. The job limit leaves room for setup around it.
       - name: Build guest binaries
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           cargo build --release --locked -p arcbox-agent --target aarch64-unknown-linux-musl
           cargo build --release --locked -p arcbox-vm-agent --bin vm-agent --target aarch64-unknown-linux-musl
