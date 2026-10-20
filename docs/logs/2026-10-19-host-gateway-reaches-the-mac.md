@@ -33,7 +33,8 @@ dockerd resolves `host-gateway` when it builds a container's network sandbox (`b
 
 - `cargo test -p arcbox-agent --lib docker_config` passes. `daemon_json_points_host_gateway_at_the_mac` and `operator_host_gateway_is_refused_in_either_spelling` cover the rendered key and both operator spellings.
 - The `smoke` e2e has a new `host_gateway` phase. A container started with `--add-host host.docker.internal:host-gateway` fetches a body from an origin bound to the Mac's `127.0.0.1` and must receive every byte. The same container command against OrbStack printed `0.250.250.254` and the full byte count. The phase has not run on ArcBox: no ArcBox VM was available for this change.
+- 2026-10-21, before merge: `smoke` passed on VZ with this change rebased onto `2a55bd4d`, a freshly built musl agent, and boot bundle 0.8.9. `host_gateway` took 0.31 s. The first attempt failed only the 10 s boot budget (11.7 s on a cold runtime copy); the rerun used `ARCBOX_E2E_BOOT_BUDGET_SECS=30` and booted in 9.9 s. `smoke` passed again on boot bundle 0.8.10 ([2026-10-21 log](2026-10-21-boot-0.8.10-private-mountpoint.md)).
 
 ## Follow-ups
 
-- Run `smoke` on VZ and HV and record the `host_gateway` timing here.
+- Run `smoke` on HV and record the `host_gateway` timing here. `run_vz_scenario` forces `ARCBOX_VM_BACKEND=vz`, so the phase needs an HV-capable scenario runner first.

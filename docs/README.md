@@ -96,6 +96,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-21 — Boot assets 0.8.10 restore bind mounts from macOS temporary directories](logs/2026-10-21-boot-0.8.10-private-mountpoint.md)
 - [2026-10-20 — Storage recovery rebinds a moved pair and boots the current recovery init](logs/2026-10-20-storage-recovery-moved-pair.md)
 - [2026-10-20 — Storage recovery rebuilds a stale Btrfs free space tree](logs/2026-10-20-storage-recovery-fst-repair.md)
 - [2026-10-19 — `host-gateway` reaches the Mac](logs/2026-10-19-host-gateway-reaches-the-mac.md)
