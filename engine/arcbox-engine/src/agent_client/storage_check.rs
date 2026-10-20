@@ -11,9 +11,10 @@ use super::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
 use super::{AgentClient, wire};
 use crate::error::{EngineError, Result};
 
-// Each offline checker has a 30-minute budget. Reserve one minute for RPC
-// framing and process termination after both sequential checks.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(61 * 60);
+// Each guest tool has a 30-minute budget, and the longest action, the free
+// space tree repair, runs three in sequence (check, repair, re-check).
+// Reserve one minute for RPC framing and process termination.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(91 * 60);
 
 impl AgentClient {
     /// Checks storage on a dedicated connection. Dropping the future closes

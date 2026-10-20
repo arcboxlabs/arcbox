@@ -1,4 +1,5 @@
-//! Runs filesystem tools in a disposable guest with read-only snapshot attachments.
+//! Runs filesystem tools in a disposable guest: read-only checks of the
+//! preserved snapshots, and the free space tree repair of a writable copy.
 
 use crate::{
     Runtime,
@@ -6,7 +7,7 @@ use crate::{
 };
 use arcbox_connect::v1::{
     StorageCheckRequest, StorageCheckResponse, StorageRecoveryProgress,
-    storage_check_request::Action,
+    storage_check_request::Action, storage_check_result::Finding, storage_volume_health::Role,
 };
 use arcbox_engine::{
     agent_client::AgentClient,
@@ -19,8 +20,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct OfflineOutcome {
-    pub(super) checked: Result<()>,
+/// What the offline check found.
+pub(super) enum Verdict {
+    Passed,
+    /// The data volume's only problem is stale free space tree entries; the
+    /// metadata volume passed.
+    StaleFreeSpaceTree,
+    Failed(String),
+}
+
+pub(super) struct OfflineOutcome<T> {
+    pub(super) checked: Result<T>,
     pub(super) cleaned: Result<()>,
 }
 
@@ -29,11 +39,53 @@ pub(super) async fn offline_check(
     original: &MachineInfo,
     devices: Vec<BlockDeviceConfig>,
     progress: &StorageRecoveryProgress,
-) -> Result<OfflineOutcome> {
+) -> Result<OfflineOutcome<Verdict>> {
+    run_disposable(
+        runtime,
+        original,
+        devices,
+        &format!("storage-check-{}", progress.operation_id),
+        Action::OfflineCheck,
+        |response| {
+            record_check(progress, "offline-check.txt", response)?;
+            Ok(verdict(response))
+        },
+    )
+    .await
+}
+
+/// Repairs the free space tree of the writable data copy in `devices`.
+pub(super) async fn repair_free_space_tree(
+    runtime: &Runtime,
+    original: &MachineInfo,
+    devices: Vec<BlockDeviceConfig>,
+    progress: &StorageRecoveryProgress,
+) -> Result<OfflineOutcome<()>> {
+    run_disposable(
+        runtime,
+        original,
+        devices,
+        &format!("storage-repair-{}", progress.operation_id),
+        Action::RepairFreeSpaceTree,
+        |response| {
+            record_check(progress, "free-space-tree-repair.txt", response)?;
+            require_pass(response)
+        },
+    )
+    .await
+}
+
+async fn run_disposable<T>(
+    runtime: &Runtime,
+    original: &MachineInfo,
+    devices: Vec<BlockDeviceConfig>,
+    name: &str,
+    action: Action,
+    interpret: impl FnOnce(&StorageCheckResponse) -> Result<T>,
+) -> Result<OfflineOutcome<T>> {
     let cancelled = &runtime.storage_recovery.owner.cancelled;
     runtime.storage_recovery.owner.check_open()?;
     let manager = &runtime.machine_manager;
-    let name = format!("storage-check-{}", progress.operation_id);
     let mut tokens: Vec<&str> = original
         .cmdline
         .as_deref()
@@ -49,7 +101,7 @@ pub(super) async fn offline_check(
     ]);
     manager
         .create(MachineConfig {
-            name: name.clone(),
+            name: name.to_owned(),
             cpus: original.cpus.min(4),
             memory_mb: original.memory_mb,
             kernel: original.kernel.clone(),
@@ -61,28 +113,49 @@ pub(super) async fn offline_check(
         .await?;
     let checked = async {
         runtime.storage_recovery.owner.check_open()?;
-        manager.start(&name).await?;
-        let agent = ready_agent(Arc::clone(manager), name.clone(), cancelled).await?;
+        manager.start(name).await?;
+        let agent = ready_agent(Arc::clone(manager), name.to_owned(), cancelled).await?;
         let response = agent
             .storage_check_with_cancel(
                 StorageCheckRequest {
-                    action: Action::OfflineCheck.into(),
+                    action: action.into(),
                     ..Default::default()
                 },
                 cancelled,
             )
             .await?;
-        record_check(progress, "offline-check.txt", &response)?;
-        require_pass(response)
+        interpret(&response)
     }
     .await;
     // Removal tears down the temporary VM before the original can restart.
     let manager = Arc::clone(manager);
+    let name = name.to_owned();
     let cleaned = tokio::task::spawn_blocking(move || manager.remove(&name, true))
         .await
         .map_err(|error| CoreError::Machine(format!("remove recovery VM task: {error}")))
         .and_then(|result| result.map_err(CoreError::from));
     Ok(OfflineOutcome { checked, cleaned })
+}
+
+fn verdict(response: &StorageCheckResponse) -> Verdict {
+    if response.passed {
+        return Verdict::Passed;
+    }
+    let failed: Vec<_> = response
+        .checks
+        .iter()
+        .filter(|check| !check.passed)
+        .collect();
+    match failed.as_slice() {
+        [check]
+            if check.role.as_known() == Some(Role::Data)
+                && check.finding.as_known() == Some(Finding::StaleFreeSpaceTree)
+                && response.checks.len() == 2 =>
+        {
+            Verdict::StaleFreeSpaceTree
+        }
+        _ => Verdict::Failed(failure_detail(response)),
+    }
 }
 
 pub(super) async fn wait_runtime(runtime: &Runtime) -> Result<()> {
@@ -127,7 +200,7 @@ pub(super) async fn verify_writes(
             }
         })?;
     record_check(progress, "write-verification.txt", &response)?;
-    require_pass(response)
+    require_pass(&response)
 }
 
 async fn ready_agent(
@@ -196,17 +269,74 @@ fn record_check(
     Ok(())
 }
 
-fn require_pass(response: StorageCheckResponse) -> Result<()> {
+fn require_pass(response: &StorageCheckResponse) -> Result<()> {
     if !response.passed {
-        return Err(CoreError::Machine(
-            response
-                .checks
-                .into_iter()
-                .filter(|result| !result.passed)
-                .map(|result| result.detail)
-                .collect::<Vec<_>>()
-                .join("; "),
-        ));
+        return Err(CoreError::Machine(failure_detail(response)));
     }
     Ok(())
+}
+
+fn failure_detail(response: &StorageCheckResponse) -> String {
+    response
+        .checks
+        .iter()
+        .filter(|result| !result.passed)
+        .map(|result| result.detail.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_connect::v1::StorageCheckResult;
+
+    fn result(role: Role, passed: bool, finding: Finding) -> StorageCheckResult {
+        StorageCheckResult {
+            role: role.into(),
+            passed,
+            detail: format!("{role:?}"),
+            finding: finding.into(),
+            ..Default::default()
+        }
+    }
+
+    fn response(checks: Vec<StorageCheckResult>) -> StorageCheckResponse {
+        StorageCheckResponse {
+            passed: checks.iter().all(|check| check.passed),
+            checks,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_stale_data_tree_beside_a_passing_metadata_volume_is_repairable() {
+        let stale = || result(Role::Data, false, Finding::StaleFreeSpaceTree);
+        let clean = |role| result(role, true, Finding::FindingUnspecified);
+        assert!(matches!(
+            verdict(&response(vec![stale(), clean(Role::Metadata)])),
+            Verdict::StaleFreeSpaceTree
+        ));
+        assert!(matches!(
+            verdict(&response(vec![clean(Role::Data), clean(Role::Metadata)])),
+            Verdict::Passed
+        ));
+        for checks in [
+            vec![
+                stale(),
+                result(Role::Metadata, false, Finding::FindingUnspecified),
+            ],
+            vec![
+                result(Role::Data, false, Finding::FindingUnspecified),
+                clean(Role::Metadata),
+            ],
+            vec![
+                clean(Role::Data),
+                result(Role::Metadata, false, Finding::StaleFreeSpaceTree),
+            ],
+            vec![stale()],
+        ] {
+            assert!(matches!(verdict(&response(checks)), Verdict::Failed(_)));
+        }
+    }
 }

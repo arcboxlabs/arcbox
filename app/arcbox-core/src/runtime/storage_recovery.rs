@@ -194,30 +194,49 @@ impl Runtime {
             Phase::Checking,
             "Checking unmounted recovery copies without filesystem repair",
         )?;
-        let offline = guest::offline_check(self, &machine, copies, progress).await?;
-        *cleanup = offline.cleaned;
-        match (&offline.checked, &cleanup) {
-            (Ok(()), Ok(())) => {}
-            (checked, cleaned) => {
-                return Err(CoreError::Machine(format!(
-                    "offline storage check: {checked:?}; recovery VM cleanup: {cleaned:?}"
-                )));
-            }
-        }
+        let offline = guest::offline_check(self, &machine, copies.clone(), progress).await?;
+        let verdict = settle(offline, cleanup, "offline storage check")?;
         self.storage_recovery.owner.check_open()?;
+        let repairable = match verdict {
+            guest::Verdict::Passed => false,
+            guest::Verdict::StaleFreeSpaceTree => true,
+            guest::Verdict::Failed(detail) => return Err(CoreError::Machine(detail)),
+        };
         if action == Action::CheckOnly {
-            self.recovery_phase(progress, Phase::Complete, "Offline checks passed. The System VM remains stopped; choose Recover to restart and verify writes.")?;
+            let message = if repairable {
+                "The data disk's only problem is stale free space tree entries. The System VM remains stopped; choose Recover to rebuild the tree on a copy, restart, and verify writes."
+            } else {
+                "Offline checks passed. The System VM remains stopped; choose Recover to restart and verify writes."
+            };
+            self.recovery_phase(progress, Phase::Complete, message)?;
             return Ok(());
         }
-        // The check used copies. The originals must still hold the same
-        // filesystems; a copy or restore of the pair changes only their host
-        // identities, which the manifest now records. The recovery directory
-        // keeps the replaced manifest.
         let [_, data, metadata, ..] = machine.block_devices.as_slice() else {
             return Err(CoreError::invalid_state(
                 "paired disk configuration is missing",
             ));
         };
+        if repairable {
+            self.recovery_phase(
+                progress,
+                Phase::Checking,
+                "Rebuilding the data disk's free space tree on a copy",
+            )?;
+            let devices = tokio::task::spawn_blocking(move || preserve::repair_copy(&copies))
+                .await
+                .map_err(|error| CoreError::Machine(format!("repair copy task: {error}")))??;
+            let repaired = std::path::PathBuf::from(&devices[1].path);
+            let outcome = guest::repair_free_space_tree(self, &machine, devices, progress).await?;
+            settle(outcome, cleanup, "free space tree repair")?;
+            self.storage_recovery.owner.check_open()?;
+            // The repaired copy replaces the original, which the recovery
+            // directory still holds as the preserved data image.
+            preserve::install_repaired(&repaired, data.path.as_ref())?;
+        }
+        // The check used copies. The originals must still hold the same
+        // filesystems; a copy or restore of the pair changes only their host
+        // identities, which the manifest now records. The recovery directory
+        // keeps the replaced manifest. An installed repair is a new inode too.
         arcbox_storage::rebind_pair(data.path.as_ref(), metadata.path.as_ref())?;
         self.recovery_phase(
             progress,
@@ -344,6 +363,19 @@ impl Runtime {
 }
 
 struct ActiveRecovery(Arc<Runtime>);
+
+/// Records a disposable guest's cleanup for the worker, and returns the
+/// step's result only when both the step and the cleanup succeeded.
+fn settle<T>(outcome: guest::OfflineOutcome<T>, cleanup: &mut Result<()>, step: &str) -> Result<T> {
+    *cleanup = outcome.cleaned;
+    match (outcome.checked, &cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (checked, cleaned) => Err(CoreError::Machine(format!(
+            "{step}: {:?}; recovery VM cleanup: {cleaned:?}",
+            checked.err()
+        ))),
+    }
+}
 
 impl Drop for ActiveRecovery {
     fn drop(&mut self) {
