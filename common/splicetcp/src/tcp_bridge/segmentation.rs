@@ -76,7 +76,7 @@ pub(super) fn emit_data_frames(
     }
 }
 
-fn family_mss(ip: IpAddr, ipv4_mss: usize) -> usize {
+pub(super) fn family_mss(ip: IpAddr, ipv4_mss: usize) -> usize {
     if ip.is_ipv6() {
         ipv4_mss.saturating_sub(20).max(1)
     } else {

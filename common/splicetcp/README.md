@@ -82,9 +82,9 @@ configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits
 one IPv4 frame when the peer accepts GSO segments. IPv6 downloads always use normal segmentation with 20 fewer payload bytes than the IPv4 link budget and the peer MSS as an upper bound.
 
 `TcpBridge::set_fast_path_mtu` also sets the MSS advertised in new guest-facing
-handshakes. An MTU of 4000 advertises MSS 3960, so uploads can use the link's full
+handshakes. An MTU of 4000 advertises MSS 3960 for IPv4 and 3940 for IPv6, so uploads can use the link's full
 packet budget. Downloads remain bounded by the peer's advertised MSS. Without
-an explicit MTU, the bridge advertises MSS 1460. Handshake retransmissions reuse
+an explicit MTU, the bridge advertises MSS 1460 for IPv4 and 1440 for IPv6. Handshake retransmissions reuse
 the original options, even if the configured MTU changes.
 
 `FrameClassifier::drain_tcp` preserves arrival order across handshake completion
@@ -144,11 +144,11 @@ buffer. The bridge reuses this buffer across connections and keeps it until
 the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
 does not allocate this buffer.
 
-The internal SYN rejection encoder validates IP/TCP structure and matching Ethernet/IP families. Its RST|ACK response swaps endpoints, excludes padding, and acknowledges the SYN plus its declared payload. The helper supports IPv6, but IPv6 handshake and classifier dispatch remain pending.
+The internal SYN rejection encoder validates IP/TCP structure and matching Ethernet/IP families. Its RST|ACK response swaps endpoints, excludes padding, and acknowledges the SYN plus its declared payload. The helper and handshake parser support IPv6; IPv6 classifier dispatch remains pending.
 
 ## Egress addresses
 
-`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Established Ethernet and bare-IP input accepts IPv4 and IPv6 through shared IP/TCP views. Declared lengths exclude padding; truncated headers, incomplete fragments, and mismatched Ethernet/IP families are rejected before flow state changes. IPv6 upload batches currently consume one frame at a time. TCP handshake parsing and classifier dispatch still accept IPv4.
+`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Established Ethernet and bare-IP input accepts IPv4 and IPv6 through shared IP/TCP views. Declared lengths exclude padding; truncated headers, incomplete fragments, and mismatched Ethernet/IP families are rejected before flow state changes. IPv6 upload batches currently consume one frame at a time. Active and passive handshake parsing accepts both families through the same shared views. Without a peer MSS option, IPv6 uses 1220; IPv4 retains 536 for passive opens and 1460 for active opens. Classifier dispatch still accepts IPv4.
 
 ## Managed native sockets
 
@@ -181,7 +181,7 @@ The `shim` module provides the adapter:
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
   drops ARP or non-IP frames that have no L3 representation.
 
-The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier and TCP handshake paths still accept IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
+The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier still accepts IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
 
 ## Memory and performance notes
 

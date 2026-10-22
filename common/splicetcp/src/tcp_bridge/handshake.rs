@@ -3,7 +3,6 @@ use super::{
     SHIM_MSS, SHIM_WSCALE, SynFlowKey, TcpBridge, build_rst_from_syn, next_isn, should_retransmit,
 };
 use crate::ethernet::ETH_HEADER_LEN;
-use std::net::Ipv4Addr;
 use std::time::Instant as StdInstant;
 use tokio::sync::oneshot;
 
@@ -13,60 +12,32 @@ impl TcpBridge {
     /// and spawns an async host connect. The SYN-ACK is emitted later by
     /// `poll_handshakes` once the connect resolves.
     ///
-    /// Returns an RST frame if the SYN is rejected (capacity, malformed).
-    /// Returns `None` on success — the handshake is now tracked.
+    /// Returns an RST frame when capacity rejects the SYN.
+    /// Returns `None` for malformed input or a tracked handshake.
     ///
     /// `gateway_mac` and `guest_mac` are the MAC addresses used on the
     /// guest's Ethernet link. The guest MAC is learned from the source MAC
-    /// of inbound frames; if `guest_mac` is `None`, we use broadcast as a
-    /// temporary fallback (first guest frame will correct it).
+    /// of inbound frames.
     pub fn handle_outbound_syn(
         &mut self,
         syn_frame: &[u8],
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
     ) -> Option<Vec<u8>> {
-        // Parse the SYN frame: ETH(14) + IP(var) + TCP(var).
-        let ip_start = ETH_HEADER_LEN;
-        if syn_frame.len() < ip_start + 40 {
-            return None;
-        }
-        let ihl = ((syn_frame[ip_start] & 0x0F) as usize) * 4;
-        let l4_start = ip_start + ihl;
-        if ihl < 20 || l4_start + 20 > syn_frame.len() {
-            return None;
-        }
-
-        let src_ip = Ipv4Addr::new(
-            syn_frame[ip_start + 12],
-            syn_frame[ip_start + 13],
-            syn_frame[ip_start + 14],
-            syn_frame[ip_start + 15],
-        );
-        let dst_ip = Ipv4Addr::new(
-            syn_frame[ip_start + 16],
-            syn_frame[ip_start + 17],
-            syn_frame[ip_start + 18],
-            syn_frame[ip_start + 19],
-        );
-        let src_port = u16::from_be_bytes([syn_frame[l4_start], syn_frame[l4_start + 1]]);
-        let dst_port = u16::from_be_bytes([syn_frame[l4_start + 2], syn_frame[l4_start + 3]]);
-        let flags = syn_frame[l4_start + 13];
+        let tcp = super::packet::tcp_at(syn_frame, ETH_HEADER_LEN)?;
         // Require SYN set, ACK clear.
-        if flags & 0x12 != 0x02 {
+        if tcp.flags() & 0x12 != 0x02 {
             return None;
         }
-        let guest_isn = u32::from_be_bytes([
-            syn_frame[l4_start + 4],
-            syn_frame[l4_start + 5],
-            syn_frame[l4_start + 6],
-            syn_frame[l4_start + 7],
-        ]);
-
+        let src_ip = tcp.ip().source();
+        let dst_ip = tcp.ip().destination();
+        let src_port = tcp.source_port();
+        let dst_port = tcp.destination_port();
+        let guest_isn = tcp.sequence();
         let key = SynFlowKey {
-            src_ip: src_ip.into(),
+            src_ip,
             src_port,
-            dst_ip: dst_ip.into(),
+            dst_ip,
             dst_port,
         };
 
@@ -90,9 +61,11 @@ impl TcpBridge {
         }
 
         // Parse peer options (MSS / WScale).
-        let opts = crate::ethernet::parse_tcp_syn_options(&syn_frame[l4_start..]);
+        let opts = crate::ethernet::parse_tcp_syn_options(tcp.segment());
         let peer_wscale = opts.wscale;
-        let peer_mss = opts.mss.unwrap_or(536);
+        let peer_mss = opts
+            .mss
+            .unwrap_or_else(|| if src_ip.is_ipv6() { 1220 } else { 536 });
 
         // Decide + dial egress via the injected resolver. The default
         // reproduces the historical inline behavior: route via the configured
@@ -102,9 +75,9 @@ impl TcpBridge {
         // recovered from the destination IP via the DNS resolution log.
         let domain = self.dns_log.as_ref().and_then(|log| log.lookup(dst_ip));
         let result_rx = self.egress.resolve(crate::egress::FlowMeta {
-            src_ip: src_ip.into(),
+            src_ip,
             src_port,
-            dst_ip: dst_ip.into(),
+            dst_ip,
             dst_port,
             domain,
         });
@@ -182,7 +155,11 @@ impl TcpBridge {
                 host_stream: Some(host_stream),
                 connect_rx: None,
                 peer_wscale: Some(SHIM_WSCALE),
-                peer_mss: SHIM_MSS,
+                peer_mss: if flow_key.src_ip.is_ipv6() {
+                    1220
+                } else {
+                    SHIM_MSS
+                },
                 gw_mac: gateway_mac,
                 guest_mac,
                 retransmit_count: 0,
@@ -281,7 +258,10 @@ impl TcpBridge {
                                 ack: conn.peer_isn.wrapping_add(1),
                                 src_mac: conn.gw_mac,
                                 dst_mac: conn.guest_mac,
-                                mss: self.advertised_mss,
+                                mss: super::segmentation::family_mss(
+                                    key.src_ip,
+                                    usize::from(self.advertised_mss),
+                                ) as u16,
                                 wscale: conn.peer_wscale.map(|_| SHIM_WSCALE),
                                 // The fast path only supports cumulative ACKs.
                                 sack_permitted: false,
@@ -355,7 +335,10 @@ impl TcpBridge {
                                 seq: conn.our_isn,
                                 src_mac: conn.gw_mac,
                                 dst_mac: conn.guest_mac,
-                                mss: self.advertised_mss,
+                                mss: super::segmentation::family_mss(
+                                    key.src_ip,
+                                    usize::from(self.advertised_mss),
+                                ) as u16,
                                 wscale: Some(SHIM_WSCALE),
                                 sack_permitted: false,
                             });
@@ -394,52 +377,15 @@ impl TcpBridge {
     /// (possibly emitting reply frames). Returns `None` if no matching
     /// handshake exists or the frame doesn't match the expected phase.
     pub fn try_complete_handshake(&mut self, frame: &[u8]) -> Option<Vec<Vec<u8>>> {
-        let ip_start = ETH_HEADER_LEN;
-        if frame.len() < ip_start + 40 {
-            return None;
-        }
-        if frame[ip_start + 9] != 6 {
-            return None;
-        }
-        let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
-        let l4_start = ip_start + ihl;
-        if ihl < 20 || l4_start + 20 > frame.len() {
-            return None;
-        }
-
-        let src_ip = Ipv4Addr::new(
-            frame[ip_start + 12],
-            frame[ip_start + 13],
-            frame[ip_start + 14],
-            frame[ip_start + 15],
-        );
-        let dst_ip = Ipv4Addr::new(
-            frame[ip_start + 16],
-            frame[ip_start + 17],
-            frame[ip_start + 18],
-            frame[ip_start + 19],
-        );
-        let src_port = u16::from_be_bytes([frame[l4_start], frame[l4_start + 1]]);
-        let dst_port = u16::from_be_bytes([frame[l4_start + 2], frame[l4_start + 3]]);
-        let flags = frame[l4_start + 13];
-        let seq = u32::from_be_bytes([
-            frame[l4_start + 4],
-            frame[l4_start + 5],
-            frame[l4_start + 6],
-            frame[l4_start + 7],
-        ]);
-        let ack = u32::from_be_bytes([
-            frame[l4_start + 8],
-            frame[l4_start + 9],
-            frame[l4_start + 10],
-            frame[l4_start + 11],
-        ]);
-
+        let tcp = super::packet::tcp_at(frame, ETH_HEADER_LEN)?;
+        let flags = tcp.flags();
+        let seq = tcp.sequence();
+        let ack = tcp.acknowledgment();
         let key = SynFlowKey {
-            src_ip: src_ip.into(),
-            src_port,
-            dst_ip: dst_ip.into(),
-            dst_port,
+            src_ip: tcp.ip().source(),
+            src_port: tcp.source_port(),
+            dst_ip: tcp.ip().destination(),
+            dst_port: tcp.destination_port(),
         };
         let conn = self.handshake_conns.get(&key)?;
 
@@ -498,7 +444,7 @@ impl TcpBridge {
                 // Capture guest ISN from their SYN-ACK.
                 let guest_isn = seq;
                 // Mirror their options back so we can promote with sane state.
-                let peer_opts = crate::ethernet::parse_tcp_syn_options(&frame[l4_start..]);
+                let peer_opts = crate::ethernet::parse_tcp_syn_options(tcp.segment());
 
                 let mut conn = self.handshake_conns.remove(&key)?;
                 conn.peer_isn = guest_isn;

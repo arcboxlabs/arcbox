@@ -4,6 +4,7 @@ use crate::ethernet::ETH_HEADER_LEN;
 mod handshake_payload;
 mod ipv6_download;
 mod ipv6_fast_path;
+mod ipv6_handshake;
 mod link_mss;
 mod read_batch;
 mod upload_backpressure;
