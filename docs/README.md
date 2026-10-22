@@ -94,6 +94,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Format HTTP CONNECT IPv6 authorities](logs/2026-10-22-http-connect-ipv6-authority.md)
 - [2026-10-22 — Preserve IPv6 DNS resolution records](logs/2026-10-22-ipv6-dns-resolution-log.md)
 - [2026-10-19 — Align Clippy configuration with Rust 1.96](logs/2026-10-19-pinned-clippy.md)
 - [2026-10-12 — Passive-open completion preserves payload and receive window](logs/2026-10-12-passive-open-payload.md)
