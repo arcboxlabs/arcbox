@@ -437,3 +437,20 @@ Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and reco
 | data1400 | ip | 48.078 | 47.721 | -0.74% |
 
 The production change widens SYN metadata to `IpAddr`. Only SYN retention changes its allocation layout. Data cases retain the same behavior and expose compiler-layout and timing variation. These measurements do not establish socket or native tunnel throughput.
+
+## 2026-10-22 — Shared classifier parsing
+
+Compare `1b7726be` with this commit using the [classifier benchmark method](#2026-10-22--classifier-address-types). Both snapshots use the same driver, separate fresh release build directories, and baseline/candidate/candidate/baseline execution order. Compiler logs and dependency files identify each source. Each cell pools 14 IPv4 samples from the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0.
+
+| Mode | Entry | Baseline ns/frame | Candidate ns/frame | Difference ns/frame |
+|---|---|---:|---:|---:|
+| syn | ethernet | 35.733 | 37.460 | +1.727 |
+| syn | ip | 34.447 | 37.175 | +2.728 |
+| data64 | ethernet | 11.248 | 12.851 | +1.602 |
+| data64 | ip | 11.880 | 13.300 | +1.421 |
+| data1400 | ethernet | 47.602 | 48.968 | +1.365 |
+| data1400 | ip | 48.100 | 49.574 | +1.473 |
+
+The old classifier read a few fixed header fields and retained incomplete TCP segments. The candidate validates declared IP lengths, fragmentation, complete TCP header bounds, and UDP lengths before retaining bytes. The benchmark includes that fixed validation cost, allocation or pool operations, queue draining, and byte assertions. No socket or native tunnel throughput claim follows from this table.
+
+The pooled differences are +1.366 to +2.728 ns/frame. Baseline SYN run medians changed from 33.831 to 37.800 ns for Ethernet and from 32.945 to 35.695 ns for bare IP; candidate medians lie within or near those ranges. Timing variation therefore prevents attributing the full SYN difference to validation. The 64-byte data run medians were 11.162–11.249 ns baseline and 12.748–13.172 ns candidate for Ethernet, and 11.750–12.249 ns baseline and 13.289–13.315 ns candidate for bare IP.

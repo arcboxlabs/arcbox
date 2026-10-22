@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use arcbox_datapath::FrameBuf;
 use arcbox_datapath::pool::PacketPool;
+use arcbox_packet::ip::{IpPacketView, TcpPacketView};
 
 use crate::ethernet::{ArpResponder, ETH_HEADER_LEN};
 use crate::fragment::FragmentReassembler;
@@ -312,7 +313,11 @@ impl FrameClassifier {
             }
             // IPv4 → classify by protocol
             0x0800 => {
-                self.classify_ipv4(&frame[..ETH_HEADER_LEN], &frame[ETH_HEADER_LEN..]);
+                if let Some(ip) = IpPacketView::parse(&frame[ETH_HEADER_LEN..])
+                    && ip.source().is_ipv4()
+                {
+                    self.classify_ip(&frame[..ETH_HEADER_LEN], ip);
+                }
             }
             // Everything else → drop
             _ => {
@@ -333,123 +338,70 @@ impl FrameClassifier {
             return;
         }
         learn_guest_mac(crate::shim::HOST_MAC, guest_mac);
-        self.classify_ipv4(&crate::shim::synthetic_l2_header(), packet);
+        if let Some(ip) = IpPacketView::parse(packet) {
+            self.classify_ip(&crate::shim::synthetic_l2_header(), ip);
+        }
     }
 
-    /// Classifies an IPv4 frame by L4 protocol.
-    fn classify_ipv4(&mut self, header: &[u8], packet: &[u8]) {
-        if packet.len() < 20 {
-            return;
-        }
-
-        let protocol = packet[9];
-        let ihl = ((packet[0] & 0x0F) as usize) * 4;
-        let l4_start = ihl;
-
-        // Reject a malformed IPv4 header: version must be 4 and IHL ≥ 20. A
-        // smaller IHL collapses l4_start into the IP header, so the 'TCP'
-        // fields below would be read from attacker-controlled header bytes.
-        if ihl < 20 || (packet[0] >> 4) != 4 {
-            return;
-        }
-
-        // A fragment (MF set or nonzero offset) carries at most a partial L4
-        // datagram, and downstream consumers parse one datagram per frame —
-        // reassemble first (ABX-429). A completed datagram re-enters here
-        // with its fragment field cleared.
-        let flags_frag = u16::from_be_bytes([packet[6], packet[7]]);
-        if flags_frag & 0x3FFF != 0 {
+    /// Classifies a structurally valid IP packet by its transport protocol.
+    fn classify_ip(&mut self, header: &[u8], ip: IpPacketView<'_>) {
+        let packet = ip.packet();
+        if ip.fragment().is_some() {
             if let Some(reassembled) = self
                 .reassembler
                 .push(&[header, packet].concat(), std::time::Instant::now())
+                && let Some(ip) = IpPacketView::parse(&reassembled[ETH_HEADER_LEN..])
             {
-                self.classify_ipv4(
-                    &reassembled[..ETH_HEADER_LEN],
-                    &reassembled[ETH_HEADER_LEN..],
-                );
+                self.classify_ip(&reassembled[..ETH_HEADER_LEN], ip);
             }
             return;
         }
-
-        match protocol {
+        match ip.protocol() {
             PROTO_TCP => {
-                if l4_start + 14 <= packet.len() {
-                    let dst_port = u16::from_be_bytes([packet[l4_start + 2], packet[l4_start + 3]]);
-                    let src_port = u16::from_be_bytes([packet[l4_start], packet[l4_start + 1]]);
-                    let flags = packet[l4_start + 13];
-                    let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-                    let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-                    tracing::debug!(
-                        "TCP frame: {src_ip}:{src_port} → {dst_ip}:{dst_port} flags={flags:#04x} len={}",
-                        ETH_HEADER_LEN + packet.len()
-                    );
-                    // SYN without ACK = new outbound connection attempt — gate it.
-                    if flags & 0x02 != 0 && flags & 0x10 == 0 {
-                        let syn_seq = u32::from_be_bytes([
-                            packet[l4_start + 4],
-                            packet[l4_start + 5],
-                            packet[l4_start + 6],
-                            packet[l4_start + 7],
-                        ]);
-                        tracing::debug!(
-                            "TCP SYN gated: {src_ip}:{src_port} → {dst_ip}:{dst_port} \
-                             dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} frame_len={}",
-                            header[0],
-                            header[1],
-                            header[2],
-                            header[3],
-                            header[4],
-                            header[5],
-                            ETH_HEADER_LEN + packet.len(),
-                        );
-                        // SYN frames are rare (once per connection) — converting to
-                        // Vec is negligible. TcpSynInfo.frame stays Vec<u8> because
-                        // it's later injected back via inject_rx().
-                        self.gated_syns.push(TcpSynInfo {
-                            dst_port,
-                            src_ip: src_ip.into(),
-                            src_port,
-                            dst_ip: dst_ip.into(),
-                            syn_seq,
-                            frame: [header, packet].concat(),
-                        });
-                        return;
-                    }
+                let Some(tcp) = TcpPacketView::parse(ip) else {
+                    return;
+                };
+                if tcp.flags() & 0x12 == 0x02 {
+                    self.gated_syns.push(TcpSynInfo {
+                        src_ip: ip.source(),
+                        dst_ip: ip.destination(),
+                        src_port: tcp.source_port(),
+                        dst_port: tcp.destination_port(),
+                        syn_seq: tcp.sequence(),
+                        frame: [header, packet].concat(),
+                    });
+                } else {
+                    self.rx_queue
+                        .push_back(FrameBuf::from_pool_with_prefix(&self.pool, header, packet));
                 }
-                // Retained for the fast-path / handshake drains: copy into a
-                // pooled buffer the queue can own.
-                let buf = FrameBuf::from_pool_with_prefix(&self.pool, header, packet);
-                self.rx_queue.push_back(buf);
             }
-            // UDP → check for DHCP/DNS interception
             PROTO_UDP => {
-                if l4_start + 8 <= packet.len() {
-                    let dst_port = u16::from_be_bytes([packet[l4_start + 2], packet[l4_start + 3]]);
-                    let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-
-                    let kind = if dst_port == 67 {
-                        InterceptedKind::Dhcp
-                    } else if dst_port == 53 && dst_ip == self.gateway_ip {
-                        InterceptedKind::Dns
-                    } else {
-                        InterceptedKind::Udp
-                    };
-
-                    let buf = FrameBuf::from_pool_with_prefix(&self.pool, header, packet);
-                    self.intercepted.push(InterceptedFrame { frame: buf, kind });
+                let Some(udp) = ip.transport().filter(|bytes| bytes.len() >= 8) else {
+                    return;
+                };
+                let length = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+                if length < 8 || length > udp.len() {
+                    return;
                 }
+                let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+                let kind = if dst_port == 67 && ip.destination().is_ipv4() {
+                    InterceptedKind::Dhcp
+                } else if dst_port == 53 && ip.destination() == IpAddr::V4(self.gateway_ip) {
+                    InterceptedKind::Dns
+                } else {
+                    InterceptedKind::Udp
+                };
+                let frame = FrameBuf::from_pool_with_prefix(&self.pool, header, packet);
+                self.intercepted.push(InterceptedFrame { frame, kind });
             }
-            // ICMP → intercept
-            PROTO_ICMP => {
-                let buf = FrameBuf::from_pool_with_prefix(&self.pool, header, packet);
+            PROTO_ICMP if ip.source().is_ipv4() => {
+                let frame = FrameBuf::from_pool_with_prefix(&self.pool, header, packet);
                 self.intercepted.push(InterceptedFrame {
-                    frame: buf,
+                    frame,
                     kind: InterceptedKind::Icmp,
                 });
             }
-            _ => {
-                tracing::debug!("Dropping IPv4 protocol {}", protocol);
-            }
+            _ => {}
         }
     }
 }
@@ -536,7 +488,7 @@ mod tests {
         frame
     }
 
-    /// Builds a minimal TCP SYN frame for testing.
+    /// Builds a minimal TCP frame for testing.
     fn make_tcp_frame() -> Vec<u8> {
         let mut frame = vec![0u8; ETH_HEADER_LEN + 40];
         let guest_mac = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
@@ -551,6 +503,7 @@ mod tests {
         frame[ip + 9] = PROTO_TCP;
         frame[ip + 12..ip + 16].copy_from_slice(&[192, 168, 64, 2]);
         frame[ip + 16..ip + 20].copy_from_slice(&[1, 1, 1, 1]);
+        frame[ip + 20 + 12] = 0x50;
         frame
     }
 
