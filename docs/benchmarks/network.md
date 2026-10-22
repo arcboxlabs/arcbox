@@ -420,3 +420,20 @@ Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and reco
 IPv4 already coalesced uploads; its comparison measures the shared parser and complete endpoint checks plus socket and scheduling variation. The IPv6 baseline processes every packet separately. The candidate can process all 32 packets in one vectored write and one ACK when the socket accepts the batch.
 
 The final run records 90.55% and 90.63% lower IPv6 32-packet times. IPv4 32-packet times increase by 0.50% and 0.79%. Single-packet times increase by 0.66% to 3.12% (52 to 244 ns); socket and scheduling variation prevent attributing those differences solely to parsing. An earlier snapshot reparsed the first packet and recorded an 8.42% IPv4 Ethernet single-packet increase. The final implementation reuses the validated first view. The baseline single-packet times also changed between runs, so the measurements do not isolate the performance benefit of removing that parse.
+
+## 2026-10-22 — Classifier address types
+
+Compare `e0ff997d` with this commit using identical `common/splicetcp/examples/classifier_bench.rs` drivers. Build through `devenv shell -- cargo build --locked -p splicetcp --example classifier_bench --release`. Use separate initially absent `CARGO_TARGET_DIR` directories. Compiler logs and dependency files identify both snapshots. Execute baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and records seven samples per case. Each sample classifies and drains 100,000 IPv4 frames, with four pool slots and one queued frame at a time. Construction is outside timing. Timing includes SYN allocation or pooled data copies, queue draining, and retained-byte assertions. The table pools 14 samples. The driver supports an `ipv6` argument for later activation; this batch measures IPv4 only.
+
+| Mode | Entry | Baseline ns/frame | Candidate ns/frame | Difference |
+|---|---|---:|---:|---:|
+| syn | ethernet | 36.288 | 39.809 | +9.70% |
+| syn | ip | 30.506 | 33.521 | +9.88% |
+| data64 | ethernet | 11.657 | 11.639 | -0.15% |
+| data64 | ip | 12.268 | 12.286 | +0.15% |
+| data1400 | ethernet | 46.336 | 47.385 | +2.26% |
+| data1400 | ip | 48.078 | 47.721 | -0.74% |
+
+The production change widens SYN metadata to `IpAddr`. Only SYN retention changes its allocation layout. Data cases retain the same behavior and expose compiler-layout and timing variation. These measurements do not establish socket or native tunnel throughput.

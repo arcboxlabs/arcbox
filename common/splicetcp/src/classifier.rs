@@ -16,7 +16,7 @@
 //! module is purely a demultiplexer.
 
 use std::collections::VecDeque;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use arcbox_datapath::FrameBuf;
@@ -50,9 +50,9 @@ const PROTO_UDP: u8 = 17;
 #[derive(Debug, Clone)]
 pub struct TcpSynInfo {
     pub dst_port: u16,
-    pub src_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
     pub src_port: u16,
-    pub dst_ip: Ipv4Addr,
+    pub dst_ip: IpAddr,
     pub syn_seq: u32,
     pub frame: Vec<u8>,
 }
@@ -407,9 +407,9 @@ impl FrameClassifier {
                         // it's later injected back via inject_rx().
                         self.gated_syns.push(TcpSynInfo {
                             dst_port,
-                            src_ip,
+                            src_ip: src_ip.into(),
                             src_port,
-                            dst_ip,
+                            dst_ip: dst_ip.into(),
                             syn_seq,
                             frame: [header, packet].concat(),
                         });

@@ -64,7 +64,7 @@ fn l3_classification_retains_mixed_protocol_bytes_and_order() {
             gated.dst_port,
             gated.syn_seq
         ),
-        (HOST, GATEWAY, 40000, 443, 1234)
+        (HOST.into(), GATEWAY.into(), 40000, 443, 1234)
     );
     assert_eq!(gated.frame, syn);
     let kinds = [

@@ -208,3 +208,5 @@ The default egress resolver accepts IPv6 system-proxy endpoint addresses. HTTP, 
 The internal `tcp_bridge::segmentation` module shares download and retransmission frame construction. The `tcp_bridge_bench` example measures established ACK handling and polled downloads through public bridge APIs with 1 or 64 active flows.
 
 The `tcp_upload_bench` example compares single-packet and 32-packet uploads through Ethernet and bare-IP APIs for both families. Timing includes encoding, socket writes, ACK parsing, peer reads, and payload validation; connection setup is excluded.
+
+`TcpSynInfo` stores both endpoints as `IpAddr`. Classifier dispatch remains IPv4-only until shared parsing and IPv6 dispatch are connected. The `classifier_bench` example measures classification, retained-frame copies, queue draining, and byte validation through both Ethernet and bare-IP APIs.
