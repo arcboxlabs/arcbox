@@ -259,6 +259,8 @@ The point estimate improves by 3.4%, but the intervals overlap. This single sequ
 
 ## 2026-10-22 — Shared TCP frame encoding
 
+Correction: the original comparison reused one Cargo build directory and did not recompile the candidate. The original values below do not compare the two revisions. Use the independent-build correction later in this document.
+
 Compare the data-frame builder at `5a8c5d66` with the commit containing this entry. Both checkouts use the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`, then execute each resulting benchmark binary. Run order: baseline, candidate, candidate, baseline. Each execution contains seven rounds per payload and checksum mode; the table pools 14 samples per implementation.
 
 Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. The benchmark includes allocation, header writes, payload copying, checksums, and deallocation. The original App and NE remain running; their binding is checked before and after the measurement.
@@ -277,6 +279,8 @@ The full-checksum medians range from 6.3% faster to 5.6% slower. The 1460-byte c
 
 ## 2026-10-22 — IPv6-capable TCP frame encoder
 
+Correction: the original comparison reused one Cargo build directory and did not recompile the candidate. The original values below do not compare the two revisions. Use the independent-build correction later in this document.
+
 Compare `2001d081` with the commit containing this entry using the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build both with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`. Execute the resulting binaries in baseline, candidate, candidate, baseline order. The table pools 14 samples per implementation from two executions of seven rounds. The benchmark uses IPv4 inputs to measure the effect on existing callers.
 
 Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. Original App and NE bindings are checked before and after execution.
@@ -292,3 +296,46 @@ Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rus
 | 65495 | 1604.738 | 1628.648 | +1.5% |
 
 Full-checksum median changes range from -3.7% to +4.5%. These measurements include allocation, frame initialization, payload copies, and checksums. They do not measure IPv6 throughput or establish a native application performance improvement.
+
+## 2026-10-22 — TCP options in the shared frame encoder
+
+Compare `ecc02b43` with the commit containing this entry using the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build both with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`. Use a fresh and separate `CARGO_TARGET_DIR` for each source snapshot. Execute the binaries in baseline, candidate, candidate, baseline order. Each table value pools 14 samples from two executions of seven rounds. IPv4 data inputs measure the effect on existing callers; the benchmark does not measure handshake throughput.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. Original App and NE bindings are checked before and after execution.
+
+| IPv4 payload bytes | Baseline full checksum ns/frame | Encoder with options ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 11.843 | 13.106 | +10.7% |
+| 1 | 12.725 | 12.788 | +0.5% |
+| 64 | 13.587 | 13.779 | +1.4% |
+| 1460 | 36.974 | 37.874 | +2.4% |
+| 3960 | 89.021 | 89.242 | +0.2% |
+| 32768 | 2525.008 | 747.298 | -70.4% |
+| 65495 | 1617.079 | 1616.706 | -0.0% |
+
+Full-checksum median changes range from -70.4% to +10.7%. The measurements include allocation, frame initialization, payload copies, and checksums. An earlier run reused one build directory and produced identical binaries without recompiling the candidate; that run is excluded from this comparison. They do not establish a native application throughput improvement.
+
+The SYN comparison has run-to-run variation: the baseline median for 32768-byte payloads changed from 731.717 to 4331.929 ns between executions. The pooled decrease at this payload size is not evidence of an encoder speedup. The zero-payload candidate median increased by 1.264 ns; the 1460-byte median increased by 0.900 ns.
+
+## 2026-10-22 — Independent-build corrections for TCP frame comparisons
+
+The two original comparisons above produced identical baseline and candidate binaries, and the candidate build logs contained no compilation. Their performance conclusions are withdrawn. Each corrected build uses a fresh, separate `CARGO_TARGET_DIR`; verbose compiler logs and dependency files identify the source snapshot. The unchanged benchmark runs in baseline, candidate, candidate, baseline order on the same dedicated test Mac. Each value pools 14 samples. Source and original App/NE bindings remained unchanged.
+
+| Change | Payload bytes | Baseline ns/frame | Candidate ns/frame | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Shared IPv4 encoder | 0 | 12.690 | 12.599 | -0.7% |
+| Shared IPv4 encoder | 1 | 12.797 | 13.133 | +2.6% |
+| Shared IPv4 encoder | 64 | 13.493 | 13.780 | +2.1% |
+| Shared IPv4 encoder | 1460 | 36.243 | 37.197 | +2.6% |
+| Shared IPv4 encoder | 3960 | 88.124 | 89.240 | +1.3% |
+| Shared IPv4 encoder | 32768 | 746.370 | 730.982 | -2.1% |
+| Shared IPv4 encoder | 65495 | 1581.741 | 1615.075 | +2.1% |
+| IPv6-capable encoder | 0 | 12.155 | 12.070 | -0.7% |
+| IPv6-capable encoder | 1 | 12.995 | 13.036 | +0.3% |
+| IPv6-capable encoder | 64 | 13.633 | 13.978 | +2.5% |
+| IPv6-capable encoder | 1460 | 37.075 | 37.935 | +2.3% |
+| IPv6-capable encoder | 3960 | 87.525 | 89.542 | +2.3% |
+| IPv6-capable encoder | 32768 | 731.844 | 734.985 | +0.4% |
+| IPv6-capable encoder | 65495 | 1610.253 | 1617.429 | +0.4% |
+
+The corrected measurements include run-to-run variation and establish neither a consistent speedup nor native application throughput. The functional packet regressions are independent of these microbenchmarks.

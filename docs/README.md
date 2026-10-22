@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — IPv4 and IPv6 TCP SYN frames](logs/2026-10-22-ipv4-ipv6-tcp-syn-frames.md)
 - [2026-10-22 — IPv6 TCP control and data frames](logs/2026-10-22-ipv6-tcp-control-data-frames.md)
 - [2026-10-22 — Shared TCP frame encoding](logs/2026-10-22-shared-tcp-frame-encoding.md)
 - [2026-10-22 — Borrowed TCP packet views](logs/2026-10-22-borrowed-tcp-packet-views.md)

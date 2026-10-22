@@ -217,3 +217,74 @@ fn tcp_frame_rejects_mixed_address_families() {
     };
     let _ = crate::ethernet::build_tcp_ack_frame(&mixed);
 }
+
+#[test]
+fn syn_frames_preserve_options_fields_and_checksums() {
+    use crate::ethernet::*;
+
+    let v6 = ipv6_frame_params();
+    for (src_ip, dst_ip) in [
+        (IpAddr::from(v6.src_ip), IpAddr::from(v6.dst_ip)),
+        ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()),
+    ] {
+        for (wscale, sack_permitted, options) in [
+            (None, false, &[2, 4, 5, 160][..]),
+            (None, true, &[2, 4, 5, 160, 4, 2, 1, 1][..]),
+            (Some(0), false, &[2, 4, 5, 160, 3, 3, 0, 1][..]),
+            (Some(14), true, &[2, 4, 5, 160, 4, 2, 3, 3, 14, 1, 1, 1][..]),
+        ] {
+            let p = SynAckParams {
+                src_ip,
+                dst_ip,
+                src_port: 80,
+                dst_port: 40000,
+                seq: 0x12345678,
+                ack: 0xfedcba98,
+                src_mac: [1; 6],
+                dst_mac: [2; 6],
+                mss: 1440,
+                wscale,
+                sack_permitted,
+            };
+            let active = SynParams {
+                src_ip,
+                dst_ip,
+                src_port: p.src_port,
+                dst_port: p.dst_port,
+                seq: p.seq,
+                src_mac: p.src_mac,
+                dst_mac: p.dst_mac,
+                mss: p.mss,
+                wscale,
+                sack_permitted,
+            };
+            for (frame, flags, ack) in [
+                (build_tcp_syn_frame(&active), 0x02, 0u32),
+                (build_tcp_syn_ack_frame(&p), 0x12, 0xfedcba98),
+            ] {
+                assert_eq!(&frame[..12], &[2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]);
+                let ip = &frame[14..];
+                let ip_len = if src_ip.is_ipv6() { 40 } else { 20 };
+                let tcp = &ip[ip_len..];
+                assert_eq!(tcp.len(), 20 + options.len());
+                assert_eq!(&tcp[..8], &[0, 80, 0x9c, 0x40, 0x12, 0x34, 0x56, 0x78]);
+                assert_eq!(&tcp[8..12], &ack.to_be_bytes());
+                assert_eq!(usize::from(tcp[12] >> 4) * 4, tcp.len());
+                assert_eq!(&tcp[13..16], &[flags, 255, 255]);
+                assert_eq!(&tcp[18..20], &[0, 0]);
+                assert_eq!(&tcp[20..], options);
+                if src_ip.is_ipv6() {
+                    assert_eq!(&frame[12..14], &[0x86, 0xdd]);
+                    assert_eq!(usize::from(u16::from_be_bytes([ip[4], ip[5]])), tcp.len());
+                    verify_v6(ip, tcp);
+                } else {
+                    assert_eq!(&frame[12..14], &[8, 0]);
+                    assert_eq!(usize::from(u16::from_be_bytes([ip[2], ip[3]])), ip.len());
+                    assert_eq!(folded_sum(&[&ip[..20]]), 0xffff);
+                    let length = (tcp.len() as u16).to_be_bytes();
+                    assert_eq!(folded_sum(&[&ip[12..20], &[0, 6], &length, tcp]), 0xffff);
+                }
+            }
+        }
+    }
+}
