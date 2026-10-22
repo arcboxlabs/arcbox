@@ -6,7 +6,7 @@ fn key() -> SynFlowKey {
     SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40300,
-        dst_ip: Ipv4Addr::new(198, 18, 31, 1),
+        dst_ip: Ipv4Addr::new(198, 18, 31, 1).into(),
         dst_port: 443,
     }
 }

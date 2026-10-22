@@ -31,7 +31,8 @@
 //!   under concurrency.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant as StdInstant;
 
 use tokio::sync::oneshot;
@@ -194,12 +195,23 @@ pub(super) fn next_isn() -> u32 {
 }
 
 /// Full four-tuple key for deduplicating SYN gate entries and fast-path lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SynFlowKey {
-    src_ip: Ipv4Addr,
+    src_ip: IpAddr,
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: IpAddr,
     dst_port: u16,
+}
+
+impl Hash for SynFlowKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // IPv4 keys retain their compact hash input without two redundant family tags.
+        if let (IpAddr::V4(src), IpAddr::V4(dst)) = (self.src_ip, self.dst_ip) {
+            (src, self.src_port, dst, self.dst_port).hash(state);
+        } else {
+            (self.src_ip, self.src_port, self.dst_ip, self.dst_port).hash(state);
+        }
+    }
 }
 
 /// Role of a TCP connection whose handshake is being synthesized in-shim.
@@ -324,9 +336,9 @@ pub(super) struct FastPathConn {
     /// Updated by try_fast_path_intercept when guest ACKs arrive.
     last_ack_shared: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
     /// Remote IP as seen by the guest.
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     /// Guest IP.
-    guest_ip: Ipv4Addr,
+    guest_ip: IpAddr,
     /// Remote port as seen by the guest.
     remote_port: u16,
     /// Guest port.

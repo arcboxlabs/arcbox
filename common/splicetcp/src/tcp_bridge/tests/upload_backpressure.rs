@@ -60,7 +60,7 @@ async fn check_upload_multi_hole_burst(segment_size: usize) {
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40040,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 108),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 108).into(),
         dst_port: 443,
     };
     let mut server = fast_path_pair(&mut bridge, key, base).await;
@@ -147,7 +147,7 @@ async fn upload_ooo_insert_preserves_partially_written_front() {
         let key = SynFlowKey {
             src_ip: GUEST_IP,
             src_port: 40036,
-            dst_ip,
+            dst_ip: dst_ip.into(),
             dst_port: 443,
         };
         let (mut server, oversized) = limited_fast_path_pair(&mut bridge, key, base).await;
@@ -217,7 +217,7 @@ async fn poll_drains_upload_after_host_backpressure() {
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40037,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let base = 2000u32;
@@ -289,7 +289,7 @@ async fn poll_recovers_in_order_upload_tails() {
         let key = SynFlowKey {
             src_ip: GUEST_IP,
             src_port: 40038,
-            dst_ip: Ipv4Addr::new(198, 18, 30, 106),
+            dst_ip: Ipv4Addr::new(198, 18, 30, 106).into(),
             dst_port: 443,
         };
         let base = 2000u32;
@@ -397,7 +397,7 @@ async fn upload_contiguous_tail_takes_priority_at_both_caps() {
         let key = SynFlowKey {
             src_ip: GUEST_IP,
             src_port: 40039,
-            dst_ip: Ipv4Addr::new(198, 18, 30, 107),
+            dst_ip: Ipv4Addr::new(198, 18, 30, 107).into(),
             dst_port: 443,
         };
         let _server = fast_path_pair(&mut bridge, key, 2000).await;

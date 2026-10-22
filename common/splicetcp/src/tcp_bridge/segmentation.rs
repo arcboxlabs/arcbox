@@ -1,7 +1,8 @@
-//! Encode download and retransmission segments within the configured link budget.
+//! Build family-aware download and retransmission frames within the link MTU.
 
 use super::{FastPathConn, GSO_SEGMENT_MSS, TCP_MIN_MSS};
 use crate::ethernet::ETH_HEADER_LEN;
+use std::net::IpAddr;
 
 /// Frame-construction context shared by the first-transmission and
 /// retransmission paths of `poll_fast_path`.
@@ -13,7 +14,7 @@ pub(super) struct FrameCtx {
 }
 
 /// Builds guest-bound TCP data frames for `data` starting at `seq_start`:
-/// one GSO-style frame when enabled and the peer accepts 1460-byte
+/// one IPv4 GSO-style frame when enabled and the peer accepts 1460-byte
 /// segments, MSS-clamped segmentation otherwise (each emitted IP packet
 /// must fit every link on the path — e.g. a 1500-MTU docker bridge behind
 /// a 4000-MTU eth0). Does NOT advance `conn.our_seq` — retransmissions
@@ -25,11 +26,14 @@ pub(super) fn emit_data_frames(
     data: &[u8],
     frames: &mut Vec<Vec<u8>>,
 ) {
-    if ctx.large_frames && conn.peer_mss >= GSO_SEGMENT_MSS {
+    if let (IpAddr::V4(remote_ip), IpAddr::V4(guest_ip)) = (conn.remote_ip, conn.guest_ip)
+        && ctx.large_frames
+        && conn.peer_mss >= GSO_SEGMENT_MSS
+    {
         let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
         let params = crate::ethernet::TcpFrameParams {
-            src_ip: conn.remote_ip,
-            dst_ip: conn.guest_ip,
+            src_ip: remote_ip,
+            dst_ip: guest_ip,
             src_port: conn.remote_port,
             dst_port: conn.guest_port,
             seq: seq_start,
@@ -45,9 +49,12 @@ pub(super) fn emit_data_frames(
         });
         return;
     }
-    let seg = ctx
-        .guest_mss
-        .min(usize::from(conn.peer_mss.max(TCP_MIN_MSS)));
+    let peer_mss = if conn.guest_ip.is_ipv6() {
+        conn.peer_mss.max(1)
+    } else {
+        conn.peer_mss.max(TCP_MIN_MSS)
+    };
+    let seg = family_mss(conn.guest_ip, ctx.guest_mss).min(usize::from(peer_mss));
     let mut offset = 0;
     while offset < data.len() {
         let chunk_end = (offset + seg).min(data.len());
@@ -66,5 +73,13 @@ pub(super) fn emit_data_frames(
             &data[offset..chunk_end],
         ));
         offset = chunk_end;
+    }
+}
+
+fn family_mss(ip: IpAddr, ipv4_mss: usize) -> usize {
+    if ip.is_ipv6() {
+        ipv4_mss.saturating_sub(20).max(1)
+    } else {
+        ipv4_mss
     }
 }

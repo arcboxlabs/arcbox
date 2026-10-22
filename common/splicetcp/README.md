@@ -79,7 +79,7 @@ the caller must keep polling while fast-path connections are active.
 Each poll reads at most once per connection, up to 128 KiB within the guest's
 available receive window. The bridge segments these bytes by the peer MSS and
 configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits
-one IPv4 frame.
+one IPv4 frame when the peer accepts GSO segments. IPv6 downloads always use normal segmentation with 20 fewer payload bytes than the IPv4 link budget and the peer MSS as an upper bound.
 
 `TcpBridge::set_fast_path_mtu` also sets the MSS advertised in new guest-facing
 handshakes. An MTU of 4000 advertises MSS 3960, so uploads can use the link's full
@@ -133,6 +133,7 @@ Important constraints:
 
 - `send_conn` must be called from within a Tokio runtime; accepted connections
   are driven by `tokio::spawn`.
+- `PromotedConn` and inline sinks carry IPv4 endpoints. IPv6 flows remain on the polled path.
 - The Tokio sink emits segmented, standard-MTU-style TCP data frames and does
   not support `TcpBridge::enable_large_frames()`.
 - If the sink rejects a connection, `TcpBridge` keeps that connection on the
@@ -147,7 +148,7 @@ The internal SYN rejection encoder validates IP/TCP structure and matching Ether
 
 ## Egress addresses
 
-`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. The TCP bridge currently constructs IPv4 flow metadata; its IPv6 packet path remains pending.
+`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Handshake and established-input parsing still accept IPv4, so end-to-end IPv6 dispatch remains pending.
 
 ## Managed native sockets
 

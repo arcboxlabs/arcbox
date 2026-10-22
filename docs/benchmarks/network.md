@@ -369,3 +369,18 @@ Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process 
 | download | 64 | 21397.131 | 20968.273 | -2.00% |
 
 The production change moves the same encoder body to an internal module. Differences include compiler layout and host scheduling variation; download timings also include socket and validation costs. These measurements establish the baseline for the next address-family migration.
+
+## 2026-10-22 — TCP bridge address families
+
+Compare `56fc9bd7` with the commit containing this entry using the [TCP bridge benchmark method](#2026-10-22--tcp-segmentation-extraction). Both snapshots use the same checked-in driver, separate fresh release build directories, and baseline/candidate/candidate/baseline execution order. Compiler logs and dependency files identify each snapshot. Each cell pools 14 samples on the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0. The traffic is IPv4; IPv6 correctness is checked separately by the socket-backed library test.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 28.498 | 21.820 | -23.43% |
+| ack | 64 | 24.814 | 22.928 | -7.60% |
+| download | 1 | 5964.004 | 4986.370 | -16.39% |
+| download | 64 | 19799.879 | 18773.054 | -5.19% |
+
+The initial derived-hash candidate increased pure ACK time by 16.98% with one flow and 25.84% with 64 flows while download times remained within 0.2%. The final candidate keeps `IpAddr` storage but hashes IPv4 endpoints as the original compact four-tuple. Non-IPv4 keys retain their address-family tags, and the standard randomized hasher is unchanged. The table reports a new paired run after that correction. Address-family checks still select frame encoding. Pure ACK operations expose lookup and dispatch costs. Download operations also include socket I/O, scanning active flows, output parsing, and content validation. These measurements do not establish native tunnel throughput.
+
+The final candidate's two pure ACK run medians were 21.790/21.845 ns with one flow and 23.053/22.925 ns with 64 flows. Baseline single-flow download medians varied from 7118.446 to 4950.142 ns between runs; candidate medians were 4946.425 and 5030.133 ns. That baseline variation prevents attributing the pooled download difference to the code change.

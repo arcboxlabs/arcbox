@@ -64,9 +64,9 @@ impl TcpBridge {
         ]);
 
         let key = SynFlowKey {
-            src_ip,
+            src_ip: src_ip.into(),
             src_port,
-            dst_ip,
+            dst_ip: dst_ip.into(),
             dst_port,
         };
 
@@ -436,9 +436,9 @@ impl TcpBridge {
         ]);
 
         let key = SynFlowKey {
-            src_ip,
+            src_ip: src_ip.into(),
             src_port,
-            dst_ip,
+            dst_ip: dst_ip.into(),
             dst_port,
         };
         let conn = self.handshake_conns.get(&key)?;

@@ -27,7 +27,7 @@ impl PendingFlow {
             let key = SynFlowKey {
                 src_ip: GUEST_IP,
                 src_port: 40400,
-                dst_ip: Ipv4Addr::LOCALHOST,
+                dst_ip: Ipv4Addr::LOCALHOST.into(),
                 dst_port: listener.local_addr().unwrap().port(),
             };
             let mut bridge = TcpBridge::new(GW_IP);

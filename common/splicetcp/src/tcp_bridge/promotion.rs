@@ -61,7 +61,10 @@ impl TcpBridge {
         let inline_eligible = peer_mss >= GSO_SEGMENT_MSS;
         let mut dead: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         let mut retx: Option<crate::direct_rx::RetxRing> = None;
-        if let Some(sink) = self.conn_sink.as_ref().filter(|_| inline_eligible) {
+        if let (std::net::IpAddr::V4(guest_ip), std::net::IpAddr::V4(remote_ip)) =
+            (key.src_ip, key.dst_ip)
+            && let Some(sink) = self.conn_sink.as_ref().filter(|_| inline_eligible)
+        {
             match stream.try_clone() {
                 Ok(cloned) => {
                     let gw_mac = self.fast_path_gateway_mac;
@@ -75,8 +78,8 @@ impl TcpBridge {
                     );
                     let promoted = crate::direct_rx::PromotedConn {
                         stream: cloned,
-                        remote_ip: key.dst_ip,
-                        guest_ip: key.src_ip,
+                        remote_ip,
+                        guest_ip,
                         remote_port: key.dst_port,
                         guest_port: key.src_port,
                         peer_mss,

@@ -44,9 +44,9 @@ impl TcpBridge {
         let flags = frame[l4_start + 13];
 
         let key = SynFlowKey {
-            src_ip,
+            src_ip: src_ip.into(),
             src_port,
-            dst_ip,
+            dst_ip: dst_ip.into(),
             dst_port,
         };
 
@@ -912,9 +912,9 @@ impl TcpBridge {
                     .map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed));
             obs.on_flow_close(
                 crate::egress::FlowKey {
-                    src_ip: key.src_ip.into(),
+                    src_ip: key.src_ip,
                     src_port: key.src_port,
-                    dst_ip: key.dst_ip.into(),
+                    dst_ip: key.dst_ip,
                     dst_port: key.dst_port,
                 },
                 conn.up_bytes,

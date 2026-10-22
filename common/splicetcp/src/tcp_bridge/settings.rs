@@ -90,9 +90,9 @@ impl TcpBridge {
 
         let eph_port = self.allocate_ephemeral();
         let flow_key = SynFlowKey {
-            src_ip: guest_ip,
+            src_ip: guest_ip.into(),
             src_port: container_port,
-            dst_ip: gateway_ip,
+            dst_ip: gateway_ip.into(),
             dst_port: eph_port,
         };
 

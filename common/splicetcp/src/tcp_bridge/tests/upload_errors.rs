@@ -10,7 +10,7 @@ async fn pair_after_host_fin() -> (TcpBridge, SynFlowKey, std::net::TcpStream) {
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40200,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 120),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 120).into(),
         dst_port: 443,
     };
     let mut server = fast_path_pair(&mut bridge, key, 2000).await;
