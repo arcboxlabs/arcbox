@@ -40,6 +40,7 @@ pub struct IpPacketView<'a> {
 
 impl<'a> IpPacketView<'a> {
     /// Parses ordinary IPv4/IPv6 packets; jumbograms and malformed extensions are rejected.
+    #[inline]
     pub fn parse(bytes: &'a [u8]) -> Option<Self> {
         match bytes.first()? >> 4 {
             4 => {
@@ -194,6 +195,7 @@ pub struct TcpPacketView<'a> {
 
 impl<'a> TcpPacketView<'a> {
     /// Parses TCP only after fragment reassembly and IP length validation.
+    #[inline]
     pub fn parse(ip: IpPacketView<'a>) -> Option<Self> {
         if ip.protocol() != 6 {
             return None;

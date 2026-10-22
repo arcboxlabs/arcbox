@@ -384,3 +384,18 @@ Compare `56fc9bd7` with the commit containing this entry using the [TCP bridge b
 The initial derived-hash candidate increased pure ACK time by 16.98% with one flow and 25.84% with 64 flows while download times remained within 0.2%. The final candidate keeps `IpAddr` storage but hashes IPv4 endpoints as the original compact four-tuple. Non-IPv4 keys retain their address-family tags, and the standard randomized hasher is unchanged. The table reports a new paired run after that correction. Address-family checks still select frame encoding. Pure ACK operations expose lookup and dispatch costs. Download operations also include socket I/O, scanning active flows, output parsing, and content validation. These measurements do not establish native tunnel throughput.
 
 The final candidate's two pure ACK run medians were 21.790/21.845 ns with one flow and 23.053/22.925 ns with 64 flows. Baseline single-flow download medians varied from 7118.446 to 4950.142 ns between runs; candidate medians were 4946.425 and 5030.133 ns. That baseline variation prevents attributing the pooled download difference to the code change.
+
+## 2026-10-22 — Established TCP input validation
+
+Compare `27b859ce` with the commit containing this entry using the [TCP bridge benchmark method](#2026-10-22--tcp-segmentation-extraction). Both snapshots use the same driver and separate fresh release build directories. Compiler logs and dependency files identify each snapshot. Execution order is baseline/candidate/candidate/baseline. Each cell pools 14 samples on the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0. Benchmarked traffic is IPv4; IPv6 behavior is covered by the socket-backed regression.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 21.827 | 30.579 | +40.10% |
+| ack | 64 | 22.720 | 31.261 | +37.59% |
+| download | 1 | 6972.965 | 6993.820 | +0.30% |
+| download | 64 | 19308.479 | 19405.408 | +0.50% |
+
+The parser now validates IP version, declared lengths, fragmentation, TCP header bounds, and Ethernet/IP family agreement before accessing connection state. Pure ACK operations expose the fixed parsing cost. Download operations also include socket I/O, active-flow scans, frame encoding, and payload validation. These measurements do not establish native tunnel throughput.
+
+The final parser adds 8.753 ns per pure ACK with one flow and 8.541 ns with 64 flows. An earlier snapshot without the two parsing inline hints measured 10.6–13.3 ns of added ACK cost. The final paired run retains all structural checks; download differences are 0.30% and 0.50%. The ACK microbenchmark records the remaining cost of the added structural checks.

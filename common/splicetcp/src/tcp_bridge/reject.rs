@@ -1,24 +1,12 @@
 //! Validated reset responses for rejected SYN frames.
 
-use arcbox_packet::ip::{IpPacketView, TcpPacketView};
-
-use crate::ethernet::{
-    ETH_HEADER_LEN, EtherType, EthernetHeader, TcpFrameParams, build_tcp_rst_frame,
-};
+use crate::ethernet::{ETH_HEADER_LEN, EthernetHeader, TcpFrameParams, build_tcp_rst_frame};
 
 /// Swaps endpoints and acknowledges the SYN plus its declared payload.
 pub(super) fn build_rst_from_syn(frame: &[u8], gateway_mac: [u8; 6]) -> Option<Vec<u8>> {
     let ethernet = EthernetHeader::parse(frame)?;
-    let ip = IpPacketView::parse(frame.get(ETH_HEADER_LEN..)?)?;
-    let expected = if ip.source().is_ipv6() {
-        EtherType::Ipv6
-    } else {
-        EtherType::Ipv4
-    };
-    if ethernet.ethertype != expected {
-        return None;
-    }
-    let tcp = TcpPacketView::parse(ip)?;
+    let tcp = super::packet::tcp_at(frame, ETH_HEADER_LEN)?;
+    let ip = tcp.ip();
     // Ordinary IP lengths bound the payload below u32::MAX; Ethernet padding is excluded.
     let ack = tcp
         .sequence()
@@ -41,6 +29,7 @@ pub(super) fn build_rst_from_syn(frame: &[u8], gateway_mac: [u8; 6]) -> Option<V
 mod tests {
     use super::*;
     use arcbox_packet::checksum::{checksum_add_scalar, checksum_fold};
+    use arcbox_packet::ip::{IpPacketView, TcpPacketView};
 
     const GATEWAY: [u8; 6] = [2, 0, 0, 0, 0, 1];
     const GUEST: [u8; 6] = [2, 0, 0, 0, 0, 2];

@@ -620,6 +620,7 @@ impl TcpBridge {
 mod fast_path;
 mod handshake;
 mod intercept;
+mod packet;
 mod promotion;
 mod reject;
 mod segmentation;

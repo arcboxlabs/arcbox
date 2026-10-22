@@ -148,7 +148,7 @@ The internal SYN rejection encoder validates IP/TCP structure and matching Ether
 
 ## Egress addresses
 
-`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Handshake and established-input parsing still accept IPv4, so end-to-end IPv6 dispatch remains pending.
+`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Established Ethernet and bare-IP input accepts IPv4 and IPv6 through shared IP/TCP views. Declared lengths exclude padding; truncated headers, incomplete fragments, and mismatched Ethernet/IP families are rejected before flow state changes. IPv6 upload batches currently consume one frame at a time. TCP handshake parsing and classifier dispatch still accept IPv4.
 
 ## Managed native sockets
 
@@ -171,7 +171,7 @@ The `shim` module provides the adapter:
 - `FrameClassifier::classify_ip_packet` accepts bare IPv4 packets from push
   sources. Retained packets receive the synthetic Ethernet header directly in
   their owned buffer. IPv4 fragments use the same reassembler as Ethernet input.
-- `TcpBridge::try_fast_path_intercept_ip_batch` borrows established TCP packets
+- `TcpBridge::try_fast_path_intercept_ip_batch` borrows established IPv4 or IPv6 TCP packets
   for synchronous socket writes, avoiding the classifier's owned-frame copy.
   Callers must drain preceding classifier input before interception to preserve
   handshake and fragment order. SYNs and fragments still use the classifier.
@@ -181,7 +181,7 @@ The `shim` module provides the adapter:
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
   drops ARP or non-IP frames that have no L3 representation.
 
-The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier and TCP bridge still accept IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
+The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier and TCP handshake paths still accept IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
 
 ## Memory and performance notes
 

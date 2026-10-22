@@ -1,6 +1,5 @@
 use super::segmentation::{FrameCtx, emit_data_frames};
 use super::{SynFlowKey, TcpBridge};
-use std::net::Ipv4Addr;
 
 impl TcpBridge {
     pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
@@ -9,44 +8,21 @@ impl TcpBridge {
     ) -> Option<(usize, Vec<u8>)> {
         let frame = frames.first()?.as_ref();
         let mut consumed = 1;
-        if frame.len() < IP_START + 40 {
+        let tcp = super::packet::tcp_at(frame, IP_START)?;
+        if IP_START == 0 && tcp.flags() & 0x02 != 0 {
             return None;
         }
-
         let ip_start = IP_START;
-        let protocol = frame[ip_start + 9];
-        if protocol != 6 {
-            return None; // Not TCP
-        }
-
-        let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
-        let l4_start = ip_start + ihl;
-        // IHL < 20 would collapse l4_start into the IP header, so every TCP
-        // field below (ports, seq/ack, flags) would be read from IP bytes.
-        if ihl < 20 || frame.len() < l4_start + 20 {
-            return None;
-        }
-
-        let src_ip = Ipv4Addr::new(
-            frame[ip_start + 12],
-            frame[ip_start + 13],
-            frame[ip_start + 14],
-            frame[ip_start + 15],
-        );
-        let dst_ip = Ipv4Addr::new(
-            frame[ip_start + 16],
-            frame[ip_start + 17],
-            frame[ip_start + 18],
-            frame[ip_start + 19],
-        );
-        let src_port = u16::from_be_bytes([frame[l4_start], frame[l4_start + 1]]);
-        let dst_port = u16::from_be_bytes([frame[l4_start + 2], frame[l4_start + 3]]);
-        let flags = frame[l4_start + 13];
-
+        let ip_end = ip_start + tcp.ip().packet().len();
+        let src_ip = tcp.ip().source();
+        let dst_ip = tcp.ip().destination();
+        let src_port = tcp.source_port();
+        let dst_port = tcp.destination_port();
+        let flags = tcp.flags();
         let key = SynFlowKey {
-            src_ip: src_ip.into(),
+            src_ip,
             src_port,
-            dst_ip: dst_ip.into(),
+            dst_ip,
             dst_port,
         };
 
@@ -55,12 +31,7 @@ impl TcpBridge {
         // window probe — is its sign of life for the dead-flow reaper.
         conn.last_guest_activity = std::time::Instant::now();
 
-        let guest_seq = u32::from_be_bytes([
-            frame[l4_start + 4],
-            frame[l4_start + 5],
-            frame[l4_start + 6],
-            frame[l4_start + 7],
-        ]);
+        let guest_seq = tcp.sequence();
 
         // FIN or RST → handle teardown ourselves.
         if flags & 0x04 != 0 {
@@ -70,20 +41,11 @@ impl TcpBridge {
             return Some((consumed, Vec::new())); // Intercepted, no reply frame.
         }
 
-        // Extract payload using IPv4 total_length to exclude Ethernet padding.
-        // NOTE: FIN check is deferred until after payload write — RFC 793
-        // allows FIN segments to carry data.
-        let ip_total_len = u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]) as usize;
-        let ip_end = ip_start + ip_total_len;
-        let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
-        // The data offset must cover the 20-byte TCP header; a smaller value
-        // would splice TCP header bytes into the payload written to the host.
-        if tcp_data_offset < 20 || l4_start + tcp_data_offset > frame.len() {
-            return None;
-        }
-        let payload_start = l4_start + tcp_data_offset;
-        let payload_end = ip_end.min(frame.len());
-        let payload_len = payload_end.saturating_sub(payload_start);
+        // IP/TCP views exclude padding and include extension/header lengths.
+        // FIN processing follows payload writes because a FIN can carry data.
+        let payload_len = tcp.payload().len();
+        let payload_end = ip_end;
+        let payload_start = payload_end - payload_len;
 
         // Download flow control: every guest frame carrying ACK updates our
         // view of how much of OUR stream it received and how much receive
@@ -94,12 +56,7 @@ impl TcpBridge {
         // is a duplicate ACK — three of them mean the guest is missing a
         // frame and triggers fast retransmit in `poll_fast_path`.
         if flags & 0x10 != 0 {
-            let guest_ack = u32::from_be_bytes([
-                frame[l4_start + 8],
-                frame[l4_start + 9],
-                frame[l4_start + 10],
-                frame[l4_start + 11],
-            ]);
+            let guest_ack = tcp.acknowledgment();
             let current = conn.guest_acked.load(std::sync::atomic::Ordering::Relaxed);
             let advance = guest_ack.wrapping_sub(current);
             // Reject an ACK beyond what we actually sent (RFC 793: an ACK
@@ -111,10 +68,7 @@ impl TcpBridge {
             let beyond_sent =
                 guest_ack.wrapping_sub(sent) != 0 && guest_ack.wrapping_sub(sent) < 0x8000_0000;
             if advance < 0x8000_0000 && !beyond_sent {
-                let scaled_win = u32::from(u16::from_be_bytes([
-                    frame[l4_start + 14],
-                    frame[l4_start + 15],
-                ])) << conn.guest_wscale;
+                let scaled_win = u32::from(tcp.window()) << conn.guest_wscale;
                 // FIN|SYN|RST all clear — `trailing_zeros` (clippy's
                 // suggestion) would obscure that this is a flag test.
                 let plain_ack = flags & (0x01 | 0x02 | 0x04) == 0;
