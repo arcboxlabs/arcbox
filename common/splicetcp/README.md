@@ -143,6 +143,8 @@ buffer. The bridge reuses this buffer across connections and keeps it until
 the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
 does not allocate this buffer.
 
+The internal SYN rejection encoder validates IP/TCP structure and matching Ethernet/IP families. Its RST|ACK response swaps endpoints, excludes padding, and acknowledges the SYN plus its declared payload. The helper supports IPv6, but IPv6 handshake and classifier dispatch remain pending.
+
 ## Egress addresses
 
 `FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. The TCP bridge currently constructs IPv4 flow metadata; its IPv6 packet path remains pending.

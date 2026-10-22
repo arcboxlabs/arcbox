@@ -1,4 +1,5 @@
 use super::*;
+use arcbox_packet::checksum;
 
 fn assert_handshake_mss(frame: &[u8], expected: u16) {
     let tcp = ETH_HEADER_LEN + 20;
