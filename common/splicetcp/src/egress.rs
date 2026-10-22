@@ -33,7 +33,7 @@ pub struct FlowMeta {
 /// a consumer.
 pub enum EgressConn {
     /// Has a real fd → the bridge splices it on the fast path.
-    Tcp(tokio::net::TcpStream),
+    Tcp(crate::NativeTcp<tokio::net::TcpStream>),
 }
 
 /// Decides + establishes egress for a flow. Injected into the bridge so a
@@ -187,7 +187,7 @@ impl EgressResolver for DefaultEgress {
                     .await
                     .ok()
                     .and_then(Result::ok);
-            let _ = tx.send(stream.map(EgressConn::Tcp));
+            let _ = tx.send(stream.map(|stream| EgressConn::Tcp(stream.into())));
         });
         rx
     }

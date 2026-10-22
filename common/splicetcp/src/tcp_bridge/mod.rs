@@ -244,7 +244,7 @@ pub(super) struct HandshakeConn {
     /// Host-side TCP stream. For PassiveOpen: populated once the async host
     /// connect completes. For ActiveOpen: set from the already-accepted
     /// stream at registration time.
-    host_stream: Option<std::net::TcpStream>,
+    host_stream: Option<crate::NativeTcp<std::net::TcpStream>>,
     /// Oneshot receiver for async host connect (PassiveOpen only).
     /// Consumed when connect resolves.
     connect_rx: Option<oneshot::Receiver<Option<crate::egress::EgressConn>>>,
@@ -324,7 +324,7 @@ pub struct TcpBridge {
 /// intercepted inline or polled from the host stream.
 pub(super) struct FastPathConn {
     /// Host-side TCP stream (std blocking — used from the sync datapath loop).
-    stream: std::net::TcpStream,
+    stream: crate::NativeTcp<std::net::TcpStream>,
     /// Our SEQ number for frames sent TO guest. Shared atomic with the
     /// inject thread so ACKs emitted by `try_fast_path_intercept` always
     /// carry a SEQ matching the guest's rcv_nxt for this flow (the inject

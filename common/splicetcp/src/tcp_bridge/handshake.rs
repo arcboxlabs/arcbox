@@ -134,10 +134,11 @@ impl TcpBridge {
     pub fn initiate_active_handshake(
         &mut self,
         flow_key: SynFlowKey,
-        host_stream: std::net::TcpStream,
+        host_stream: impl Into<crate::NativeTcp<std::net::TcpStream>>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
     ) {
+        let host_stream = host_stream.into();
         host_stream.set_nonblocking(true).ok();
         host_stream.set_nodelay(true).ok();
 

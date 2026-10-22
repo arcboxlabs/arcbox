@@ -84,6 +84,11 @@ impl<S> From<S> for NativeTcp<S> {
 }
 
 impl NativeTcp<tokio::net::TcpStream> {
+    /// Return the peer address without extracting the managed socket.
+    pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
+        self.stream.peer_addr()
+    }
+
     /// Deregister the socket from Tokio without releasing its owner lease.
     pub fn into_std(self) -> io::Result<NativeTcp<std::net::TcpStream>> {
         let Self { stream, lifecycle } = self;

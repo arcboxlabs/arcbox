@@ -80,8 +80,8 @@ pub type RetxRing =
 /// dependency. The VMM layer implements [`ConnSink`] by converting
 /// `PromotedConn` into `arcbox_net_inject::InlineConn`.
 pub struct PromotedConn {
-    /// Host-side TCP stream (non-blocking).
-    pub stream: std::net::TcpStream,
+    /// Nonblocking host socket that retains the egress owner during handoff.
+    pub stream: crate::NativeTcp<std::net::TcpStream>,
     /// Remote IP as seen by the guest.
     pub remote_ip: std::net::Ipv4Addr,
     /// Guest IP.
@@ -222,7 +222,7 @@ impl ConnSink for TokioFrameConnSink {
         } = conn;
         // A `false` return means "not accepted": the flow stays on the
         // bridge's slow path, so `dead` must NOT be set here.
-        let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+        let Ok(stream) = stream.into_tokio() else {
             return false;
         };
         let conn = AsyncPromotedConn {
@@ -276,7 +276,7 @@ fn guest_mss_for_mtu(mtu: usize) -> usize {
 
 #[cfg(feature = "tokio-frame-sink")]
 async fn read_promoted_conn(
-    mut stream: tokio::net::TcpStream,
+    mut stream: crate::NativeTcp<tokio::net::TcpStream>,
     conn: AsyncPromotedConn,
     frames: mpsc::Sender<Vec<u8>>,
 ) {
@@ -435,7 +435,7 @@ mod tests {
         )));
         let std_stream = accepted.into_std().unwrap();
         let accepted_conn = PromotedConn {
-            stream: std_stream,
+            stream: std_stream.into(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -493,7 +493,7 @@ mod tests {
         let (sink, mut rx) = TokioFrameConnSink::channel_with_mtu(4, 4000);
         let our_seq = Arc::new(AtomicU32::new(1000));
         let accepted_conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -550,7 +550,7 @@ mod tests {
         // Jumbo 4000-MTU sink, but the peer advertised only MSS 1460.
         let (sink, mut rx) = TokioFrameConnSink::channel_with_mtu(8, 4000);
         let accepted_conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -621,7 +621,7 @@ mod tests {
             None,
         )));
         let conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -675,7 +675,7 @@ mod tests {
         let our_seq = Arc::new(AtomicU32::new(1000));
         let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,

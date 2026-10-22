@@ -89,7 +89,7 @@ impl<'a> UploadBatch<'a> {
         Ok(accepted.is_some())
     }
 
-    fn write_to(&self, stream: &mut std::net::TcpStream) -> io::Result<usize> {
+    fn write_to(&self, stream: &mut crate::NativeTcp<std::net::TcpStream>) -> io::Result<usize> {
         if self.count == 1 {
             stream.write(&self.payloads[0])
         } else {

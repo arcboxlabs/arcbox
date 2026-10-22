@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Native TCP ownership](logs/2026-10-22-native-tcp-ownership.md)
 - [2026-10-22 — IPv6 classifier activation](logs/2026-10-22-ipv6-classifier.md)
 - [2026-10-22 — Shared classifier parsing](logs/2026-10-22-shared-classifier-parsing.md)
 - [2026-10-22 — Classifier address types](logs/2026-10-22-classifier-address-types.md)

@@ -7,6 +7,7 @@ mod ipv6_fast_path;
 mod ipv6_handshake;
 mod ipv6_upload;
 mod link_mss;
+mod ownership;
 mod read_batch;
 mod upload_backpressure;
 mod upload_batch;

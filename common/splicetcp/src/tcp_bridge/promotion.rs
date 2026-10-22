@@ -11,12 +11,13 @@ impl TcpBridge {
     pub fn promote_to_fast_path(
         &mut self,
         key: SynFlowKey,
-        stream: std::net::TcpStream,
+        stream: impl Into<crate::NativeTcp<std::net::TcpStream>>,
         our_seq: u32,
         last_ack: u32,
         peer_mss: u16,
         peer_wscale: Option<u8>,
     ) {
+        let stream = stream.into();
         // Set non-blocking for polling in the event loop.
         stream.set_nonblocking(true).ok();
         stream.set_nodelay(true).ok();
