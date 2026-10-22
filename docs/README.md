@@ -47,6 +47,7 @@ from memory. Every new file is added to the index below.
 
 ### Reference
 
+- [Packet primitives](../common/arcbox-packet/README.md) — IP views, Ethernet framing, and checksums
 - [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle, force-stop completion, and storage maintenance
 - [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [Data directories](data-directories.md) — every path the daemon writes
@@ -94,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Borrowed IP packet views](logs/2026-10-22-borrowed-ip-packet-views.md)
 - [2026-10-22 — Migrate Tokio descriptor registration](logs/2026-10-22-tokio-descriptor-registration.md)
 - [2026-10-22 — Format HTTP CONNECT IPv6 authorities](logs/2026-10-22-http-connect-ipv6-authority.md)
 - [2026-10-22 — Preserve IPv6 DNS resolution records](logs/2026-10-22-ipv6-dns-resolution-log.md)
