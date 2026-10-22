@@ -288,3 +288,44 @@ fn syn_frames_preserve_options_fields_and_checksums() {
         }
     }
 }
+
+#[test]
+fn pure_resets_clear_acknowledgment_and_window_for_both_ip_families() {
+    use crate::ethernet::{TcpFrameParams, build_tcp_rst_only_frame};
+
+    let v6 = ipv6_frame_params();
+    for (src_ip, dst_ip) in [
+        (IpAddr::from(v6.src_ip), IpAddr::from(v6.dst_ip)),
+        ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()),
+    ] {
+        for seq in [0, u32::MAX] {
+            let p = TcpFrameParams {
+                src_ip,
+                dst_ip,
+                seq,
+                ack: u32::MAX,
+                window: u16::MAX,
+                src_port: 80,
+                dst_port: 40000,
+                src_mac: [1; 6],
+                dst_mac: [2; 6],
+            };
+            let frame = build_tcp_rst_only_frame(&p);
+            let ip = &frame[14..];
+            let tcp = &ip[if src_ip.is_ipv6() { 40 } else { 20 }..];
+            assert_eq!(tcp.len(), 20);
+            assert_eq!(&tcp[..4], &[0, 80, 0x9c, 0x40]);
+            assert_eq!(&tcp[4..8], &seq.to_be_bytes());
+            assert_eq!(&tcp[8..16], &[0, 0, 0, 0, 0x50, 0x04, 0, 0]);
+            assert_eq!(&tcp[18..20], &[0, 0]);
+            if src_ip.is_ipv6() {
+                assert_eq!(&frame[12..14], &[0x86, 0xdd]);
+                verify_v6(ip, tcp);
+            } else {
+                assert_eq!(&frame[12..14], &[8, 0]);
+                assert_eq!(folded_sum(&[&ip[..20]]), 0xffff);
+                assert_eq!(folded_sum(&[&ip[12..20], &[0, 6, 0, 20], tcp]), 0xffff);
+            }
+        }
+    }
+}

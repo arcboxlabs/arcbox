@@ -153,6 +153,25 @@ pub fn build_tcp_rst_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec
     build_frame(&TcpFrameParams { window: 0, ..*p }, 0x14, &[], &[])
 }
 
+/// Builds a TCP RST frame with the ACK flag clear and zero acknowledgment and window fields.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
+#[must_use]
+pub fn build_tcp_rst_only_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
+    build_frame(
+        &TcpFrameParams {
+            ack: 0,
+            window: 0,
+            ..*p
+        },
+        0x04,
+        &[],
+        &[],
+    )
+}
+
 /// Builds a TCP data frame with only a pseudo-header checksum (for GSO).
 ///
 /// Identical to [`build_tcp_data_frame`] except the TCP checksum field

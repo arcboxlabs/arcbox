@@ -20,3 +20,5 @@ fn addresses(packet: &[u8]) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
 TCP ACK, data, FIN/ACK, and RST/ACK builders accept IPv4 or IPv6 addresses through `TcpFrameParams<A>`. Both addresses must have the same IP family; IPv4 remains the default type. Data frames accept at most 65495 payload bytes for IPv4 or 65515 for IPv6. ACK and data frames use the requested receive window. FIN/ACK frames use 65535; RST/ACK frames use zero. All four builders compute complete TCP checksums and the IPv4 header checksum. IPv6 uses its own pseudo-header checksum. Partial-checksum GSO builders accept IPv4 only.
 
 SYN and SYN/ACK builders accept IPv4 or IPv6 through `SynParams<A>` and `SynAckParams<A>`. They always include the supplied MSS, include WScale and SACK-Permitted when requested, and pad options with NOP bytes. Both use a receive window of 65535; pure SYN frames use acknowledgment zero.
+
+`build_tcp_rst_only_frame` constructs a reset with the ACK flag clear, acknowledgment zero, and receive window zero. It preserves the supplied sequence number and supports both IP families. Use `build_tcp_rst_frame` when the reset must acknowledge a segment.
