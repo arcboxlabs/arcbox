@@ -256,3 +256,21 @@ Run `devenv shell -- cargo bench --manifest-path .source/arcbox/Cargo.toml -p ar
 | `send_batch_to_v4` | 263.83 µs | 254.16–275.19 µs | 242,580 |
 
 The point estimate improves by 3.4%, but the intervals overlap. This single sequential run includes receiver cost and does not establish a NE throughput improvement. ArcTap integration requires a separate runtime comparison.
+
+## 2026-10-22 — Shared TCP frame encoding
+
+Compare the data-frame builder at `5a8c5d66` with the commit containing this entry. Both checkouts use the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`, then execute each resulting benchmark binary. Run order: baseline, candidate, candidate, baseline. Each execution contains seven rounds per payload and checksum mode; the table pools 14 samples per implementation.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. The benchmark includes allocation, header writes, payload copying, checksums, and deallocation. The original App and NE remain running; their binding is checked before and after the measurement.
+
+| Payload bytes | Baseline full checksum ns/frame | Shared encoder ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 14.621 | 15.083 | +3.2% |
+| 1 | 14.639 | 15.174 | +3.7% |
+| 64 | 14.979 | 15.157 | +1.2% |
+| 1460 | 35.687 | 37.692 | +5.6% |
+| 3960 | 86.749 | 81.280 | -6.3% |
+| 32768 | 715.995 | 715.086 | -0.1% |
+| 65495 | 1546.463 | 1570.518 | +1.6% |
+
+The full-checksum medians range from 6.3% faster to 5.6% slower. The 1460-byte case is about 2 ns slower; the maximum payload is about 24 ns slower. The unchanged partial-checksum builder ranges from 3.5% faster to 14.2% slower, and baseline executions also differ. These results show the measured cost and variation, not a consistent speedup or native throughput improvement. The refactor consolidates IPv4 encoding before adding IPv6 support.

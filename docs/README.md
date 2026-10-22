@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Shared TCP frame encoding](logs/2026-10-22-shared-tcp-frame-encoding.md)
 - [2026-10-22 — Borrowed TCP packet views](logs/2026-10-22-borrowed-tcp-packet-views.md)
 - [2026-10-22 — Borrowed IP packet views](logs/2026-10-22-borrowed-ip-packet-views.md)
 - [2026-10-22 — Migrate Tokio descriptor registration](logs/2026-10-22-tokio-descriptor-registration.md)

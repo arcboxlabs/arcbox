@@ -19,129 +19,72 @@ pub struct TcpFrameParams {
     pub dst_mac: [u8; 6],
 }
 
-/// Builds a TCP ACK frame (no payload) to acknowledge data from the guest.
-///
-/// Used by the TCP fast path to ACK guest data segments using the
-/// hand-rolled TCP state machine in `TcpBridge`.
-#[must_use]
-pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let TcpFrameParams {
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        seq,
-        ack,
-        window,
-        src_mac,
-        dst_mac,
-    } = *p;
-    // ACK frame: ETH(14) + IP(20) + TCP(20) = 54 bytes, no payload.
-    let tcp_hdr_len = 20;
-    let ip_total_len = 20 + tcp_hdr_len;
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
-
-    // -- Ethernet header --
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
+fn build_frame(p: &TcpFrameParams, flags: u8, payload: &[u8]) -> Vec<u8> {
+    let ip_total_len = 40 + payload.len();
+    let length = u16::try_from(ip_total_len).expect("TCP frame exceeds the IPv4 length field");
+    let mut frame = Vec::with_capacity(ETH_HEADER_LEN + ip_total_len);
+    // Reserved fields must be zero; payload bytes are copied without an initial clear.
+    frame.resize(ETH_HEADER_LEN + 40, 0);
+    frame[..6].copy_from_slice(&p.dst_mac);
+    frame[6..12].copy_from_slice(&p.src_mac);
     frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    // -- IPv4 header --
     let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45; // Version 4, IHL 5
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // Don't Fragment
-    frame[ip + 8] = 64; // TTL
-    frame[ip + 9] = 6; // Protocol: TCP
-    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    // -- TCP header (20 bytes, no options) --
+    frame[ip] = 0x45;
+    frame[ip + 2..ip + 4].copy_from_slice(&length.to_be_bytes());
+    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+    frame[ip + 8] = 64;
+    frame[ip + 9] = 6;
+    frame[ip + 12..ip + 16].copy_from_slice(&p.src_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&p.dst_ip.octets());
+    let checksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+    frame[ip + 10..ip + 12].copy_from_slice(&checksum.to_be_bytes());
     let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
-    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
-    frame[tcp + 12] = 0x50; // Data offset: 5 (20 bytes), no options
-    frame[tcp + 13] = 0x10; // Flags: ACK
-    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
-    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
+    frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&p.ack.to_be_bytes());
+    frame[tcp + 12] = 0x50;
+    frame[tcp + 13] = flags;
+    frame[tcp + 14..tcp + 16].copy_from_slice(&p.window.to_be_bytes());
+    frame.extend_from_slice(payload);
+    let checksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&checksum.to_be_bytes());
     frame
 }
 
-/// Builds a TCP data frame carrying payload from the host to the guest.
+/// Builds a fully checksummed TCP ACK frame without payload.
+#[must_use]
+pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
+    build_frame(p, 0x10, &[])
+}
+
+/// Builds a fully checksummed TCP ACK/PSH frame carrying payload.
 ///
-/// Used by the TCP fast path to inject host TcpStream data into the guest
-/// via `TcpBridge`'s hand-rolled TCP state machine.
+/// # Panics
+///
+/// Panics if the payload exceeds the IPv4 limit of 65495 bytes.
 #[must_use]
 pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
-    let TcpFrameParams {
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        seq,
-        ack,
-        window,
-        src_mac,
-        dst_mac,
-    } = *p;
+    build_frame(p, 0x18, payload)
+}
 
-    let tcp_hdr_len = 20;
-    let tcp_total_len = tcp_hdr_len + payload.len();
-    let ip_total_len = 20 + tcp_total_len;
-    // IPv4 encodes total length in a 16-bit field; the `as u16` cast below
-    // would silently truncate for oversized payloads. Assert so the failure
-    // is loud if a caller ever exceeds the per-frame MTU budget.
-    assert!(
-        u16::try_from(ip_total_len).is_ok(),
-        "build_tcp_data_frame: ip_total_len={ip_total_len} overflows u16"
-    );
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = Vec::with_capacity(frame_len);
-    // Preserve zeroed reserved fields without clearing payload bytes before copying.
-    frame.resize(ETH_HEADER_LEN + 20 + tcp_hdr_len, 0);
+/// Builds a TCP FIN/ACK frame with a receive window of 65535.
+#[must_use]
+pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
+    build_frame(
+        &TcpFrameParams {
+            window: 65535,
+            ..*p
+        },
+        0x11,
+        &[],
+    )
+}
 
-    // -- Ethernet header --
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    // -- IPv4 header --
-    let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
-    frame[ip + 8] = 64; // TTL
-    frame[ip + 9] = 6; // TCP
-    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    // -- TCP header --
-    let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
-    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
-    frame[tcp + 12] = 0x50; // Data offset: 5
-    frame[tcp + 13] = 0x18; // Flags: ACK | PSH
-    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
-
-    // -- Payload --
-    frame.extend_from_slice(payload);
-
-    // TCP checksum over header + payload.
-    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
-    frame
+/// Builds a TCP RST/ACK frame with a zero receive window.
+#[must_use]
+pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
+    build_frame(&TcpFrameParams { window: 0, ..*p }, 0x14, &[])
 }
 
 /// Builds a TCP data frame with only a pseudo-header checksum (for GSO).
@@ -234,22 +177,6 @@ pub fn tcp_pseudo_header_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_len: u
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !sum as u16
-}
-
-/// Builds a TCP FIN+ACK frame for connection teardown.
-#[must_use]
-pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let mut ack_params = *p;
-    ack_params.window = 65535;
-    let mut frame = build_tcp_ack_frame(&ack_params);
-    // Change flags from ACK to FIN|ACK.
-    let tcp = ETH_HEADER_LEN + 20;
-    frame[tcp + 13] = 0x11; // FIN | ACK
-    // Recompute TCP checksum.
-    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-    frame
 }
 
 /// Peer TCP options observed on an incoming SYN or SYN-ACK frame.
@@ -523,20 +450,5 @@ pub fn build_tcp_syn_frame(p: &SynParams) -> Vec<u8> {
     let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
     frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
 
-    frame
-}
-
-/// Builds a TCP RST frame for connection abort.
-#[must_use]
-pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let mut rst_params = *p;
-    rst_params.window = 0;
-    let mut frame = build_tcp_ack_frame(&rst_params);
-    // Change flags from ACK to RST|ACK.
-    let tcp = ETH_HEADER_LEN + 20;
-    frame[tcp + 13] = 0x14; // RST | ACK
-    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
     frame
 }
