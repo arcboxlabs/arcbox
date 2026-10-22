@@ -1,11 +1,11 @@
-//! Validated borrowed IP views shared by native and Ethernet datapaths.
+//! Validated borrowed IP and TCP views shared by native and Ethernet datapaths.
 //!
 //! Header validity does not imply checksum validity: VM packets can carry offload checksums.
 
 use std::net::IpAddr;
 
 use etherparse::{
-    Ipv4HeaderSlice, Ipv6FragmentHeaderSlice, Ipv6Header, Ipv6HeaderSlice, ip_number,
+    Ipv4HeaderSlice, Ipv6FragmentHeaderSlice, Ipv6Header, Ipv6HeaderSlice, TcpSlice, ip_number,
 };
 
 /// A fragment and the IP prefix needed to reconstruct its complete datagram.
@@ -185,5 +185,63 @@ fn valid_options(extension: &[u8]) -> bool {
     true
 }
 
+/// A validated complete TCP segment and its IP addresses.
+#[derive(Clone, Debug)]
+pub struct TcpPacketView<'a> {
+    ip: IpPacketView<'a>,
+    tcp: TcpSlice<'a>,
+}
+
+impl<'a> TcpPacketView<'a> {
+    /// Parses TCP only after fragment reassembly and IP length validation.
+    pub fn parse(ip: IpPacketView<'a>) -> Option<Self> {
+        if ip.protocol() != 6 {
+            return None;
+        }
+        Some(Self {
+            tcp: TcpSlice::from_slice(ip.transport()?).ok()?,
+            ip,
+        })
+    }
+    /// Returns the validated IP view.
+    pub fn ip(&self) -> IpPacketView<'a> {
+        self.ip
+    }
+    /// Returns the source port.
+    pub fn source_port(&self) -> u16 {
+        self.tcp.source_port()
+    }
+    /// Returns the destination port.
+    pub fn destination_port(&self) -> u16 {
+        self.tcp.destination_port()
+    }
+    /// Returns the sequence number.
+    pub fn sequence(&self) -> u32 {
+        self.tcp.sequence_number()
+    }
+    /// Returns the acknowledgment number.
+    pub fn acknowledgment(&self) -> u32 {
+        self.tcp.acknowledgment_number()
+    }
+    /// Returns the eight TCP control flags.
+    pub fn flags(&self) -> u8 {
+        self.tcp.slice()[13]
+    }
+    /// Returns the unscaled receive window.
+    pub fn window(&self) -> u16 {
+        self.tcp.window_size()
+    }
+    /// Returns the complete TCP segment, including options and payload.
+    pub fn segment(&self) -> &'a [u8] {
+        self.tcp.slice()
+    }
+    /// Returns the TCP payload after options.
+    pub fn payload(&self) -> &'a [u8] {
+        self.tcp.payload()
+    }
+}
+
+#[cfg(test)]
+mod tcp_tests;
 #[cfg(test)]
 mod tests;

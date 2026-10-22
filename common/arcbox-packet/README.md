@@ -14,3 +14,5 @@ fn addresses(packet: &[u8]) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
 ```
 
 `transport()` returns `None` for fragments, including IPv6 atomic fragments. Use `fragment()` to obtain the identification, byte offset, prefix, and payload for reassembly. The reassembler must validate fragment alignment, overlaps, and size limits before transport parsing.
+
+`TcpPacketView::parse(ip)` accepts TCP only after IP parsing and fragment reassembly. The TCP view exposes addresses, ports, sequence numbers, control flags, the receive window, and payload without copying packet bytes. It rejects incomplete TCP headers and invalid data offsets.
