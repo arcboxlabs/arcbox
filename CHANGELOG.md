@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.5](https://github.com/arcboxlabs/arcbox/compare/v0.10.4...v0.10.5) (2026-10-22)
+
+
+### Tests
+
+* **e2e:** read the live rootfs under ~/ArcBox/docker ([05d50dc](https://github.com/arcboxlabs/arcbox/commit/05d50dcb58d6a3e35c59f1c7d6a06370399cb8e0))
+
+
+### Miscellaneous Chores
+
+* **tools:** bump the Docker toolchain and pin boot bundle 0.8.11 ([ae01be6](https://github.com/arcboxlabs/arcbox/commit/ae01be64d8b060ca3ee515cf97ade2815b26ed0c))
+
 ## [0.10.4](https://github.com/arcboxlabs/arcbox/compare/v0.10.3...v0.10.4) (2026-10-20)
 
 
