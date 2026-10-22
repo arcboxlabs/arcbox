@@ -632,6 +632,7 @@ impl TcpBridge {
     }
 }
 
+mod closed;
 mod fast_path;
 mod handshake;
 mod intercept;

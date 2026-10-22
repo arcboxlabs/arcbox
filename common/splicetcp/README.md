@@ -214,3 +214,9 @@ The internal `tcp_bridge::segmentation` module shares download and retransmissio
 The `tcp_upload_bench` example compares single-packet and 32-packet uploads through Ethernet and bare-IP APIs for both families. Timing includes encoding, socket writes, ACK parsing, peer reads, and payload validation; connection setup is excluded.
 
 `TcpSynInfo` stores both endpoints as `IpAddr`. Classifier entry points accept both families. Shared IP/TCP validation now excludes padding and rejects truncated transport headers before retaining frames; UDP declared lengths must fit the IP payload. The `classifier_bench` example measures classification, retained-frame copies, queue draining, and byte validation through both Ethernet and bare-IP APIs.
+
+## TCP CLOSED replies
+
+After dropping the bridge and upstream resources, callers may pass complete IP packets to `TcpBridge::closed_reply_ip` during a bounded control-only receive phase. This stateless method implements RFC 9293 CLOSED processing: discard RST input, reply to ACK input with `SEQ=SEG.ACK` and RST only, and reply to other TCP input with RST|ACK using `ACK=SEG.SEQ+SEG.LEN`. Segment length includes payload, SYN, and FIN.
+
+The result is an Ethernet frame with the supplied MAC addresses. No flow or upstream resource is retained. Malformed packets, fragments, non-TCP packets, unspecified addresses, multicast addresses, and IPv4 limited-broadcast addresses produce no reply. Callers must exclude subnet-directed broadcasts using their interface configuration. Offload checksums are not validated on input.
