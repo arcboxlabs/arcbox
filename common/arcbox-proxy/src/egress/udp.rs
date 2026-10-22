@@ -322,7 +322,6 @@ mod tests {
             1500,
         );
         let mut frame = vec![0; ETH_HEADER_LEN + 48];
-        frame[12..14].copy_from_slice(&[0x86, 0xdd]);
         let ip = &mut frame[ETH_HEADER_LEN..];
         ip[0] = 0x60;
         ip[4..6].copy_from_slice(&8u16.to_be_bytes());
@@ -340,8 +339,11 @@ mod tests {
             + arcbox_packet::checksum::checksum_add(&ip[40..]);
         ip[46..48].copy_from_slice(&arcbox_packet::checksum::checksum_fold(sum).to_be_bytes());
         // No Tokio runtime: an invalid dispatch would try to spawn a socket task.
-        egress.handle_outbound(&frame, [4; 6]);
-        assert!(egress.udp.flows.is_empty());
+        for ether_type in [0x0800u16, 0x86dd] {
+            frame[12..14].copy_from_slice(&ether_type.to_be_bytes());
+            egress.handle_outbound(&frame, [4; 6]);
+            assert!(egress.udp.flows.is_empty());
+        }
     }
 
     use tokio_util::sync::CancellationToken;

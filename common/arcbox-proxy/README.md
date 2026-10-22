@@ -15,3 +15,5 @@ Run the CONNECT regressions from the repository root with `devenv shell -- cargo
 System SOCKS5 UDP proxy endpoints use the same `ProxyConfig` authority formatting as TCP egress, including IPv6 control endpoints. The UDP relay address is negotiated independently through SOCKS5.
 
 Inbound UDP associations use the host listener address and client address as their identity. Datagrams from one live association reuse a guest-visible source port. Replies carry the client address through one listener-owned channel. Listener removal closes that channel and releases the socket before returning. Idle associations expire after 60 seconds; listener replacement creates a new association. Source-port allocation skips live flows and rejects exhaustion without replacing another client.
+
+`HostEgress` accepts IPv4 frames only. Both the Ethernet type and IP version must identify IPv4 before inbound association matching or host socket dispatch.
