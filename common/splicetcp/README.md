@@ -203,3 +203,5 @@ The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, t
 The fragment reassembler supports bounded IPv4 and IPv6 tables, each with 32 contexts and 64 disjoint ranges per datagram. IPv6 contexts expire after 3 seconds. Conflicting overlaps quarantine an ID until expiry; exact duplicates add no coverage. Atomic fragments are isolated from contexts with the same ID. Reassembly validates extension chains, first transport headers, final lengths, and ECN combinations before returning a complete frame.
 
 The default egress resolver accepts IPv6 system-proxy endpoint addresses. HTTP, HTTPS, and SOCKS5 proxy selection shares the authority formatting from `ProxyConfig`; destination routing and proxy precedence are unchanged.
+
+The internal `tcp_bridge::segmentation` module shares download and retransmission frame construction. The `tcp_bridge_bench` example measures established ACK handling and polled downloads through public bridge APIs with 1 or 64 active flows.

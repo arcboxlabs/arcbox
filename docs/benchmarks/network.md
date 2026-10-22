@@ -354,3 +354,18 @@ Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process 
 | 32768 | 287.913 | 290.096 | +2.183 | 275.982 |
 
 The candidate replaces a version/minimum-length check with shared structural parsing, declared-length validation, and EtherType selection. Small-packet differences measure that added fixed work; large-packet results also include memory-copy and scheduling variation. These are adapter measurements, not native application throughput or end-to-end IPv6 acceptance.
+
+## 2026-10-22 — TCP segmentation extraction
+
+Compare `ded7cbe5` with the commit containing this entry. Both snapshots use identical `common/splicetcp/examples/tcp_bridge_bench.rs` source. Build with `devenv shell -- cargo build --locked -p splicetcp --example tcp_bridge_bench --release`. Give each snapshot a separate, initially absent `CARGO_TARGET_DIR`. Compiler logs and dependency files identify both snapshots. Run baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process establishes 1 or 64 flows through public handshake APIs over owned loopback sockets. Setup is outside timing. Each mode warms up once, then records seven samples; the table pools 14 samples per snapshot. ACK samples contain 200,000 established pure ACK operations. Download samples contain 10,000 transfers of 1400 bytes. Each transfer includes a socket write, bridge polling, output parsing and payload checks, and injected ACKs. Polling visits all active flows. These measurements are not pure encoder timing or native tunnel throughput.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 27.855 | 27.590 | -0.95% |
+| ack | 64 | 24.883 | 24.424 | -1.84% |
+| download | 1 | 7125.167 | 7174.013 | +0.69% |
+| download | 64 | 21397.131 | 20968.273 | -2.00% |
+
+The production change moves the same encoder body to an internal module. Differences include compiler layout and host scheduling variation; download timings also include socket and validation costs. These measurements establish the baseline for the next address-family migration.

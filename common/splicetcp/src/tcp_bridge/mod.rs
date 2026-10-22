@@ -610,6 +610,7 @@ mod handshake;
 mod intercept;
 mod promotion;
 mod reject;
+mod segmentation;
 use reject::build_rst_from_syn;
 mod settings;
 mod upload_batch;
