@@ -36,3 +36,50 @@ pub fn env_flag(name: &str) -> bool {
             )
     })
 }
+
+/// Retains the original failure when finalization also fails.
+pub(crate) fn combine_results(
+    result: anyhow::Result<()>,
+    finalization: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match (result, finalization) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(error), Err(finalization)) => {
+            Err(error.context(format!("finalization also failed: {finalization:#}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_results;
+
+    #[test]
+    fn finalization_errors_preserve_the_original_failure() {
+        for (scenario_failed, finalization_failed) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let scenario = if scenario_failed {
+                Err(std::io::Error::other("scenario failure").into())
+            } else {
+                Ok(())
+            };
+            let finalization = if finalization_failed {
+                Err(anyhow::anyhow!("cleanup failure"))
+            } else {
+                Ok(())
+            };
+            let result = combine_results(scenario, finalization);
+            assert_eq!(result.is_err(), scenario_failed || finalization_failed);
+            if let Err(error) = result {
+                let report = format!("{error:#}");
+                assert_eq!(report.contains("scenario failure"), scenario_failed);
+                assert_eq!(report.contains("cleanup failure"), finalization_failed);
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().is_some(),
+                    scenario_failed
+                );
+            }
+        }
+    }
+}

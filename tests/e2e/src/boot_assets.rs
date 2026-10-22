@@ -114,34 +114,36 @@ impl TestContext {
     fn docker_ignore(&self, args: &[String]) {
         crate::docker::docker_ignore(&self.test_dir, args);
     }
+
+    fn shutdown(&mut self) -> Result<()> {
+        let Some(daemon) = self.daemon.take() else {
+            return Ok(());
+        };
+        info!("cleaning up");
+        let containers = self
+            .docker_output(
+                &["ps", "-aq", "--filter", &format!("label={}", self.label)],
+                Duration::from_secs(30),
+            )
+            .and_then(|ids| {
+                let ids: Vec<_> = ids.split_whitespace().collect();
+                if ids.is_empty() {
+                    return Ok(());
+                }
+                let mut args = vec!["rm", "-f"];
+                args.extend(ids);
+                self.docker_output(&args, Duration::from_secs(30))
+                    .map(|_| ())
+            })
+            .context("removing test containers");
+        crate::combine_results(containers, daemon.shutdown_checked())
+    }
 }
 
 impl Drop for TestContext {
     fn drop(&mut self) {
-        info!("cleaning up");
-        if let Ok(output) = Command::new("docker")
-            .env("DOCKER_HOST", self.docker_host())
-            .args(["ps", "-aq", "--filter"])
-            .arg(format!("label={}", self.label))
-            .output()
-        {
-            let ids = String::from_utf8_lossy(&output.stdout);
-            let ids = ids
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            if !ids.is_empty() {
-                let mut args = vec!["rm".to_owned(), "-f".to_owned()];
-                args.extend(ids);
-                self.docker_ignore(&args);
-            }
-        }
-
-        if let Some(daemon) = self.daemon.take() {
-            match daemon.shutdown() {
-                Ok(status) => info!(%status, "daemon stopped"),
-                Err(error) => warn!("daemon shutdown failed: {error:#}"),
-            }
+        if let Err(error) = self.shutdown() {
+            warn!("daemon cleanup failed: {error:#}");
         }
 
         if self.keep_test_dir {
@@ -183,19 +185,7 @@ pub fn run(config: BootAssetsConfig) -> Result<()> {
         },
     )?;
     let result = run_scenario(&mut ctx, &mut metrics);
-    metrics.passed = result.is_ok();
-    match metrics.write(Some(&ctx.test_dir)) {
-        Ok(paths) => {
-            for path in paths {
-                info!(path = %path.display(), "run metrics written");
-            }
-        }
-        Err(error) => warn!("writing run metrics failed: {error:#}"),
-    }
     if result.is_err() {
-        // Preserve the workspace (daemon + guest logs, disk images) so the
-        // failure can be inspected; the path is logged by TestContext::drop.
-        ctx.keep_test_dir = true;
         // Best-effort virtio queue snapshot while the daemon still runs —
         // ring wedges are invisible once the VM is gone.
         if let Some(daemon) = &ctx.daemon {
@@ -205,6 +195,15 @@ pub fn run(config: BootAssetsConfig) -> Result<()> {
             }
         }
     }
+    let result = crate::combine_results(result, ctx.shutdown());
+    metrics.passed = result.is_ok();
+    let written = metrics.write(Some(&ctx.test_dir)).map(|paths| {
+        for path in paths {
+            info!(path = %path.display(), "run metrics written");
+        }
+    });
+    let result = crate::combine_results(result, written);
+    ctx.keep_test_dir |= result.is_err();
     result
 }
 

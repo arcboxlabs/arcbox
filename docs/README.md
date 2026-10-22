@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-23 — E2E finalization requires successful daemon exit](logs/2026-10-23-e2e-finalization.md)
 - [2026-10-22 — Host egress IPv4 header guard](logs/2026-10-22-host-ipv4-guard.md)
 - [2026-10-22 — Inbound UDP associations](logs/2026-10-22-inbound-udp-associations.md)
 - [2026-10-22 — Abort ownership coverage](logs/2026-10-22-abort-ownership.md)

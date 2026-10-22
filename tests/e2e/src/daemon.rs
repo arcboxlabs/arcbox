@@ -309,6 +309,15 @@ impl DaemonHandle {
         self.terminate()
     }
 
+    /// Stops the daemon and requires a successful process exit.
+    pub(crate) fn shutdown_checked(self) -> Result<()> {
+        let pid = self.pid();
+        let status = self.shutdown().context("stopping daemon")?;
+        info!(pid, %status, "daemon stopped");
+        anyhow::ensure!(status.success(), "daemon {pid} exited with {status}");
+        Ok(())
+    }
+
     /// Fetches the daemon's virtio queue debug snapshot and writes it to
     /// `virtio-debug.json` under the data dir. Meant for failure paths:
     /// one structured record per device (kicks, interrupts, live ring

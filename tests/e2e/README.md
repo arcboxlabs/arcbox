@@ -154,6 +154,7 @@ Environment variables read by the tests:
   Each record includes the same label, separate argv entries, host OS/kernel/architecture, and Git commit/dirty state. Failed provenance probes return an error before the measured phases.
   The harness records the resolved boot version passed to the daemon; the direct HV probe records its selected kernel/rootfs paths. Checkout state describes the repository at run time, not the build revision of existing binaries. A boot version identifies the selected bundle generation; locally staged binary overrides can differ.
   Archive write errors propagate to the caller and mark an already-written local record as failed. If updating the local record also fails, the returned error retains both failures.
+  The `boot_assets` and shared VZ scenario runners require a successful daemon exit before writing passing metrics. Container cleanup, daemon shutdown, and metrics failures fail these runners. If a scenario also fails, the result retains the original error with finalization errors as context. These runners preserve the test directory after any failure.
 - `ARCBOX_E2E_IPERF_IMAGE=<ref>` — guest iperf3 image for the
   `network_iperf` throughput matrix (default `networkstatic/iperf3:latest`).
 - `ARCBOX_E2E_IPERF_MIN_GBPS=<f64>` — `network_iperf` gate floor. Unset (or

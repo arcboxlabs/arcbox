@@ -84,10 +84,9 @@ pub fn run_vz_scenario_with_log(
     })?;
 
     let result = scenario(&mut daemon, data_dir.path(), &mut metrics);
+    let result = crate::combine_results(result, daemon.shutdown_checked());
     metrics.passed = result.is_ok();
-    if let Err(error) = metrics.write(Some(data_dir.path())) {
-        tracing::warn!("writing run metrics failed: {error:#}");
-    }
+    let result = crate::combine_results(result, metrics.write(Some(data_dir.path())).map(|_| ()));
     if result.is_err() || crate::env_flag("KEEP_TEST_DIR") {
         let kept = data_dir.keep();
         tracing::warn!(path = %kept.display(), "preserving test directory");
