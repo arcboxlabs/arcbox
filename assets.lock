@@ -16,37 +16,37 @@
 # and the [boot] bump.
 
 [boot]
-version = "0.8.10"
+version = "0.8.11"
 cdn = "https://boot.arcboxcdn.com"
-manifest_sha256 = "ade60dc939585170e30944a3679c367837ca1fcfadaf425f5a756e31dd307257"
+manifest_sha256 = "7344311cedfb69289d9397d875da418b4e413060e212e5d37a0d0f6047c67dbf"
 
 [[tools]]
 name = "docker"
 group = "docker"
-version = "29.8.2"
-arch.arm64.sha256 = "5ffa2bafbabe073470f0333f4a129599230b73d1170bb61146b3d9b08e1d1325"
-arch.x86_64.sha256 = "384d9b259c1efd2265e6a0ff05512d5998035df0877053cb7763405caf17ca23"
+version = "29.9.2"
+arch.arm64.sha256 = "ea8a2ce5ac31f9f5f3fb711a7a485e1e46cc7a69798a629a70306f6e6af25b7a"
+arch.x86_64.sha256 = "089c3f618df88bdef4f1257d9d604499136a1ec5168b67d194c260acad2b522f"
 
 [[tools]]
 name = "docker-buildx"
 group = "docker"
-version = "0.37.2"
-arch.arm64.sha256 = "149e6a006edaa430f297b2bdcf65baaa6d7ee5ccfc7aa67dd50ce1c2b1db47e2"
-arch.x86_64.sha256 = "91cfde39945b0a76f0320db72d16f22ddf320da1d7a967b6871369041577cb88"
+version = "0.38.1"
+arch.arm64.sha256 = "6f20ba2437865311ef99015bf5d1039c3c8e4d2177c1c64aa41b134b5ecd3012"
+arch.x86_64.sha256 = "76e7a809cc98d34a4c1b7db23feac673def5b8dcdddd9e713ef26598689aa796"
 
 [[tools]]
 name = "docker-compose"
 group = "docker"
-version = "5.6.0"
-arch.arm64.sha256 = "bd714a42b46e51757fc1121085b3096b9064e3f80d3ca5a991e33f44df4f43c9"
-arch.x86_64.sha256 = "c76e3abf5fde1aeb3bd7c7306ff15bef2246afc1f9e54832a0a050dd7cdfb2f8"
+version = "5.6.1"
+arch.arm64.sha256 = "fcce41226abd2b7b2936094e688bbd61284673dddafea542e08cb9a3b4423a8b"
+arch.x86_64.sha256 = "245c191b11a6345dd3b32b8f6eadeed1e1dcd5147aa46dfa423462e95f587e93"
 
 [[tools]]
 name = "docker-credential-osxkeychain"
 group = "docker"
-version = "0.9.9"
-arch.arm64.sha256 = "3585188b1df1c3568ae536999eddb48ad2c781b3cf07a2f7d7181262d045820c"
-arch.x86_64.sha256 = "1be33ae30c8c80277bea3364d0d71afad411fa22e88bcabf3375550b989fd272"
+version = "0.9.12"
+arch.arm64.sha256 = "0e43ec22d3fd186b2d69a3c76fd9ac0a1ae4ec4f2c2b2e4ee156e048c8258cb0"
+arch.x86_64.sha256 = "2b27d34ad2065a3413740b59359dac56f2e1bd00a40629de51e29fa30cf1390f"
 
 [[tools]]
 name = "pstramp"
