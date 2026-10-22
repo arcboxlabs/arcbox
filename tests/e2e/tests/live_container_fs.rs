@@ -1,8 +1,8 @@
 //! ABX-424 acceptance: a **running** container's filesystem is browsable from
 //! the macOS host through `~/ArcBox`, live.
 //!
-//! Committed layers have been visible under `~/ArcBox/containerd` since
-//! ABX-425, but those are the immutable parents. What a running container
+//! Committed layers have been visible under `~/ArcBox/docker/containerd`
+//! since ABX-425, but those are the immutable parents. What a running container
 //! actually sees — its merged overlay, including everything it has written
 //! since it started — was not reachable at all: the in-kernel nfsd could not
 //! encode file handles for an overlay mounted without `nfs_export=on`, and the
@@ -153,14 +153,14 @@ fn scenario(data_dir: &Path) -> Result<()> {
 /// The guest mounts it inside the NFS export root at
 /// `/run/arcbox/nfs-export/docker/rootfs/overlayfs/<id>`, and that export root
 /// is `fsid=0` — the NFSv4 pseudo-root — so the host path is the same tail
-/// under the mount. Asserting the ID is the container's own, rather than
+/// under the daemon's mount of it at `~/ArcBox/docker`. Asserting the ID is the container's own, rather than
 /// discovering the path by scanning, is deliberate: a path a caller cannot
 /// derive from something it already knows is not a browsable view, and the
 /// desktop Files tabs would have nothing to open.
 fn live_fs_root(data_dir: &Path, container_id: &str) -> PathBuf {
     data_dir
         .join("ArcBox")
-        .join("rootfs/overlayfs")
+        .join("docker/rootfs/overlayfs")
         .join(container_id)
 }
 
