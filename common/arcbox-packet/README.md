@@ -17,4 +17,4 @@ fn addresses(packet: &[u8]) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
 
 `TcpPacketView::parse(ip)` accepts TCP only after IP parsing and fragment reassembly. The TCP view exposes addresses, ports, sequence numbers, control flags, the receive window, and payload without copying packet bytes. It rejects incomplete TCP headers and invalid data offsets.
 
-IPv4 TCP data frames accept at most 65495 payload bytes. ACK and data frames use the requested receive window. FIN/ACK frames use 65535; RST/ACK frames use zero. All four builders compute complete IP and TCP checksums.
+TCP ACK, data, FIN/ACK, and RST/ACK builders accept IPv4 or IPv6 addresses through `TcpFrameParams<A>`. Both addresses must have the same IP family; IPv4 remains the default type. Data frames accept at most 65495 payload bytes for IPv4 or 65515 for IPv6. ACK and data frames use the requested receive window. FIN/ACK frames use 65535; RST/ACK frames use zero. All four builders compute complete TCP checksums and the IPv4 header checksum. IPv6 uses its own pseudo-header checksum. SYN and partial-checksum GSO builders currently accept IPv4 only.

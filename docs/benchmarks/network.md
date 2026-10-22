@@ -274,3 +274,21 @@ Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rus
 | 65495 | 1546.463 | 1570.518 | +1.6% |
 
 The full-checksum medians range from 6.3% faster to 5.6% slower. The 1460-byte case is about 2 ns slower; the maximum payload is about 24 ns slower. The unchanged partial-checksum builder ranges from 3.5% faster to 14.2% slower, and baseline executions also differ. These results show the measured cost and variation, not a consistent speedup or native throughput improvement. The refactor consolidates IPv4 encoding before adding IPv6 support.
+
+## 2026-10-22 — IPv6-capable TCP frame encoder
+
+Compare `2001d081` with the commit containing this entry using the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build both with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`. Execute the resulting binaries in baseline, candidate, candidate, baseline order. The table pools 14 samples per implementation from two executions of seven rounds. The benchmark uses IPv4 inputs to measure the effect on existing callers.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. Original App and NE bindings are checked before and after execution.
+
+| IPv4 payload bytes | Baseline full checksum ns/frame | IPv6-capable encoder ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 12.326 | 12.672 | +2.8% |
+| 1 | 13.690 | 14.306 | +4.5% |
+| 64 | 19.038 | 18.337 | -3.7% |
+| 1460 | 37.529 | 37.682 | +0.4% |
+| 3960 | 89.038 | 89.489 | +0.5% |
+| 32768 | 732.148 | 733.217 | +0.1% |
+| 65495 | 1604.738 | 1628.648 | +1.5% |
+
+Full-checksum median changes range from -3.7% to +4.5%. These measurements include allocation, frame initialization, payload copies, and checksums. They do not measure IPv6 throughput or establish a native application performance improvement.

@@ -451,7 +451,7 @@ fn control_frames_preserve_window_and_sequence_contracts() {
 }
 
 #[test]
-#[should_panic(expected = "TCP frame exceeds the IPv4 length field")]
+#[should_panic(expected = "TCP frame exceeds the IP length field")]
 fn tcp_data_frame_rejects_payload_above_ipv4_limit() {
     let p = make_tcp_params([192, 0, 2, 1], [192, 0, 2, 2], 80, 1234, 100, 200);
     let _ = build_tcp_data_frame(&p, &vec![0; 65496]);

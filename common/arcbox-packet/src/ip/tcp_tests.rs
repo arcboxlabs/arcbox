@@ -140,3 +140,80 @@ fn rejects_non_tcp_and_incomplete_segments() {
         assert!(TcpPacketView::parse(ip).is_none());
     }
 }
+
+fn ipv6_frame_params() -> crate::ethernet::TcpFrameParams<std::net::Ipv6Addr> {
+    crate::ethernet::TcpFrameParams {
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "2001:db8::2".parse().unwrap(),
+        src_port: 80,
+        dst_port: 40000,
+        seq: 0x12345678,
+        ack: 99,
+        window: 32000,
+        src_mac: [1; 6],
+        dst_mac: [2; 6],
+    }
+}
+
+#[test]
+fn ipv6_control_and_data_frames_have_independent_checksums() {
+    use crate::ethernet::*;
+
+    let p = ipv6_frame_params();
+    for (frame, flags, len, window) in [
+        (build_tcp_ack_frame(&p), 0x10, 20, 32000),
+        (build_tcp_data_frame(&p, b"odd"), 0x18, 23, 32000),
+        (build_tcp_fin_frame(&p), 0x11, 20, 65535),
+        (build_tcp_rst_frame(&p), 0x14, 20, 0),
+        (
+            build_tcp_data_frame(&p, &vec![0x5a; 65515]),
+            0x18,
+            65535,
+            32000,
+        ),
+    ] {
+        assert_eq!(&frame[..6], &[2; 6]);
+        assert_eq!(&frame[6..12], &[1; 6]);
+        assert_eq!(&frame[12..14], &[0x86, 0xdd]);
+        let ip = &frame[14..];
+        assert_eq!(ip.len(), 40 + len);
+        assert_eq!((ip[0], ip[6], ip[7]), (0x60, 6, 64));
+        assert_eq!(usize::from(u16::from_be_bytes([ip[4], ip[5]])), len);
+        assert_eq!(&ip[8..24], &p.src_ip.octets());
+        assert_eq!(&ip[24..40], &p.dst_ip.octets());
+        assert_eq!(
+            &ip[40..53],
+            &[0, 80, 0x9c, 0x40, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 99, 0x50]
+        );
+        assert_eq!(ip[53], flags);
+        assert_eq!(u16::from_be_bytes([ip[54], ip[55]]), window);
+        if len == 23 {
+            assert_eq!(&ip[60..], b"odd");
+        }
+        verify_v6(ip, &ip[40..]);
+    }
+}
+
+#[test]
+#[should_panic(expected = "TCP frame exceeds the IP length field")]
+fn ipv6_data_frame_rejects_payload_above_length_limit() {
+    let _ = crate::ethernet::build_tcp_data_frame(&ipv6_frame_params(), &vec![0; 65516]);
+}
+
+#[test]
+#[should_panic(expected = "TCP frame addresses must use the same IP family")]
+fn tcp_frame_rejects_mixed_address_families() {
+    let p = ipv6_frame_params();
+    let mixed = crate::ethernet::TcpFrameParams {
+        src_ip: IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
+        dst_ip: IpAddr::from(p.dst_ip),
+        src_port: p.src_port,
+        dst_port: p.dst_port,
+        seq: p.seq,
+        ack: p.ack,
+        window: p.window,
+        src_mac: p.src_mac,
+        dst_mac: p.dst_mac,
+    };
+    let _ = crate::ethernet::build_tcp_ack_frame(&mixed);
+}

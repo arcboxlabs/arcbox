@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     ETH_HEADER_LEN,
@@ -6,10 +6,12 @@ use super::{
 };
 
 /// Parameters for constructing TCP frames on the fast path.
+///
+/// Both addresses must belong to the same IP family. IPv4 remains the default type.
 #[derive(Debug, Clone, Copy)]
-pub struct TcpFrameParams {
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+pub struct TcpFrameParams<A = Ipv4Addr> {
+    pub src_ip: A,
+    pub dst_ip: A,
     pub src_port: u16,
     pub dst_port: u16,
     pub seq: u32,
@@ -19,26 +21,56 @@ pub struct TcpFrameParams {
     pub dst_mac: [u8; 6],
 }
 
-fn build_frame(p: &TcpFrameParams, flags: u8, payload: &[u8]) -> Vec<u8> {
-    let ip_total_len = 40 + payload.len();
-    let length = u16::try_from(ip_total_len).expect("TCP frame exceeds the IPv4 length field");
-    let mut frame = Vec::with_capacity(ETH_HEADER_LEN + ip_total_len);
+fn build_frame<A: Copy + Into<IpAddr>>(
+    p: &TcpFrameParams<A>,
+    flags: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    let src = p.src_ip.into();
+    let dst = p.dst_ip.into();
+    let tcp_len = 20 + payload.len();
+    let ip_len = match (src, dst) {
+        (IpAddr::V4(_), IpAddr::V4(_)) => 20,
+        (IpAddr::V6(_), IpAddr::V6(_)) => 40,
+        _ => panic!("TCP frame addresses must use the same IP family"),
+    };
+    let length = if ip_len == 20 {
+        ip_len + tcp_len
+    } else {
+        tcp_len
+    };
+    let length = u16::try_from(length).expect("TCP frame exceeds the IP length field");
+    let tcp = ETH_HEADER_LEN + ip_len;
+    let mut frame = Vec::with_capacity(tcp + tcp_len);
     // Reserved fields must be zero; payload bytes are copied without an initial clear.
-    frame.resize(ETH_HEADER_LEN + 40, 0);
+    frame.resize(tcp + 20, 0);
     frame[..6].copy_from_slice(&p.dst_mac);
     frame[6..12].copy_from_slice(&p.src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
     let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 2..ip + 4].copy_from_slice(&length.to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
-    frame[ip + 8] = 64;
-    frame[ip + 9] = 6;
-    frame[ip + 12..ip + 16].copy_from_slice(&p.src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&p.dst_ip.octets());
-    let checksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&checksum.to_be_bytes());
-    let tcp = ip + 20;
+    match (src, dst) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => {
+            frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+            frame[ip] = 0x45;
+            frame[ip + 2..ip + 4].copy_from_slice(&length.to_be_bytes());
+            frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+            frame[ip + 8] = 64;
+            frame[ip + 9] = 6;
+            frame[ip + 12..ip + 16].copy_from_slice(&src.octets());
+            frame[ip + 16..ip + 20].copy_from_slice(&dst.octets());
+            let checksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+            frame[ip + 10..ip + 12].copy_from_slice(&checksum.to_be_bytes());
+        }
+        (IpAddr::V6(src), IpAddr::V6(dst)) => {
+            frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+            frame[ip] = 0x60;
+            frame[ip + 4..ip + 6].copy_from_slice(&length.to_be_bytes());
+            frame[ip + 6] = 6;
+            frame[ip + 7] = 64;
+            frame[ip + 8..ip + 24].copy_from_slice(&src.octets());
+            frame[ip + 24..ip + 40].copy_from_slice(&dst.octets());
+        }
+        _ => unreachable!(),
+    }
     frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
     frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
     frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
@@ -47,14 +79,32 @@ fn build_frame(p: &TcpFrameParams, flags: u8, payload: &[u8]) -> Vec<u8> {
     frame[tcp + 13] = flags;
     frame[tcp + 14..tcp + 16].copy_from_slice(&p.window.to_be_bytes());
     frame.extend_from_slice(payload);
-    let checksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
+    let checksum = match (src, dst) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => tcp_checksum(src, dst, &frame[tcp..]),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => {
+            let mut sum = crate::checksum::checksum_add(&src.octets())
+                + crate::checksum::checksum_add(&dst.octets())
+                + tcp_len as u32
+                + 6
+                + crate::checksum::checksum_add(&frame[tcp..]);
+            while sum > 0xffff {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            !sum as u16
+        }
+        _ => unreachable!(),
+    };
     frame[tcp + 16..tcp + 18].copy_from_slice(&checksum.to_be_bytes());
     frame
 }
 
 /// Builds a fully checksummed TCP ACK frame without payload.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
+pub fn build_tcp_ack_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
     build_frame(p, 0x10, &[])
 }
 
@@ -62,15 +112,23 @@ pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
 ///
 /// # Panics
 ///
-/// Panics if the payload exceeds the IPv4 limit of 65495 bytes.
+/// Panics if the addresses have different IP families or the payload exceeds
+/// 65495 bytes for IPv4 or 65515 bytes for IPv6.
 #[must_use]
-pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
+pub fn build_tcp_data_frame<A: Copy + Into<IpAddr>>(
+    p: &TcpFrameParams<A>,
+    payload: &[u8],
+) -> Vec<u8> {
     build_frame(p, 0x18, payload)
 }
 
 /// Builds a TCP FIN/ACK frame with a receive window of 65535.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
+pub fn build_tcp_fin_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
     build_frame(
         &TcpFrameParams {
             window: 65535,
@@ -82,8 +140,12 @@ pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
 }
 
 /// Builds a TCP RST/ACK frame with a zero receive window.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
+pub fn build_tcp_rst_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
     build_frame(&TcpFrameParams { window: 0, ..*p }, 0x14, &[])
 }
 
