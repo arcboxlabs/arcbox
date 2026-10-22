@@ -1,4 +1,4 @@
-//! Ethernet and bare IPv4 packet classifier for the datapath.
+//! Ethernet and bare IPv4/IPv6 packet classifier for the datapath.
 //!
 //! Demultiplexes inbound Ethernet frames by protocol. Frames are *fed* to
 //! [`FrameClassifier::classify_frame`] — typically by an
@@ -109,8 +109,7 @@ pub struct FrameClassifier {
     /// configured MTU; see [`ENHANCED_ETHERNET_MTU`].
     #[allow(dead_code)]
     mtu: usize,
-    /// Reassembles guest IPv4 fragments into whole frames before L4
-    /// classification (ABX-429).
+    /// Reassembles IPv4 and IPv6 fragments before transport classification.
     reassembler: FragmentReassembler,
 }
 
@@ -311,10 +310,10 @@ impl FrameClassifier {
                     self.pending_arp_replies.push(reply);
                 }
             }
-            // IPv4 → classify by protocol
-            0x0800 => {
+            // IPv4 and IPv6 → classify by protocol
+            0x0800 | 0x86dd => {
                 if let Some(ip) = IpPacketView::parse(&frame[ETH_HEADER_LEN..])
-                    && ip.source().is_ipv4()
+                    && (ethertype == 0x0800) == ip.source().is_ipv4()
                 {
                     self.classify_ip(&frame[..ETH_HEADER_LEN], ip);
                 }
@@ -330,17 +329,24 @@ impl FrameClassifier {
         }
     }
 
-    /// Classifies a bare IPv4 packet using the synthetic host/gateway Ethernet header.
+    /// Classifies bare IPv4/IPv6 input using the synthetic host/gateway Ethernet header.
     /// Retained packets are copied directly into their owned frame; no framing scratch buffer is needed.
-    /// Drops non-IPv4 packets and packets exceeding the IPv4 length limit.
+    /// Drops input exceeding the ordinary packet length limit of its address family.
     pub fn classify_ip_packet(&mut self, packet: &[u8], guest_mac: &mut Option<[u8; 6]>) {
-        if packet.len() < 20 || packet.len() > usize::from(u16::MAX) || packet[0] >> 4 != 4 {
+        let Some(ip) = IpPacketView::parse(packet) else {
+            return;
+        };
+        let ipv6 = ip.source().is_ipv6();
+        let maximum = usize::from(u16::MAX) + if ipv6 { 40 } else { 0 };
+        if packet.len() > maximum {
             return;
         }
         learn_guest_mac(crate::shim::HOST_MAC, guest_mac);
-        if let Some(ip) = IpPacketView::parse(packet) {
-            self.classify_ip(&crate::shim::synthetic_l2_header(), ip);
+        let mut header = crate::shim::synthetic_l2_header();
+        if ipv6 {
+            header[12..14].copy_from_slice(&[0x86, 0xdd]);
         }
+        self.classify_ip(&header, ip);
     }
 
     /// Classifies a structurally valid IP packet by its transport protocol.
@@ -561,10 +567,7 @@ mod tests {
         );
     }
 
-    /// Builds a minimal IPv6 TCP SYN frame (EtherType 0x86DD). The datapath
-    /// is IPv4-only by design (`classify_frame` drops non-0x0800/0x0806
-    /// EtherTypes; the utun shim likewise drops first-nibble-6 packets), so
-    /// this exists purely to characterize that drop.
+    /// Builds a minimal IPv6 TCP SYN frame (EtherType 0x86DD).
     fn make_ipv6_tcp_syn_frame() -> Vec<u8> {
         // ETH(14) + IPv6(40) + TCP(20).
         let mut frame = vec![0u8; ETH_HEADER_LEN + 40 + 20];
@@ -590,50 +593,46 @@ mod tests {
         frame
     }
 
-    /// IPv6 is intentionally unsupported: an IPv6 frame must be dropped
-    /// whole — never queued for TCP, intercept, or ARP handling. This pins
-    /// the documented limitation so a future half-implementation (parsing
-    /// v6 far enough to queue it, then mishandling it) is caught, and
-    /// asserts the drop is a clean no-op (no panic, no state mutation).
     #[test]
-    fn classify_ipv6_is_dropped_whole() {
+    fn classify_ipv6_syn_requires_matching_ethernet_family() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
         let mut device = FrameClassifier::new(gateway_ip, DEFAULT_ETHERNET_MTU);
         device.set_gateway_mac([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x01]);
         let mut guest_mac = None;
 
-        device.classify_frame(&make_ipv6_tcp_syn_frame(), &mut guest_mac);
-
-        assert!(
-            device.rx_queue.is_empty(),
-            "IPv6 must not reach the TCP rx queue"
-        );
-        assert!(
-            device.intercepted.is_empty(),
-            "IPv6 must not be intercepted"
-        );
-        assert!(device.gated_syns.is_empty(), "IPv6 SYN must not be gated");
-        assert!(
-            device.pending_arp_replies.is_empty(),
-            "IPv6 must not trigger an ARP reply"
-        );
+        let frame = make_ipv6_tcp_syn_frame();
+        for (mut invalid, ethertype) in [
+            (frame.clone(), [0x08, 0x00]),
+            (make_tcp_frame(), [0x86, 0xdd]),
+        ] {
+            invalid[12..14].copy_from_slice(&ethertype);
+            device.classify_frame(&invalid, &mut guest_mac);
+        }
+        assert!(device.rx_queue.is_empty());
+        assert!(device.intercepted.is_empty());
+        assert!(device.gated_syns.is_empty());
+        device.classify_frame(&frame, &mut guest_mac);
+        assert_eq!(device.take_gated_syns()[0].frame, frame);
+        assert!(device.pending_arp_replies.is_empty());
     }
 
-    /// A truncated IPv6 frame (header claims more than is present) must also
-    /// drop cleanly — the EtherType arm rejects it before any length-trusting
-    /// parse, so a malformed v6 frame can never index out of bounds.
+    /// Reject every truncated IPv6/TCP prefix before retaining bytes.
     #[test]
     fn classify_truncated_ipv6_does_not_panic() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
         let mut device = FrameClassifier::new(gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
-        let mut frame = make_ipv6_tcp_syn_frame();
-        frame.truncate(ETH_HEADER_LEN + 8); // cut mid-IPv6-header
-        device.classify_frame(&frame, &mut guest_mac);
-
+        let frame = make_ipv6_tcp_syn_frame();
+        for length in 0..frame.len() {
+            device.classify_frame(&frame[..length], &mut guest_mac);
+            if length >= ETH_HEADER_LEN {
+                device.classify_ip_packet(&frame[ETH_HEADER_LEN..length], &mut guest_mac);
+            }
+        }
         assert!(device.rx_queue.is_empty());
         assert!(device.intercepted.is_empty());
+        assert!(device.gated_syns.is_empty());
     }
 
     #[test]
@@ -895,3 +894,6 @@ mod tests {
 
 #[cfg(test)]
 mod l3_tests;
+
+#[cfg(test)]
+mod ipv6_tests;

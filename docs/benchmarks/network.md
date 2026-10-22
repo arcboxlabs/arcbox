@@ -454,3 +454,22 @@ Compare `1b7726be` with this commit using the [classifier benchmark method](#202
 The old classifier read a few fixed header fields and retained incomplete TCP segments. The candidate validates declared IP lengths, fragmentation, complete TCP header bounds, and UDP lengths before retaining bytes. The benchmark includes that fixed validation cost, allocation or pool operations, queue draining, and byte assertions. No socket or native tunnel throughput claim follows from this table.
 
 The pooled differences are +1.366 to +2.728 ns/frame. Baseline SYN run medians changed from 33.831 to 37.800 ns for Ethernet and from 32.945 to 35.695 ns for bare IP; candidate medians lie within or near those ranges. Timing variation therefore prevents attributing the full SYN difference to validation. The 64-byte data run medians were 11.162–11.249 ns baseline and 12.748–13.172 ns candidate for Ethernet, and 11.750–12.249 ns baseline and 13.289–13.315 ns candidate for bare IP.
+
+## 2026-10-22 — IPv6 classifier
+
+Compare `6dd0c89c` with this commit using the [classifier benchmark method](#2026-10-22--classifier-address-types). Both snapshots use the same driver and separate fresh release build directories. IPv4 runs use baseline/candidate/candidate/baseline order, followed by two candidate IPv6 runs. Compiler logs and dependency files identify each source. Each cell pools 14 samples from the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0.
+
+| Mode | Entry | Baseline IPv4 ns/frame | Candidate IPv4 ns/frame | Difference ns/frame | Candidate IPv6 ns/frame |
+|---|---|---:|---:|---:|---:|
+| syn | ethernet | 38.545 | 40.670 | +2.125 | 46.516 |
+| syn | ip | 43.922 | 46.070 | +2.148 | 45.761 |
+| data64 | ethernet | 12.820 | 12.848 | +0.027 | 13.279 |
+| data64 | ip | 13.377 | 15.671 | +2.294 | 16.069 |
+| data1400 | ethernet | 49.713 | 58.587 | +8.873 | 58.672 |
+| data1400 | ip | 50.424 | 59.887 | +9.463 | 60.145 |
+
+The candidate dispatches both families after shared validation and selects the synthetic EtherType for bare input. The measurements include classification, allocation or pool operations, queue draining, and byte assertions. IPv6 has no supported baseline in the parent. The driver excludes socket forwarding, the HostEgress boundary check, and native tunnels; no forwarding throughput claim follows from these results.
+
+The 1400-byte IPv4 path increases by 8.873 ns/frame for Ethernet and 9.463 ns/frame for bare IP, about 18%. Both runs show this difference. SYN timing varies substantially: baseline Ethernet run medians are 37.369 and 51.853 ns, so the pooled SYN comparison cannot isolate the implementation cost. The feature adds family selection; these measurements do not identify which generated instructions account for the full difference.
+
+A separate candidate added only `#[inline]` to the shared dispatcher. Its paired 1400-byte medians were 47.499/53.825 ns for Ethernet baseline/candidate and 47.919/56.539 ns for bare IP. The remaining increases were 13.3% and 18.0%; the hint did not eliminate the regression. Different baseline timings limit cross-run attribution. This commit retains the direct implementation without the hint. Both experiments retain compiler logs, source manifests, and per-run CSV evidence under `/private/tmp/arctap-classifier-ipv6-benchmark-oct22-v2` and `-v3` on the test Mac.

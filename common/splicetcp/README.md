@@ -39,7 +39,7 @@ The crate is split around a few seams:
 
 - `classifier::FrameClassifier` is a pure Ethernet-frame demultiplexer. It owns
   no fd; callers feed frames via `classify_frame` and drain the resulting queues.
-  Push sources may pass bare IPv4 packets to `classify_ip_packet` to avoid a framing copy.
+  Push sources may pass bare IPv4/IPv6 packets to `classify_ip_packet` to avoid a framing copy.
 - `tcp_bridge::TcpBridge` performs SYN gating, handshake synthesis, and the
   promoted fast path.
 - `egress::EgressResolver` is the policy/dial seam. The default resolver dials
@@ -144,11 +144,11 @@ buffer. The bridge reuses this buffer across connections and keeps it until
 the bridge is dropped. A bridge whose connections are all owned by a `ConnSink`
 does not allocate this buffer.
 
-The internal SYN rejection encoder validates IP/TCP structure and matching Ethernet/IP families. Its RST|ACK response swaps endpoints, excludes padding, and acknowledges the SYN plus its declared payload. The helper and handshake parser support IPv6; IPv6 classifier dispatch remains pending.
+The internal SYN rejection encoder validates IP/TCP structure and matching Ethernet/IP families. Its RST|ACK response swaps endpoints, excludes padding, and acknowledges the SYN plus its declared payload. The classifier, rejection encoder, and handshake parser support both address families.
 
 ## Egress addresses
 
-`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Established Ethernet and bare-IP input accepts IPv4 and IPv6 through shared IP/TCP views. Declared lengths exclude padding; truncated headers, incomplete fragments, and mismatched Ethernet/IP families are rejected before flow state changes. IPv4 and IPv6 uploads share bounded vectored writes. Coalescing compares complete endpoints, contiguous sequence numbers, and identical ACK/window state after shared IP/TCP validation. Active and passive handshake parsing accepts both families through the same shared views. Without a peer MSS option, IPv6 uses 1220; IPv4 retains 536 for passive opens and 1460 for active opens. Classifier dispatch still accepts IPv4.
+`FlowMeta` and `FlowKey` use `IpAddr` for both endpoints. Existing IPv4 callers convert addresses with `.into()`. `DefaultEgress` dials IPv4 and IPv6 destinations, retains recovered domains for proxies, and maps the configured IPv4 gateway to IPv4 loopback. Proxy precedence and bypass rules apply to both families. Stored TCP bridge endpoints also use `IpAddr`; promoted IPv6 flows produce IPv6 data and control frames. Established Ethernet and bare-IP input accepts IPv4 and IPv6 through shared IP/TCP views. Declared lengths exclude padding; truncated headers, incomplete fragments, and mismatched Ethernet/IP families are rejected before flow state changes. IPv4 and IPv6 uploads share bounded vectored writes. Coalescing compares complete endpoints, contiguous sequence numbers, and identical ACK/window state after shared IP/TCP validation. Active and passive handshake parsing accepts both families through the same shared views. Without a peer MSS option, IPv6 uses 1220; IPv4 retains 536 for passive opens and 1460 for active opens. Classifier entry points accept both families.
 
 ## Managed native sockets
 
@@ -168,9 +168,9 @@ The `shim` module provides the adapter:
 
 - `L3ToL2Source` wraps an L3 `FrameSource` and prepends a fixed synthetic
   Ethernet header before classification.
-- `FrameClassifier::classify_ip_packet` accepts bare IPv4 packets from push
+- `FrameClassifier::classify_ip_packet` accepts bare IPv4/IPv6 packets from push
   sources. Retained packets receive the synthetic Ethernet header directly in
-  their owned buffer. IPv4 fragments use the same reassembler as Ethernet input.
+  their owned buffer. Both families use the same reassembler as Ethernet input.
 - `TcpBridge::try_fast_path_intercept_ip_batch` borrows established IPv4 or IPv6 TCP packets
   for synchronous socket writes, avoiding the classifier's owned-frame copy.
   Callers must drain preceding classifier input before interception to preserve
@@ -181,7 +181,7 @@ The `shim` module provides the adapter:
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
   drops ARP or non-IP frames that have no L3 representation.
 
-The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier still accepts IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
+The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. TCP and UDP classification uses the IPv4/IPv6 reassembler. ICMPv6 is not handled. Callers must supply IPv6 UDP egress; ArcBox HostEgress handles IPv4 and rejects other EtherTypes before parsing.
 
 ## Memory and performance notes
 
@@ -209,4 +209,4 @@ The internal `tcp_bridge::segmentation` module shares download and retransmissio
 
 The `tcp_upload_bench` example compares single-packet and 32-packet uploads through Ethernet and bare-IP APIs for both families. Timing includes encoding, socket writes, ACK parsing, peer reads, and payload validation; connection setup is excluded.
 
-`TcpSynInfo` stores both endpoints as `IpAddr`. Classifier entry points still accept IPv4. Shared IP/TCP validation now excludes padding and rejects truncated transport headers before retaining frames; UDP declared lengths must fit the IP payload. The `classifier_bench` example measures classification, retained-frame copies, queue draining, and byte validation through both Ethernet and bare-IP APIs.
+`TcpSynInfo` stores both endpoints as `IpAddr`. Classifier entry points accept both families. Shared IP/TCP validation now excludes padding and rejects truncated transport headers before retaining frames; UDP declared lengths must fit the IP payload. The `classifier_bench` example measures classification, retained-frame copies, queue draining, and byte validation through both Ethernet and bare-IP APIs.

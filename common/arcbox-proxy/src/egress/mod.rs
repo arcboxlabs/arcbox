@@ -92,11 +92,12 @@ impl HostEgress {
     }
 
     /// Dispatches an outbound IPv4 frame to the appropriate protocol proxy.
+    /// Rejects other EtherTypes before the IPv4 relay and transport handlers.
     ///
     /// Inbound reply frames (matching an active inbound connection) are
     /// intercepted first; everything else is proxied through host sockets.
     pub fn handle_outbound(&mut self, frame: &[u8], guest_mac: [u8; 6]) {
-        if frame.len() < ETH_HEADER_LEN + 20 {
+        if frame.len() < ETH_HEADER_LEN + 20 || frame[12..14] != [0x08, 0x00] {
             return;
         }
 
