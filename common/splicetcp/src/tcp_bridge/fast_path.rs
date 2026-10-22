@@ -1,5 +1,5 @@
 use super::segmentation::{FrameCtx, emit_data_frames};
-use super::{SynFlowKey, TcpBridge};
+use super::{FastPathConn, SynFlowKey, TcpBridge};
 
 impl TcpBridge {
     pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
@@ -39,6 +39,15 @@ impl TcpBridge {
             tracing::debug!("Fast path: RST from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
             self.close_fast_path(&key);
             return Some((consumed, Vec::new())); // Intercepted, no reply frame.
+        }
+
+        if conn.stream.is_cancelled() {
+            let rst = conn.reset_frame(
+                self.fast_path_gateway_mac,
+                self.fast_path_guest_mac.unwrap_or([0xFF; 6]),
+            );
+            self.close_fast_path(&key);
+            return Some((consumed, rst));
         }
 
         // IP/TCP views exclude padding and include extension/header lengths.
@@ -304,6 +313,11 @@ impl TcpBridge {
         };
 
         for (key, conn) in &mut self.fast_path_conns {
+            if conn.stream.is_cancelled() {
+                frames.push(conn.reset_frame(gw_mac, guest_mac));
+                to_remove.push(*key);
+                continue;
+            }
             // Failed inline readers mark the shared stream dead before poll reaps it.
             if conn
                 .dead
@@ -863,5 +877,21 @@ impl TcpBridge {
                 down,
             );
         }
+    }
+}
+
+impl FastPathConn {
+    pub(super) fn reset_frame(&self, gw_mac: [u8; 6], guest_mac: [u8; 6]) -> Vec<u8> {
+        crate::ethernet::build_tcp_rst_frame(&crate::ethernet::TcpFrameParams {
+            src_ip: self.remote_ip,
+            dst_ip: self.guest_ip,
+            src_port: self.remote_port,
+            dst_port: self.guest_port,
+            seq: self.our_seq.load(std::sync::atomic::Ordering::Relaxed),
+            ack: self.last_ack,
+            window: 0,
+            src_mac: gw_mac,
+            dst_mac: guest_mac,
+        })
     }
 }

@@ -162,7 +162,7 @@ managed socket.
 
 `EgressConn::Tcp` carries `NativeTcp<tokio::net::TcpStream>`. Resolvers wrap an unmanaged socket with `.into()` or attach a lease with `NativeTcp::with_lifecycle`. The bridge retains that owner through handshake, promotion, uploads, and cloned readers. Inbound and promotion entry points accept either wrapper or an unmanaged socket. The Tokio frame sink retains the wrapper; the VMM inline sink rejects managed sockets and leaves the primary socket on the polled path.
 
-Each accepted reader has a child cancellation token. Replacing or dropping the primary cancels that reader without cancelling other connections in the same generation. Tokio cancellation interrupts socket reads, zero-window waits, and blocked frame sends. A clean reader EOF preserves the primary upload half. Bridge polling still needs separate generation cancellation handling.
+Each accepted reader has a child cancellation token. Replacing or dropping the primary cancels that reader without cancelling other connections in the same generation. Tokio cancellation interrupts socket reads, zero-window waits, and blocked frame sends. A clean reader EOF preserves the primary upload half. Fast-path polling and packet interception reset cancelled flows before socket I/O. Peer resets close the flow without a reply. Handshake cancellation remains a separate integration step.
 
 ## L3 tunnel shim
 

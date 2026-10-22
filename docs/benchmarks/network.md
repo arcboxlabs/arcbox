@@ -473,3 +473,22 @@ The candidate dispatches both families after shared validation and selects the s
 The 1400-byte IPv4 path increases by 8.873 ns/frame for Ethernet and 9.463 ns/frame for bare IP, about 18%. Both runs show this difference. SYN timing varies substantially: baseline Ethernet run medians are 37.369 and 51.853 ns, so the pooled SYN comparison cannot isolate the implementation cost. The feature adds family selection; these measurements do not identify which generated instructions account for the full difference.
 
 A separate candidate added only `#[inline]` to the shared dispatcher. Its paired 1400-byte medians were 47.499/53.825 ns for Ethernet baseline/candidate and 47.919/56.539 ns for bare IP. The remaining increases were 13.3% and 18.0%; the hint did not eliminate the regression. Different baseline timings limit cross-run attribution. This commit retains the direct implementation without the hint. Both experiments retain compiler logs, source manifests, and per-run CSV evidence under `/private/tmp/arctap-classifier-ipv6-benchmark-oct22-v2` and `-v3` on the test Mac.
+
+## 2026-10-22 — Primary cancellation
+
+Compare `df036498` with this commit using `common/splicetcp/examples/tcp_bridge_bench.rs`. The driver accepts `--managed` to retain a native lifecycle token. Both snapshots use the same driver, independent fresh release targets, and Rust 1.96.0 on the dedicated test Mac. Each ownership mode uses baseline/candidate/candidate/baseline order, with 14 samples per cell. Downloads transfer 1400 bytes through real loopback sockets, verify payload and sequence numbers, and send guest ACKs.
+
+| Socket mode | Operation | Flows | Baseline ns/op | Candidate ns/op | Difference |
+|---|---|---:|---:|---:|---:|
+| managed | ack | 1 | 41.887 | 44.037 | +5.13% |
+| managed | ack | 64 | 42.495 | 45.685 | +7.51% |
+| managed | download | 1 | 6631.629 | 6287.223 | -5.19% |
+| managed | download | 64 | 25483.150 | 26247.935 | +3.00% |
+| unmanaged | ack | 1 | 42.590 | 46.112 | +8.27% |
+| unmanaged | ack | 64 | 42.758 | 44.971 | +5.18% |
+| unmanaged | download | 1 | 7036.283 | 10780.013 | +53.21% |
+| unmanaged | download | 64 | 26006.933 | 32171.525 | +23.70% |
+
+These initial runs overlapped compilation on the test Mac, including an unrelated Rust 1.98 workspace build. They do not isolate the implementation cost. ACK medians increased by 2.150–3.522 ns/op; unmanaged download medians increased by 23.70–53.21%, while managed download medians changed by -5.19%/+3.00%. Do not interpret the unmanaged download difference as an established code regression or the managed decrease as an improvement. A compiler-idle repeat remains pending.
+
+Source manifests, fresh-build compiler logs, dependency paths, binary hashes, all 224 timing samples, and native binding snapshots are in `/private/tmp/arctap-primary-cancel-benchmark-oct22-v1`. Reproduce with `devenv shell -- cargo run --release -p splicetcp --example tcp_bridge_bench` and add `-- --managed` for managed sockets. This driver does not measure VM, TUN, or native App/NE throughput.

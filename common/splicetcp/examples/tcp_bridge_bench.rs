@@ -1,11 +1,12 @@
 //! Measure established ACK handling and polled downloads through public bridge APIs.
-use std::{hint::black_box, io::Write, net::Ipv4Addr, time::Instant};
+use std::{hint::black_box, io::Write, net::Ipv4Addr, sync::Arc, time::Instant};
 
 use arcbox_packet::{
     ethernet::{SynAckParams, TcpFrameParams, build_tcp_ack_frame, build_tcp_syn_ack_frame},
     ip::{IpPacketView, TcpPacketView},
 };
-use splicetcp::tcp_bridge::TcpBridge;
+use splicetcp::{NativeTcp, tcp_bridge::TcpBridge};
+use tokio_util::sync::CancellationToken;
 
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 const GUEST: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
@@ -14,6 +15,13 @@ const GUEST_MAC: [u8; 6] = [2, 0, 0, 0, 0, 2];
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let managed = match std::env::args().nth(1) {
+        None => false,
+        Some(argument) => {
+            assert_eq!(argument, "--managed");
+            true
+        }
+    };
     println!("mode,flows,sample,ns_per_operation");
     for flow_count in [1usize, 64] {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -32,6 +40,11 @@ async fn main() {
             let server = server.into_std().unwrap();
             server.set_nonblocking(false).unwrap();
             server.set_nodelay(true).unwrap();
+            let client = if managed {
+                NativeTcp::with_lifecycle(client, Arc::new(()), CancellationToken::new())
+            } else {
+                client.into()
+            };
             bridge.initiate_inbound(8000 + u16::try_from(index).unwrap(), client, GUEST, GATEWAY);
             let syns = bridge.poll_handshakes();
             assert_eq!(syns.len(), 1);
