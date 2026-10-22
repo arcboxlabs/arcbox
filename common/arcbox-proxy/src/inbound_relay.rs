@@ -27,8 +27,6 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Instant;
 
-use std::sync::Arc;
-
 use socket2::SockRef;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
@@ -101,11 +99,11 @@ pub enum InboundCommand {
     },
     /// A UDP datagram was received on a host listener.
     UdpReceived {
-        host_port: u16,
+        host_addr: SocketAddr,
         container_port: u16,
         data: Vec<u8>,
         /// Channel to send reply datagrams back to the host-side client.
-        reply_tx: mpsc::Sender<Vec<u8>>,
+        reply_tx: mpsc::Sender<(SocketAddr, Vec<u8>)>,
         client_addr: SocketAddr,
     },
 }
@@ -114,10 +112,18 @@ pub enum InboundCommand {
 // UDP flow state
 // ---------------------------------------------------------------------------
 
+/// Host endpoints that identify one inbound UDP association.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct InboundUdpPeer {
+    pub(crate) listener: SocketAddr,
+    pub(crate) client: SocketAddr,
+}
+
 /// Per-flow inbound UDP state.
 struct InboundUdpFlow {
+    peer: InboundUdpPeer,
     /// Channel to send reply datagrams back to the host-side client.
-    client_tx: mpsc::Sender<Vec<u8>>,
+    client_tx: mpsc::Sender<(SocketAddr, Vec<u8>)>,
     /// Last time traffic was seen on this flow.
     last_active: Instant,
 }
@@ -131,6 +137,8 @@ struct InboundUdpFlow {
 pub(crate) struct InboundRelay {
     /// Active UDP flows keyed by (gateway_ip, ephemeral_port, guest_ip, container_port).
     udp_flows: HashMap<(Ipv4Addr, u16, Ipv4Addr, u16), InboundUdpFlow>,
+    /// Forward lookup for a client's stable guest-visible source port.
+    udp_clients: HashMap<InboundUdpPeer, u16>,
     /// Channel to inject L2 frames towards the guest.
     reply_tx: mpsc::Sender<Vec<u8>>,
     gateway_mac: [u8; 6],
@@ -151,6 +159,7 @@ impl InboundRelay {
     ) -> Self {
         Self {
             udp_flows: HashMap::new(),
+            udp_clients: HashMap::new(),
             reply_tx,
             gateway_mac,
             gateway_ip,
@@ -219,7 +228,7 @@ impl InboundRelay {
             if udp_len >= 8 && udp_start + udp_len <= frame.len() {
                 let payload = frame[udp_start + 8..udp_start + udp_len].to_vec();
                 flow.last_active = Instant::now();
-                let _ = flow.client_tx.try_send(payload);
+                let _ = flow.client_tx.try_send((flow.peer.client, payload));
             }
             return true;
         }
@@ -231,27 +240,60 @@ impl InboundRelay {
     // UDP: inject datagram to guest
     // -----------------------------------------------------------------------
 
-    /// Injects a UDP datagram to the guest and sets up a flow for replies.
+    /// Injects a UDP datagram using the association's stable source port.
     pub(crate) fn inject_udp(
         &mut self,
-        container_port: u16,
+        peer: InboundUdpPeer,
         data: &[u8],
-        client_tx: mpsc::Sender<Vec<u8>>,
+        client_tx: mpsc::Sender<(SocketAddr, Vec<u8>)>,
         guest_mac: [u8; 6],
     ) {
-        let ephemeral_port = self.ephemeral_ports.allocate();
-        let key = (
-            self.gateway_ip,
-            ephemeral_port,
-            self.guest_ip,
-            container_port,
-        );
-
+        if client_tx.is_closed() {
+            return;
+        }
+        let container_port = peer.listener.port();
+        let now = Instant::now();
+        let previous = self.udp_clients.get(&peer).copied().filter(|port| {
+            let key = (self.gateway_ip, *port, self.guest_ip, container_port);
+            let flow = self.udp_flows.get(&key).expect("paired UDP flow indexes");
+            flow.client_tx.same_channel(&client_tx)
+                && now.duration_since(flow.last_active).as_secs() < 60
+        });
+        let ephemeral_port = if let Some(port) = previous {
+            port
+        } else {
+            if let Some(port) = self.udp_clients.remove(&peer) {
+                self.udp_flows
+                    .remove(&(self.gateway_ip, port, self.guest_ip, container_port));
+            }
+            let port = (EPHEMERAL_START..=EPHEMERAL_END).find_map(|_| {
+                let port = self.ephemeral_ports.allocate();
+                (!self.udp_flows.contains_key(&(
+                    self.gateway_ip,
+                    port,
+                    self.guest_ip,
+                    container_port,
+                )))
+                .then_some(port)
+            });
+            let Some(port) = port else {
+                tracing::warn!(container_port, "Inbound UDP source ports exhausted");
+                return;
+            };
+            self.udp_clients.insert(peer, port);
+            port
+        };
         self.udp_flows.insert(
-            key,
+            (
+                self.gateway_ip,
+                ephemeral_port,
+                self.guest_ip,
+                container_port,
+            ),
             InboundUdpFlow {
+                peer,
                 client_tx,
-                last_active: Instant::now(),
+                last_active: now,
             },
         );
 
@@ -288,8 +330,14 @@ impl InboundRelay {
     /// Removes expired UDP flows.
     pub(crate) fn cleanup(&mut self) {
         let now = Instant::now();
-        self.udp_flows
-            .retain(|_, flow| now.duration_since(flow.last_active).as_secs() < 60);
+        self.udp_flows.retain(|_, flow| {
+            let active =
+                !flow.client_tx.is_closed() && now.duration_since(flow.last_active).as_secs() < 60;
+            if !active {
+                self.udp_clients.remove(&flow.peer);
+            }
+            active
+        });
     }
 }
 
@@ -500,74 +548,45 @@ async fn udp_listener_task(
     cmd_tx: mpsc::Sender<InboundCommand>,
     cancel: CancellationToken,
 ) {
-    let host_port = socket.local_addr().map_or(0, |a| a.port());
-    let socket = Arc::new(socket);
-    let mut reply_flows: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let host_addr = match socket.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            tracing::warn!(%error, "Cannot read inbound UDP listener address");
+            return;
+        }
+    };
+    let (reply_tx, mut reply_rx) = mpsc::channel::<(SocketAddr, Vec<u8>)>(256);
     let mut buf = vec![0u8; 65535];
 
     loop {
         tokio::select! {
-            biased;
             () = cancel.cancelled() => break,
+            Some((client, data)) = reply_rx.recv() => {
+                if let Err(error) = socket.send_to(&data, client).await {
+                    tracing::warn!(%error, %client, "Inbound UDP reply failed");
+                }
+            }
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((n, client_addr)) => {
-                        let reply_tx = if let Some(tx) = reply_flows.get(&client_addr) {
-                            if tx.is_closed() {
-                                reply_flows.remove(&client_addr);
-                                create_udp_reply_flow(client_addr, &socket, &cancel, &mut reply_flows)
-                            } else {
-                                tx.clone()
-                            }
-                        } else {
-                            create_udp_reply_flow(client_addr, &socket, &cancel, &mut reply_flows)
-                        };
-
                         let cmd = InboundCommand::UdpReceived {
-                            host_port,
+                            host_addr,
                             container_port,
                             data: buf[..n].to_vec(),
-                            reply_tx,
+                            reply_tx: reply_tx.clone(),
                             client_addr,
                         };
                         if cmd_tx.send(cmd).await.is_err() {
                             break;
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Inbound UDP recv error on :{}: {}", host_port, e);
+                    Err(error) => {
+                        tracing::warn!(%error, %host_addr, "Inbound UDP receive failed");
                     }
                 }
             }
         }
     }
-}
-
-fn create_udp_reply_flow(
-    client_addr: SocketAddr,
-    socket: &Arc<UdpSocket>,
-    cancel: &CancellationToken,
-    reply_flows: &mut HashMap<SocketAddr, mpsc::Sender<Vec<u8>>>,
-) -> mpsc::Sender<Vec<u8>> {
-    let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(16);
-    let reply_sock = Arc::clone(socket);
-    let flow_cancel = cancel.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                () = flow_cancel.cancelled() => break,
-                maybe_data = reply_rx.recv() => {
-                    let Some(data) = maybe_data else {
-                        break;
-                    };
-                    let _ = reply_sock.send_to(&data, client_addr).await;
-                }
-            }
-        }
-    });
-    reply_flows.insert(client_addr, reply_tx.clone());
-    reply_tx
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +657,15 @@ mod tests {
         let mut relay = InboundRelay::new(tx, GW_MAC, GW_IP, GUEST_IP, 1500);
 
         let (client_tx, _client_rx) = mpsc::channel(16);
-        relay.inject_udp(53, b"dns query", client_tx, GUEST_MAC);
+        relay.inject_udp(
+            InboundUdpPeer {
+                listener: "127.0.0.1:53".parse().unwrap(),
+                client: "127.0.0.1:45678".parse().unwrap(),
+            },
+            b"dns query",
+            client_tx,
+            GUEST_MAC,
+        );
 
         // Flow should be tracked.
         let key = (GW_IP, EPHEMERAL_START, GUEST_IP, 53);
@@ -669,6 +696,10 @@ mod tests {
         relay.udp_flows.insert(
             key,
             InboundUdpFlow {
+                peer: InboundUdpPeer {
+                    listener: "127.0.0.1:53".parse().unwrap(),
+                    client: "127.0.0.1:45678".parse().unwrap(),
+                },
                 client_tx,
                 last_active: Instant::now()
                     .checked_sub(std::time::Duration::from_secs(120))
@@ -893,3 +924,6 @@ mod tests {
         assert!("0.0.0.0".parse::<Ipv4Addr>().is_ok());
     }
 }
+
+#[cfg(test)]
+mod udp_tests;

@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Inbound UDP associations](logs/2026-10-22-inbound-udp-associations.md)
 - [2026-10-22 — Abort ownership coverage](logs/2026-10-22-abort-ownership.md)
 - [2026-10-22 — Explicit TCP abort](logs/2026-10-22-explicit-tcp-abort.md)
 - [2026-10-22 — TCP CLOSED replies](logs/2026-10-22-tcp-closed-replies.md)
