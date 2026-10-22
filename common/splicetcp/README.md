@@ -172,9 +172,9 @@ The `shim` module provides the adapter:
 - `synthetic_l2_header` plus `l3_to_l2` remain available for consumers that need
   a contiguous Ethernet frame before classification.
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
-  drops ARP or non-IPv4 frames that have no L3 representation.
+  drops ARP or non-IP frames that have no L3 representation.
 
-The shim currently accepts IPv4 only. The internal IPv6 reassembler is not yet reachable through the classifier.
+The L3 adapter accepts IPv4 and ordinary IPv6 packets, validates IP structure, trims padding, and selects the EtherType per packet. Reusable read and framing buffers hold the maximum IPv6 packet (40 + 65535 bytes). IPv6 jumbograms and unsupported extensions are rejected. The classifier and TCP bridge still accept IPv4 only; the internal IPv6 reassembler is not yet reachable through the classifier.
 
 ## Memory and performance notes
 

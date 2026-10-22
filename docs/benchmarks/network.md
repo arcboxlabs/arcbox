@@ -339,3 +339,18 @@ The two original comparisons above produced identical baseline and candidate bin
 | IPv6-capable encoder | 65495 | 1610.253 | 1617.429 | +0.4% |
 
 The corrected measurements include run-to-run variation and establish neither a consistent speedup nor native application throughput. The functional packet regressions are independent of these microbenchmarks.
+
+## 2026-10-22 — L3 adapter validation
+
+Compare `902f73f5` with the commit containing this entry using the same `common/splicetcp/examples/l3_frame_bench.rs` in both snapshots. Build each through `devenv shell -- cargo build --locked -p splicetcp --example l3_frame_bench --release` with separate, initially absent `CARGO_TARGET_DIR` directories. Execute the binaries in baseline, candidate, candidate, baseline order. Run the candidate once more with the `ipv6` argument. Compiler logs and dependency files identify each source snapshot.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process warms up once, then collects seven samples per payload. The IPv4 columns pool 14 samples; IPv6 has seven samples. Preallocated buffers exclude allocation and socket work. Inputs have valid declared lengths. The measurement includes IP validation, Ethernet header writes, and packet copies.
+
+| Payload bytes | IPv4 baseline ns/frame | IPv4 candidate ns/frame | Difference ns/frame | IPv6 candidate ns/frame |
+|---:|---:|---:|---:|---:|
+| 0 | 2.375 | 3.040 | +0.665 | 3.975 |
+| 64 | 3.112 | 3.851 | +0.739 | 3.822 |
+| 1460 | 16.534 | 16.400 | -0.134 | 16.403 |
+| 32768 | 287.913 | 290.096 | +2.183 | 275.982 |
+
+The candidate replaces a version/minimum-length check with shared structural parsing, declared-length validation, and EtherType selection. Small-packet differences measure that added fixed work; large-packet results also include memory-copy and scheduling variation. These are adapter measurements, not native application throughput or end-to-end IPv6 acceptance.
