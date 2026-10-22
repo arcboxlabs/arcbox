@@ -174,8 +174,7 @@ The `shim` module provides the adapter:
 - `l2_to_l3` strips the synthetic Ethernet header from guest-bound frames and
   drops ARP or non-IPv4 frames that have no L3 representation.
 
-The shim currently accepts IPv4 only. IPv6 and a complete IP stack are outside
-the crate's scope.
+The shim currently accepts IPv4 only. The internal IPv6 reassembler is not yet reachable through the classifier.
 
 ## Memory and performance notes
 
@@ -194,3 +193,5 @@ the crate's scope.
 
 - `tokio-frame-sink`: exposes `direct_rx::TokioFrameConnSink`, the Tokio-backed
   `ConnSink` for event-driven promoted host→guest reads.
+
+The fragment reassembler supports bounded IPv4 and IPv6 tables, each with 32 contexts and 64 disjoint ranges per datagram. IPv6 contexts expire after 3 seconds. Conflicting overlaps quarantine an ID until expiry; exact duplicates add no coverage. Atomic fragments are isolated from contexts with the same ID. Reassembly validates extension chains, first transport headers, final lengths, and ECN combinations before returning a complete frame.
