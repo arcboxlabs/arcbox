@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+pub(super) async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
     tokio::time::timeout(TIMEOUT, async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (client, accepted) = tokio::join!(

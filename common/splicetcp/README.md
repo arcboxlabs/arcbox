@@ -220,3 +220,9 @@ The `tcp_upload_bench` example compares single-packet and 32-packet uploads thro
 After dropping the bridge and upstream resources, callers may pass complete IP packets to `TcpBridge::closed_reply_ip` during a bounded control-only receive phase. This stateless method implements RFC 9293 CLOSED processing: discard RST input, reply to ACK input with `SEQ=SEG.ACK` and RST only, and reply to other TCP input with RST|ACK using `ACK=SEG.SEQ+SEG.LEN`. Segment length includes payload, SYN, and FIN.
 
 The result is an Ethernet frame with the supplied MAC addresses. No flow or upstream resource is retained. Malformed packets, fragments, non-TCP packets, unspecified addresses, multicast addresses, and IPv4 limited-broadcast addresses produce no reply. Callers must exclude subnet-directed broadcasts using their interface configuration. Offload checksums are not validated on input.
+
+## Explicit TCP abort
+
+Stop business ingress and discard queued business packets before calling `TcpBridge::abort`. Keep guest output available until the reset callback completes. The bridge drains all flows without forwarding buffered bytes. Each flow releases its primary socket and cancels its reader before the callback. Retained sink owners may keep descriptors until cancellation completes. Established flow byte totals use the same observer path as normal close, once per removed flow.
+
+RFC 9293 section 3.10.5 defines explicit ABORT separately from connection cancellation. Active-open handshakes are deleted without a reset. Passive handshakes with a generated SYN-ACK and established flows send RST without ACK at `SND.NXT`. Pending passive dials send RST|ACK acknowledging the original SYN, payload, and FIN. No final FIN is synthesized. A second abort emits nothing unless new flows exist. Use `closed_reply_ip` for subsequent guest packets during a bounded control phase.

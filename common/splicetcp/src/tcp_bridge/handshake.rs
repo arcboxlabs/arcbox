@@ -112,6 +112,10 @@ impl TcpBridge {
                 role: HandshakeRole::PassiveOpen,
                 our_isn,
                 peer_isn: guest_isn,
+                peer_syn_end: guest_isn
+                    .wrapping_add(tcp.payload().len() as u32)
+                    .wrapping_add(1)
+                    .wrapping_add(u32::from(tcp.flags() & 0x01 != 0)),
                 host_stream: None,
                 connect_rx: Some(result_rx),
                 peer_wscale,
@@ -159,6 +163,7 @@ impl TcpBridge {
                 role: HandshakeRole::ActiveOpen,
                 our_isn,
                 peer_isn: 0, // filled in when SYN-ACK arrives
+                peer_syn_end: 0,
                 host_stream: Some(host_stream),
                 connect_rx: None,
                 peer_wscale: Some(SHIM_WSCALE),

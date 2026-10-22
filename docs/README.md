@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Explicit TCP abort](logs/2026-10-22-explicit-tcp-abort.md)
 - [2026-10-22 — TCP CLOSED replies](logs/2026-10-22-tcp-closed-replies.md)
 - [2026-10-22 — Handshake cancellation](logs/2026-10-22-handshake-cancellation.md)
 - [2026-10-22 — Primary TCP cancellation](logs/2026-10-22-primary-tcp-cancellation.md)

@@ -241,6 +241,8 @@ pub(super) struct HandshakeConn {
     /// Peer's ISN. Known immediately for PassiveOpen (from guest SYN);
     /// for ActiveOpen, set when the guest's SYN-ACK arrives.
     peer_isn: u32,
+    /// Original passive SYN sequence end, including payload and FIN, for explicit abort.
+    peer_syn_end: u32,
     /// Host-side TCP stream. For PassiveOpen: populated once the async host
     /// connect completes. For ActiveOpen: set from the already-accepted
     /// stream at registration time.
@@ -632,6 +634,7 @@ impl TcpBridge {
     }
 }
 
+mod close;
 mod closed;
 mod fast_path;
 mod handshake;

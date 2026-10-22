@@ -1,5 +1,5 @@
 use super::segmentation::{FrameCtx, emit_data_frames};
-use super::{FastPathConn, SynFlowKey, TcpBridge};
+use super::{SynFlowKey, TcpBridge};
 
 impl TcpBridge {
     pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
@@ -837,61 +837,5 @@ impl TcpBridge {
         }
 
         frames
-    }
-
-    /// Removes a fast-path flow and reports its byte totals to the observer
-    /// (exactly once). The single choke point for fast-path teardown.
-    fn close_fast_path(&mut self, key: &SynFlowKey) {
-        let Some(conn) = self.fast_path_conns.remove(key) else {
-            return;
-        };
-        if conn.up_would_block + conn.up_short_writes + conn.up_out_of_order + conn.retransmits > 0
-        {
-            tracing::debug!(
-                "Fast path close {}:{} → {}:{}: loss recovery (up: would_block={}, short_writes={}, out_of_order={}, ooo_dropped={}; down: retransmits={})",
-                key.src_ip,
-                key.src_port,
-                key.dst_ip,
-                key.dst_port,
-                conn.up_would_block,
-                conn.up_short_writes,
-                conn.up_out_of_order,
-                conn.up_ooo_dropped,
-                conn.retransmits,
-            );
-        }
-        if let Some(ref obs) = self.observer {
-            let down = conn.down_bytes
-                + conn
-                    .down_shared
-                    .as_ref()
-                    .map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed));
-            obs.on_flow_close(
-                crate::egress::FlowKey {
-                    src_ip: key.src_ip,
-                    src_port: key.src_port,
-                    dst_ip: key.dst_ip,
-                    dst_port: key.dst_port,
-                },
-                conn.up_bytes,
-                down,
-            );
-        }
-    }
-}
-
-impl FastPathConn {
-    pub(super) fn reset_frame(&self, gw_mac: [u8; 6], guest_mac: [u8; 6]) -> Vec<u8> {
-        crate::ethernet::build_tcp_rst_frame(&crate::ethernet::TcpFrameParams {
-            src_ip: self.remote_ip,
-            dst_ip: self.guest_ip,
-            src_port: self.remote_port,
-            dst_port: self.guest_port,
-            seq: self.our_seq.load(std::sync::atomic::Ordering::Relaxed),
-            ack: self.last_ack,
-            window: 0,
-            src_mac: gw_mac,
-            dst_mac: guest_mac,
-        })
     }
 }

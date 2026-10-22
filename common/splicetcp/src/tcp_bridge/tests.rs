@@ -418,6 +418,7 @@ fn handshake_capacity_sends_rst() {
                 role: HandshakeRole::PassiveOpen,
                 our_isn: 0,
                 peer_isn: 0,
+                peer_syn_end: 1,
                 host_stream: None,
                 connect_rx: None,
                 peer_wscale: None,
