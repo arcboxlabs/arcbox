@@ -227,7 +227,7 @@ impl UdpProxy {
             }
             env.socks_proxy
                 .as_ref()
-                .map(|p| (format!("{}:{}", p.host, p.port), host.clone()))
+                .map(|p| (p.to_string(), host.clone()))
         });
 
         tokio::spawn(async move {
@@ -409,14 +409,15 @@ mod tests {
     /// With a SOCKS proxy in the env, a non-gateway flow is relayed through the
     /// SOCKS5 proxy (UDP ASSOCIATE) instead of a direct host socket; the echoed
     /// reply still comes back to the guest as an L2 frame.
-    #[tokio::test]
-    async fn udp_proxy_routes_through_socks5_when_configured() {
+    async fn udp_proxy_through_socks5(proxy_ip: std::net::IpAddr) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         // Mock SOCKS5 UDP proxy: control handshake + a UDP relay that echoes the
         // datagram (header preserved) back to the client.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind(SocketAddr::new(proxy_ip, 0))
+            .await
+            .unwrap();
         let proxy_addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -478,5 +479,15 @@ mod tests {
             "echoed payload returns to the guest via the SOCKS5 relay"
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_proxy_routes_through_socks5_when_configured() {
+        udp_proxy_through_socks5(Ipv4Addr::LOCALHOST.into()).await;
+    }
+
+    #[tokio::test]
+    async fn udp_proxy_uses_ipv6_socks5_control_endpoint() {
+        udp_proxy_through_socks5(std::net::Ipv6Addr::LOCALHOST.into()).await;
     }
 }

@@ -135,17 +135,17 @@ impl DefaultEgress {
         // then HTTPS proxy (HTTP CONNECT works on any port, not just 443),
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
-            let authority = format!("{}:{}", socks.host, socks.port);
+            let authority = socks.to_string();
             return Some((authority, host, dst_port, "socks5"));
         }
 
         if let Some(ref https) = env.https_proxy {
-            let authority = format!("{}:{}", https.host, https.port);
+            let authority = https.to_string();
             return Some((authority, host, dst_port, "http-connect"));
         }
 
         if let Some(ref http) = env.http_proxy {
-            let authority = format!("{}:{}", http.host, http.port);
+            let authority = http.to_string();
             return Some((authority, host, dst_port, "http-connect"));
         }
 
@@ -295,5 +295,31 @@ mod tests {
             egress(None).resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 443, None),
             None,
         );
+    }
+
+    #[test]
+    fn every_system_proxy_kind_formats_ipv6_authorities() {
+        for (http, https, socks, port) in [
+            (true, false, false, 3128),
+            (false, true, false, 3129),
+            (false, false, true, 1080),
+        ] {
+            let mut proxies = env(http, https, socks);
+            for config in [
+                &mut proxies.http_proxy,
+                &mut proxies.https_proxy,
+                &mut proxies.socks_proxy,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                config.host = "::1".into();
+            }
+            let target = egress(Some(proxies))
+                .resolve_proxy_target(Ipv4Addr::new(192, 0, 2, 1), 443, Some("service.example"))
+                .unwrap();
+            assert_eq!(target.0, format!("[::1]:{port}"));
+            assert_eq!((target.1.as_str(), target.2), ("service.example", 443));
+        }
     }
 }

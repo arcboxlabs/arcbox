@@ -15,3 +15,5 @@ assert_eq!(log.lookup(address).as_deref(), Some("service.example"));
 ```
 
 Run the crate tests from the repository root with `devenv shell -- cargo test --locked -p arcbox-fakeip`.
+
+`proxy_detect::ProxyConfig` formats proxy authorities through `Display`, including bracketed IPv6 addresses. System proxy parsing matches exact scutil keys and retains colons in host values.

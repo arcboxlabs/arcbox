@@ -11,3 +11,5 @@ let tunnel = arcbox_proxy::http_connect::connect_via_http_proxy(
 ```
 
 Run the CONNECT regressions from the repository root with `devenv shell -- cargo test --locked -p arcbox-proxy --lib http_connect::tests`.
+
+System SOCKS5 UDP proxy endpoints use the same `ProxyConfig` authority formatting as TCP egress, including IPv6 control endpoints. The UDP relay address is negotiated independently through SOCKS5.

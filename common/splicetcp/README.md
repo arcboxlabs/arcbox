@@ -195,3 +195,5 @@ The shim currently accepts IPv4 only. The internal IPv6 reassembler is not yet r
   `ConnSink` for event-driven promoted host→guest reads.
 
 The fragment reassembler supports bounded IPv4 and IPv6 tables, each with 32 contexts and 64 disjoint ranges per datagram. IPv6 contexts expire after 3 seconds. Conflicting overlaps quarantine an ID until expiry; exact duplicates add no coverage. Atomic fragments are isolated from contexts with the same ID. Reassembly validates extension chains, first transport headers, final lengths, and ECN combinations before returning a complete frame.
+
+The default egress resolver accepts IPv6 system-proxy endpoint addresses. HTTP, HTTPS, and SOCKS5 proxy selection shares the authority formatting from `ProxyConfig`; destination routing and proxy precedence are unchanged.
