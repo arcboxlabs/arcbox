@@ -160,7 +160,9 @@ mean that every descriptor has closed.
 Consumers that cannot retain the lease must call `into_unmanaged` and reject a
 managed socket.
 
-`EgressConn::Tcp` carries `NativeTcp<tokio::net::TcpStream>`. Resolvers wrap an unmanaged socket with `.into()` or attach a lease with `NativeTcp::with_lifecycle`. The bridge retains that owner through handshake, promotion, uploads, and cloned readers. Inbound and promotion entry points accept either wrapper or an unmanaged socket. The Tokio frame sink retains the wrapper; the VMM inline sink rejects managed sockets and leaves the primary socket on the polled path. Lease retention does not yet add cancellation handling to the bridge or reader.
+`EgressConn::Tcp` carries `NativeTcp<tokio::net::TcpStream>`. Resolvers wrap an unmanaged socket with `.into()` or attach a lease with `NativeTcp::with_lifecycle`. The bridge retains that owner through handshake, promotion, uploads, and cloned readers. Inbound and promotion entry points accept either wrapper or an unmanaged socket. The Tokio frame sink retains the wrapper; the VMM inline sink rejects managed sockets and leaves the primary socket on the polled path.
+
+Each accepted reader has a child cancellation token. Replacing or dropping the primary cancels that reader without cancelling other connections in the same generation. Tokio cancellation interrupts socket reads, zero-window waits, and blocked frame sends. A clean reader EOF preserves the primary upload half. Bridge polling still needs separate generation cancellation handling.
 
 ## L3 tunnel shim
 

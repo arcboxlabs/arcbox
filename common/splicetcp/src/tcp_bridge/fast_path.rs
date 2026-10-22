@@ -831,18 +831,6 @@ impl TcpBridge {
         let Some(conn) = self.fast_path_conns.remove(key) else {
             return;
         };
-        // An inline flow shares its host socket with an independent reader (the
-        // inject thread / direct_rx task) holding a cloned fd. Dropping only our
-        // clone leaves that reader running on the sibling fd — spinning forever
-        // once its send window freezes. Signal its cancel flag and shut the
-        // socket so it exits and releases the fd (guest-initiated FIN/RST, and
-        // the host-error paths, all funnel through here).
-        if conn.inline_owned {
-            if let Some(dead) = &conn.dead {
-                dead.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
-        }
         if conn.up_would_block + conn.up_short_writes + conn.up_out_of_order + conn.retransmits > 0
         {
             tracing::debug!(

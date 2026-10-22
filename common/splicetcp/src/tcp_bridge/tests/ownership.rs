@@ -157,3 +157,53 @@ async fn inbound_handshake_drop_releases_the_managed_socket() {
         0
     );
 }
+
+#[tokio::test]
+async fn replacement_and_bridge_drop_cancel_only_their_own_reader() {
+    let (first, _first_peer) = socket_pair().await;
+    let (second, _second_peer) = socket_pair().await;
+    let generation = CancellationToken::new();
+    let first_lease = Arc::new(());
+    let first_released = Arc::downgrade(&first_lease);
+    let second_lease = Arc::new(());
+    let second_released = Arc::downgrade(&second_lease);
+    let sink = Arc::new(HoldingSink::default());
+    let mut bridge = TcpBridge::new(GW_IP);
+    bridge.set_conn_sink(sink.clone());
+    let key = SynFlowKey {
+        src_ip: GUEST_IP,
+        src_port: 40400,
+        dst_ip: Ipv4Addr::new(203, 0, 113, 1).into(),
+        dst_port: 443,
+    };
+    for (stream, lease) in [(first, first_lease), (second, second_lease)] {
+        let previous = sink.0.lock().unwrap().take();
+        let stream =
+            NativeTcp::with_lifecycle(stream.into_std().unwrap(), lease, generation.clone());
+        bridge.promote_to_fast_path(key, stream, 1000, 2000, 1460, None);
+        if let Some(previous) = previous {
+            assert!(previous.reader_cancel.is_cancelled());
+            assert!(first_released.upgrade().is_some());
+            drop(previous);
+            assert!(first_released.upgrade().is_none());
+        }
+        assert!(
+            !sink
+                .0
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .reader_cancel
+                .is_cancelled()
+        );
+        assert!(!generation.is_cancelled());
+    }
+    let reader = sink.0.lock().unwrap().take().unwrap();
+    drop(bridge);
+    assert!(reader.reader_cancel.is_cancelled());
+    assert!(!generation.is_cancelled());
+    assert!(second_released.upgrade().is_some());
+    drop(reader);
+    assert!(second_released.upgrade().is_none());
+}
