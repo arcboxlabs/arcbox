@@ -119,8 +119,9 @@ impl IcmpProxy {
                 }
             }
 
-            // Wait for reply using AsyncFd on the ICMP socket.
-            let async_fd = match AsyncFd::new(RawSocketWrapper(icmp_socket)) {
+            // SAFETY: AsyncFd owns the socket until deregistration. No code closes or
+            // replaces the file descriptor while the registration is active.
+            let async_fd = match unsafe { AsyncFd::register(icmp_socket) } {
                 Ok(fd) => fd,
                 Err(e) => {
                     tracing::warn!("ICMP proxy: AsyncFd failed: {}", e);
@@ -210,15 +211,6 @@ impl IcmpProxy {
                 }
             }
         });
-    }
-}
-
-/// Wrapper to make `socket2::Socket` usable with `AsyncFd`.
-struct RawSocketWrapper(socket2::Socket);
-
-impl AsRawFd for RawSocketWrapper {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.0.as_raw_fd()
     }
 }
 

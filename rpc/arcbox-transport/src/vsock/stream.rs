@@ -62,7 +62,8 @@ impl VsockStream {
     pub fn from_fd_with_shutdown(fd: OwnedFd, shutdown: VsockShutdown) -> io::Result<Self> {
         Self::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self {
-            inner: VsockStreamInner::Fd(AsyncFd::new(fd)?),
+            // SAFETY: AsyncFd owns fd until deregistration; stream operations never replace or close it.
+            inner: VsockStreamInner::Fd(unsafe { AsyncFd::register(fd) }?),
             shutdown,
         })
     }
@@ -233,6 +234,39 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn raw_fd_registration_preserves_io_and_shutdown_policy() {
+        for shutdown in [VsockShutdown::HalfClose, VsockShutdown::CloseOnDropOnly] {
+            let (stream, mut peer) = tokio::net::UnixStream::pair().unwrap();
+            let fd = OwnedFd::from(stream.into_std().unwrap());
+            let mut stream = VsockStream::from_fd_with_shutdown(fd, shutdown).unwrap();
+
+            stream.write_all(b"out").await.unwrap();
+            let mut outbound = [0; 3];
+            peer.read_exact(&mut outbound).await.unwrap();
+            assert_eq!(&outbound, b"out");
+            peer.write_all(b"in").await.unwrap();
+            let mut inbound = [0; 2];
+            stream.read_exact(&mut inbound).await.unwrap();
+            assert_eq!(&inbound, b"in");
+
+            stream.shutdown().await.unwrap();
+            let mut byte = [0; 1];
+            match shutdown {
+                VsockShutdown::HalfClose => assert_eq!(peer.read(&mut byte).await.unwrap(), 0),
+                VsockShutdown::CloseOnDropOnly => {
+                    let read =
+                        tokio::time::timeout(Duration::from_millis(20), peer.read(&mut byte)).await;
+                    assert!(read.is_err(), "shutdown must not half-close the peer");
+                    stream.write_all(b"x").await.unwrap();
+                    assert_eq!(peer.read_u8().await.unwrap(), b'x');
+                }
+            }
+            drop(stream);
+            assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+        }
+    }
 
     #[tokio::test]
     async fn half_close_shutdown_closes_write_half() {

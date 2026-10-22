@@ -98,9 +98,9 @@ async fn run(
     let connection = Connection::open()?;
     let fd = connection.fd();
     let mut mirror = Mirror::new(connection);
-    // Declared after the mirror so it is dropped, and deregistered, before
-    // the connection closes the socket.
-    let socket = AsyncFd::with_interest(Fd(fd), Interest::READABLE)?;
+    // SAFETY: Connection keeps the same socket until drop. Declaration order deregisters the socket
+    // before mirror drops its Connection, including when this future is cancelled.
+    let socket = unsafe { AsyncFd::register_with_interest(Fd(fd), Interest::READABLE) }?;
     mirror.resync(network_manager.local_dns_entries());
 
     let mut announced = false;

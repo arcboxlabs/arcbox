@@ -533,7 +533,11 @@ fn is_route_ownership_conflict(
 
 #[cfg(target_os = "macos")]
 fn open_route_watcher() -> Option<tokio::io::unix::AsyncFd<arcbox_route::RouteWatcher>> {
-    match arcbox_route::RouteWatcher::open().and_then(tokio::io::unix::AsyncFd::new) {
+    let watcher = arcbox_route::RouteWatcher::open().and_then(|watcher| {
+        // SAFETY: RouteWatcher owns the descriptor and cannot replace or close it before deregistration.
+        unsafe { tokio::io::unix::AsyncFd::register(watcher) }.map_err(std::io::Error::from)
+    });
+    match watcher {
         Ok(watcher) => Some(watcher),
         Err(error) => {
             tracing::warn!(%error, "route event watcher unavailable; using polling");

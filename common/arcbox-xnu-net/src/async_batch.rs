@@ -33,7 +33,8 @@ impl AsyncBatchDgram {
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
         set_nonblocking(fd.as_raw_fd())?;
         Ok(Self {
-            inner: AsyncFd::new(fd)?,
+            // SAFETY: AsyncFd owns the descriptor until deregistration; no method replaces or closes it.
+            inner: unsafe { AsyncFd::register(fd) }?,
             batch: BatchDgram::new(),
         })
     }

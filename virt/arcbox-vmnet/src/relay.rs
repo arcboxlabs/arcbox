@@ -217,7 +217,8 @@ impl VmnetRelay {
         // exit is the loop below, whose tail always unregisters. An error
         // path between registration and the loop would strand the callback
         // (and the Vmnet it retains) until `Vmnet::stop`.
-        let async_fd = AsyncFd::new(guest_fd)?;
+        // SAFETY: AsyncFd owns guest_fd until deregistration. The callback owns a separate duplicate.
+        let async_fd = unsafe { AsyncFd::register(guest_fd) }?;
 
         // vmnet → guest: event callback on the interface's dispatch queue.
         let ctx = Arc::new(ReadCtx {
