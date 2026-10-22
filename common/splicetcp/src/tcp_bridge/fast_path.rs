@@ -130,7 +130,7 @@ impl TcpBridge {
                     let fresh = &frame[payload_start + overlap as usize..payload_end];
                     let mut batch = super::upload_batch::UploadBatch::new(fresh);
                     if overlap == 0 && conn.ooo_segs.is_empty() {
-                        batch.extend(frame, &frames[1..], seq_end, ip_start);
+                        batch.extend(&tcp, &frames[1..], seq_end, ip_start);
                     }
                     consumed = batch.count;
                     match batch.send(conn) {

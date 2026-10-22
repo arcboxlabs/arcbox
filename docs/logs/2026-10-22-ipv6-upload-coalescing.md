@@ -1,0 +1,7 @@
+# IPv6 upload coalescing
+
+Upload batches reuse the validated first TCP view, parse each following packet once, and compare both complete endpoints. Consecutive IPv6 packets can share a vectored socket write instead of being consumed one packet at a time. Matching ports, sequence continuity, ACK and receive-window equality, permitted flags, and nonempty payload remain required. Batches stop at 64 packets or 256 KiB. Socket acceptance and retained-suffix recovery are unchanged.
+
+The dedicated xuan-work-mbp test Mac passed 149 splicetcp library tests with all features and no ignored tests, strict all-target/all-feature Clippy, workspace formatting, and default-feature consumer compilation. New socket-backed coverage checks Ethernet and bare IPv6, extension and TCP option headers, every truncated prefix, each byte of both IPv6 addresses, flow-control and sequence changes, control flags, byte and packet caps, sequence wraparound, and exact payload delivery. Existing IPv4 backpressure, partial-write, and hard-error regressions also passed.
+
+The checked-in upload benchmark compares this batch with `54b699c4`. Independent fresh release builds and compiler dependency files identify both sources. Paired results and timing limits are recorded in [network benchmarks](../benchmarks/network.md#2026-10-22--ipv6-upload-coalescing). Native tunnel throughput is not established. Classifier dispatch and native IPv6 acceptance remain pending. App, NE, VPN, DNS, and interfaces remained unchanged during functional validation.

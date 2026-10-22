@@ -5,6 +5,7 @@ mod handshake_payload;
 mod ipv6_download;
 mod ipv6_fast_path;
 mod ipv6_handshake;
+mod ipv6_upload;
 mod link_mss;
 mod read_batch;
 mod upload_backpressure;

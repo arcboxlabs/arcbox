@@ -1,3 +1,4 @@
+use super::super::packet::tcp_at;
 use super::*;
 use std::io::{Read, Write};
 use std::net::Shutdown;
@@ -60,7 +61,12 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
     let first = &frames[0];
     let candidate = &frames[1];
     let mut batch = UploadBatch::new(&first[54..]);
-    batch.extend(first, &frames[1..], 2050, ETH_HEADER_LEN);
+    batch.extend(
+        &tcp_at(first, ETH_HEADER_LEN).unwrap(),
+        &frames[1..],
+        2050,
+        ETH_HEADER_LEN,
+    );
     assert_eq!(batch.count, 2);
     for (offset, value) in [
         (26, 99),
@@ -78,7 +84,12 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
         changed[offset] = value;
         let mut batch = UploadBatch::new(&first[54..]);
         let candidates = [changed];
-        batch.extend(first, &candidates, 2050, ETH_HEADER_LEN);
+        batch.extend(
+            &tcp_at(first, ETH_HEADER_LEN).unwrap(),
+            &candidates,
+            2050,
+            ETH_HEADER_LEN,
+        );
         assert_eq!(
             batch.count, 1,
             "changed offset {offset} must stop coalescing"
@@ -87,12 +98,22 @@ fn upload_batch_stops_at_flow_control_gaps_controls_and_malformed_frames() {
     for length in 0..candidate.len() {
         let mut batch = UploadBatch::new(&first[54..]);
         let candidates = [&candidate[..length]];
-        batch.extend(first, &candidates, 2050, ETH_HEADER_LEN);
+        batch.extend(
+            &tcp_at(first, ETH_HEADER_LEN).unwrap(),
+            &candidates,
+            2050,
+            ETH_HEADER_LEN,
+        );
         assert_eq!(batch.count, 1);
     }
     let large = segments(2000, &vec![7; 280_000], 40_000);
     let mut batch = UploadBatch::new(&large[0][54..]);
-    batch.extend(&large[0], &large[1..], 42_000, ETH_HEADER_LEN);
+    batch.extend(
+        &tcp_at(&large[0], ETH_HEADER_LEN).unwrap(),
+        &large[1..],
+        42_000,
+        ETH_HEADER_LEN,
+    );
     assert_eq!(batch.count, 6, "batch payload must stay within 256 KiB");
 }
 
@@ -148,7 +169,12 @@ async fn borrowed_ip_batch_validates_headers_and_splices_only_payload() {
                 .is_none()
         );
         let mut batch = UploadBatch::new(&packets[0][48..]);
-        batch.extend(&packets[0], &candidates, base.wrapping_add(33), 0);
+        batch.extend(
+            &tcp_at(&packets[0], 0).unwrap(),
+            &candidates,
+            base.wrapping_add(33),
+            0,
+        );
         assert_eq!(
             batch.count, 1,
             "invalid following packets must stop coalescing"

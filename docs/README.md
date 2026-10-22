@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — IPv6 upload coalescing](logs/2026-10-22-ipv6-upload-coalescing.md)
 - [2026-10-22 — IPv6 TCP handshakes](logs/2026-10-22-ipv6-tcp-handshakes.md)
 - [2026-10-22 — IPv6 established TCP parser](logs/2026-10-22-ipv6-established-tcp-parser.md)
 - [2026-10-22 — IPv6 TCP bridge endpoints](logs/2026-10-22-ipv6-bridge-endpoints.md)

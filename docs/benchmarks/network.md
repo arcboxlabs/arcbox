@@ -399,3 +399,24 @@ Compare `27b859ce` with the commit containing this entry using the [TCP bridge b
 The parser now validates IP version, declared lengths, fragmentation, TCP header bounds, and Ethernet/IP family agreement before accessing connection state. Pure ACK operations expose the fixed parsing cost. Download operations also include socket I/O, active-flow scans, frame encoding, and payload validation. These measurements do not establish native tunnel throughput.
 
 The final parser adds 8.753 ns per pure ACK with one flow and 8.541 ns with 64 flows. An earlier snapshot without the two parsing inline hints measured 10.6–13.3 ns of added ACK cost. The final paired run retains all structural checks; download differences are 0.30% and 0.50%. The ACK microbenchmark records the remaining cost of the added structural checks.
+
+## 2026-10-22 — IPv6 upload coalescing
+
+Compare `54b699c4` with the commit containing this entry using identical `common/splicetcp/examples/tcp_upload_bench.rs` drivers. Build through `devenv shell -- cargo build --locked -p splicetcp --example tcp_upload_bench --release`, with separate initially absent `CARGO_TARGET_DIR` directories. Compiler logs and dependency files identify both snapshots. Run baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and records seven samples per case; the table pools 14 samples. Each sample uploads 2000 batches through one established flow over an owned IPv4 or IPv6 loopback socket. Each packet carries 1400 bytes. Timing includes frame encoding, bridge interception, socket writes, ACK parsing, peer reads, and content validation. The driver consumes every packet and drains retained suffixes before the next batch. Setup is excluded. These results do not measure native tunnel throughput.
+
+| Input | Packets per batch | Baseline ns/batch | Candidate ns/batch | Difference |
+|---|---:|---:|---:|---:|
+| ipv4-ethernet | 1 | 8081.781 | 8246.729 | +2.04% |
+| ipv4-ethernet | 32 | 24834.730 | 25030.531 | +0.79% |
+| ipv4-ip | 1 | 7873.198 | 8117.427 | +3.10% |
+| ipv4-ip | 32 | 24801.125 | 24924.531 | +0.50% |
+| ipv6-ethernet | 1 | 7823.781 | 8068.157 | +3.12% |
+| ipv6-ethernet | 32 | 269824.115 | 25510.677 | -90.55% |
+| ipv6-ip | 1 | 7885.511 | 7937.844 | +0.66% |
+| ipv6-ip | 32 | 270998.750 | 25388.344 | -90.63% |
+
+IPv4 already coalesced uploads; its comparison measures the shared parser and complete endpoint checks plus socket and scheduling variation. The IPv6 baseline processes every packet separately. The candidate can process all 32 packets in one vectored write and one ACK when the socket accepts the batch.
+
+The final run records 90.55% and 90.63% lower IPv6 32-packet times. IPv4 32-packet times increase by 0.50% and 0.79%. Single-packet times increase by 0.66% to 3.12% (52 to 244 ns); socket and scheduling variation prevent attributing those differences solely to parsing. An earlier snapshot reparsed the first packet and recorded an 8.42% IPv4 Ethernet single-packet increase. The final implementation reuses the validated first view. The baseline single-packet times also changed between runs, so the measurements do not isolate the performance benefit of removing that parse.
