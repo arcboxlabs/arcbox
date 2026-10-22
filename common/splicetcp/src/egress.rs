@@ -9,17 +9,17 @@
 //! timeout). A consumer (e.g. an Inbound/Router/Outbound host) can replace the
 //! resolver to inject its own egress policy.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use tokio::sync::oneshot;
 
-/// The flow a SYN opened — everything a resolver needs to decide egress.
+/// An IPv4 or IPv6 flow and the metadata needed to select egress.
 #[derive(Clone, Debug)]
 pub struct FlowMeta {
-    pub src_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
     pub src_port: u16,
-    pub dst_ip: Ipv4Addr,
+    pub dst_ip: IpAddr,
     pub dst_port: u16,
     /// Destination domain recovered from the DNS log, if known.
     pub domain: Option<String>,
@@ -42,13 +42,13 @@ pub trait EgressResolver: Send + Sync {
     fn resolve(&self, flow: FlowMeta) -> oneshot::Receiver<Option<EgressConn>>;
 }
 
-/// A terminated fast-path flow's 4-tuple — the key handed to a [`FlowObserver`].
+/// An IPv4 or IPv6 flow's 4-tuple handed to a [`FlowObserver`] on termination.
 /// A public mirror of the bridge's internal flow key (whose fields are private).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FlowKey {
-    pub src_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
     pub src_port: u16,
-    pub dst_ip: Ipv4Addr,
+    pub dst_ip: IpAddr,
     pub dst_port: u16,
 }
 
@@ -95,7 +95,7 @@ impl DefaultEgress {
     /// both IP addresses and hostnames like `proxy.corp.com`).
     fn resolve_proxy_target(
         &self,
-        dst_ip: Ipv4Addr,
+        dst_ip: IpAddr,
         dst_port: u16,
         domain: Option<&str>,
     ) -> Option<(String, String, u16, &'static str)> {
@@ -103,7 +103,7 @@ impl DefaultEgress {
         // it is translated to loopback at connect time and must never be
         // tunnelled through a proxy — the proxy would dial a virtual
         // address that exists only inside the datapath.
-        if dst_ip == self.gateway_ip {
+        if dst_ip == IpAddr::V4(self.gateway_ip) {
             return None;
         }
 
@@ -158,13 +158,12 @@ impl EgressResolver for DefaultEgress {
         let proxy_target =
             self.resolve_proxy_target(flow.dst_ip, flow.dst_port, flow.domain.as_deref());
         // Direct connect target. Gateway IP → loopback for host.docker.internal.
-        let target_ip = if flow.dst_ip == self.gateway_ip {
-            Ipv4Addr::LOCALHOST
+        let target_ip = if flow.dst_ip == IpAddr::V4(self.gateway_ip) {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
         } else {
             flow.dst_ip
         };
-        let connect_addr =
-            std::net::SocketAddr::V4(std::net::SocketAddrV4::new(target_ip, flow.dst_port));
+        let connect_addr = SocketAddr::new(target_ip, flow.dst_port);
         let timeout_secs = self.connect_timeout_secs;
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -226,7 +225,7 @@ mod tests {
     fn domainless_ip_dst_proxied_via_socks() {
         let eg = egress(Some(env(false, false, true)));
         assert_eq!(
-            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 443, None),
+            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 443, None),
             Some((
                 "127.0.0.1:1080".to_string(),
                 "1.2.3.4".to_string(),
@@ -241,7 +240,7 @@ mod tests {
         // HTTPS preferred over HTTP.
         let eg = egress(Some(env(true, true, false)));
         assert_eq!(
-            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 80, None),
+            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 80, None),
             Some((
                 "127.0.0.1:3129".to_string(),
                 "1.2.3.4".to_string(),
@@ -252,7 +251,7 @@ mod tests {
         // HTTP only.
         let eg = egress(Some(env(true, false, false)));
         assert_eq!(
-            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 80, None),
+            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 80, None),
             Some((
                 "127.0.0.1:3128".to_string(),
                 "1.2.3.4".to_string(),
@@ -266,7 +265,7 @@ mod tests {
     #[test]
     fn socks_preferred_over_http_proxies() {
         let eg = egress(Some(env(true, true, true)));
-        let got = eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 443, None);
+        let got = eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 443, None);
         assert_eq!(got.unwrap().3, "socks5");
     }
 
@@ -278,7 +277,7 @@ mod tests {
     fn gateway_dst_is_direct_despite_proxy() {
         let eg = egress(Some(env(true, true, true)));
         assert_eq!(
-            eg.resolve_proxy_target(Ipv4Addr::new(10, 0, 0, 1), 8080, None),
+            eg.resolve_proxy_target(Ipv4Addr::new(10, 0, 0, 1).into(), 8080, None),
             None,
         );
     }
@@ -288,11 +287,11 @@ mod tests {
     fn no_proxy_is_direct() {
         let eg = egress(Some(env(false, false, false)));
         assert_eq!(
-            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 443, Some("example.com")),
+            eg.resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 443, Some("example.com")),
             None,
         );
         assert_eq!(
-            egress(None).resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4), 443, None),
+            egress(None).resolve_proxy_target(Ipv4Addr::new(1, 2, 3, 4).into(), 443, None),
             None,
         );
     }
@@ -316,10 +315,102 @@ mod tests {
                 config.host = "::1".into();
             }
             let target = egress(Some(proxies))
-                .resolve_proxy_target(Ipv4Addr::new(192, 0, 2, 1), 443, Some("service.example"))
+                .resolve_proxy_target(
+                    Ipv4Addr::new(192, 0, 2, 1).into(),
+                    443,
+                    Some("service.example"),
+                )
                 .unwrap();
             assert_eq!(target.0, format!("[::1]:{port}"));
             assert_eq!((target.1.as_str(), target.2), ("service.example", 443));
+        }
+    }
+
+    #[test]
+    fn ipv6_proxy_targets_preserve_literals_domains_and_bypass() {
+        let ip = "2001:db8::99".parse::<IpAddr>().unwrap();
+        let mut proxy = env(true, true, true);
+        assert_eq!(
+            egress(Some(proxy.clone())).resolve_proxy_target(ip, 443, None),
+            Some((
+                "127.0.0.1:1080".into(),
+                "2001:db8::99".into(),
+                443,
+                "socks5"
+            ))
+        );
+        assert_eq!(
+            egress(Some(proxy.clone())).resolve_proxy_target(ip, 443, Some("service.example")),
+            Some((
+                "127.0.0.1:1080".into(),
+                "service.example".into(),
+                443,
+                "socks5"
+            ))
+        );
+        proxy.bypass_domains.push("2001:db8::99".into());
+        assert!(
+            egress(Some(proxy))
+                .resolve_proxy_target(ip, 443, None)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_ip_families_and_ipv4_gateway_exchange_bytes() {
+        use std::net::Ipv6Addr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let gateway = Ipv4Addr::new(10, 0, 0, 1);
+        for (listen_ip, target_ip) in [
+            (
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ),
+            (
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ),
+            (IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V4(gateway)),
+        ] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let listener = tokio::net::TcpListener::bind(SocketAddr::new(listen_ip, 0))
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let trap = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                trap.set_nonblocking(true).unwrap();
+                let proxy = (target_ip == IpAddr::V4(gateway)).then(|| {
+                    let mut proxy = env(false, false, true);
+                    proxy.socks_proxy.as_mut().unwrap().port = trap.local_addr().unwrap().port();
+                    proxy
+                });
+                let resolver = DefaultEgress::new(gateway, proxy, 2);
+                let flow = FlowMeta {
+                    src_ip: listen_ip,
+                    src_port: 40000,
+                    dst_ip: target_ip,
+                    dst_port: address.port(),
+                    domain: None,
+                };
+                let EgressConn::Tcp(mut client) = resolver.resolve(flow).await.unwrap().unwrap();
+                let (mut server, _) = listener.accept().await.unwrap();
+                assert_eq!(client.peer_addr().unwrap(), address);
+                client.write_all(b"request").await.unwrap();
+                let mut request = [0; 7];
+                server.read_exact(&mut request).await.unwrap();
+                assert_eq!(&request, b"request");
+                server.write_all(b"reply").await.unwrap();
+                let mut reply = [0; 5];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"reply");
+                assert_eq!(
+                    trap.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            })
+            .await
+            .expect("egress must complete within five seconds");
         }
     }
 }

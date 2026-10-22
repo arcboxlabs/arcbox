@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Egress address families](logs/2026-10-22-egress-address-families.md)
 - [2026-10-22 — IPv6 L3 adapter](logs/2026-10-22-ipv6-l3-adapter.md)
 - [2026-10-22 — IPv6 system-proxy endpoints](logs/2026-10-22-ipv6-system-proxy-endpoints.md)
 - [2026-10-22 — Bounded IPv6 fragment reassembly](logs/2026-10-22-ipv6-fragment-reassembly.md)

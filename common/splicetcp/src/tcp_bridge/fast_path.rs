@@ -978,9 +978,9 @@ impl TcpBridge {
                     .map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed));
             obs.on_flow_close(
                 crate::egress::FlowKey {
-                    src_ip: key.src_ip,
+                    src_ip: key.src_ip.into(),
                     src_port: key.src_port,
-                    dst_ip: key.dst_ip,
+                    dst_ip: key.dst_ip.into(),
                     dst_port: key.dst_port,
                 },
                 conn.up_bytes,

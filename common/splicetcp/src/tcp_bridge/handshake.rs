@@ -102,9 +102,9 @@ impl TcpBridge {
         // recovered from the destination IP via the DNS resolution log.
         let domain = self.dns_log.as_ref().and_then(|log| log.lookup(dst_ip));
         let result_rx = self.egress.resolve(crate::egress::FlowMeta {
-            src_ip,
+            src_ip: src_ip.into(),
             src_port,
-            dst_ip,
+            dst_ip: dst_ip.into(),
             dst_port,
             domain,
         });
