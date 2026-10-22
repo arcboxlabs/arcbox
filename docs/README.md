@@ -95,6 +95,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-22 — Handshake cancellation](logs/2026-10-22-handshake-cancellation.md)
 - [2026-10-22 — Primary TCP cancellation](logs/2026-10-22-primary-tcp-cancellation.md)
 - [2026-10-22 — Reader cancellation](logs/2026-10-22-reader-cancellation.md)
 - [2026-10-22 — Native TCP ownership](logs/2026-10-22-native-tcp-ownership.md)

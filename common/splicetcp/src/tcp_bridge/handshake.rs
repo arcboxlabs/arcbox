@@ -87,11 +87,17 @@ impl TcpBridge {
         // connection's latency (sequential fetches ran at ~2 s/request).
         let result_rx = if let Some(waker) = &self.handshake_waker {
             let waker = std::sync::Arc::clone(waker);
-            let (tx, rx) = oneshot::channel();
+            let (mut tx, rx) = oneshot::channel();
             tokio::spawn(async move {
-                let value = result_rx.await.unwrap_or(None);
-                let _ = tx.send(value);
-                waker.notify_one();
+                tokio::select! {
+                    biased;
+                    () = tx.closed() => {}
+                    result = result_rx => {
+                        if tx.send(result.unwrap_or(None)).is_ok() {
+                            waker.notify_one();
+                        }
+                    }
+                }
             });
             rx
         } else {
@@ -186,6 +192,17 @@ impl TcpBridge {
         let now = StdInstant::now();
 
         for (key, conn) in &mut self.handshake_conns {
+            if conn
+                .host_stream
+                .as_ref()
+                .is_some_and(crate::NativeTcp::is_cancelled)
+            {
+                if conn.role == HandshakeRole::PassiveOpen || conn.saved_frame.is_some() {
+                    out.push(handshake_abort_rst(key, conn));
+                }
+                to_abort.push(*key);
+                continue;
+            }
             // Global TTL — abort stuck handshakes, telling the guest: without
             // the RST it retries SYNs against a flow we already gave up on
             // and its socket only dies by its own (much longer) timeout.
@@ -208,6 +225,11 @@ impl TcpBridge {
                         };
                         match rx.try_recv() {
                             Ok(Some(crate::egress::EgressConn::Tcp(tokio_stream))) => {
+                                if tokio_stream.is_cancelled() {
+                                    out.push(handshake_abort_rst(key, conn));
+                                    to_abort.push(*key);
+                                    continue;
+                                }
                                 match tokio_stream.into_std() {
                                     Ok(std_stream) => {
                                         std_stream.set_nonblocking(true).ok();
@@ -389,6 +411,19 @@ impl TcpBridge {
             dst_port: tcp.destination_port(),
         };
         let conn = self.handshake_conns.get(&key)?;
+        if conn
+            .host_stream
+            .as_ref()
+            .is_some_and(crate::NativeTcp::is_cancelled)
+        {
+            let replies = if flags & 0x04 == 0 {
+                vec![handshake_abort_rst(&key, conn)]
+            } else {
+                Vec::new()
+            };
+            self.handshake_conns.remove(&key);
+            return Some(replies);
+        }
 
         match conn.role {
             HandshakeRole::PassiveOpen => {
@@ -488,21 +523,26 @@ impl TcpBridge {
     }
 }
 
-/// Builds the RST|ACK toward the guest for a handshake that will never
-/// complete — connect failure, TTL expiry, or a dropped egress channel.
-/// `seq` is 0 because our SYN-ACK may not have been sent yet; acknowledging
-/// the guest's ISN keeps the RST acceptable in SYN-SENT (RFC 793). Without
-/// this frame the guest's socket outlives the aborted flow (ABX-431).
+/// Reset the guest with the sequence space for its handshake role.
 fn handshake_abort_rst(key: &SynFlowKey, conn: &HandshakeConn) -> Vec<u8> {
-    crate::ethernet::build_tcp_rst_frame(&crate::ethernet::TcpFrameParams {
+    let params = crate::ethernet::TcpFrameParams {
         src_ip: key.dst_ip,
         dst_ip: key.src_ip,
         src_port: key.dst_port,
         dst_port: key.src_port,
-        seq: 0,
+        seq: if conn.saved_frame.is_some() {
+            conn.our_isn.wrapping_add(1)
+        } else {
+            0
+        },
         ack: conn.peer_isn.wrapping_add(1),
         window: 0,
         src_mac: conn.gw_mac,
         dst_mac: conn.guest_mac,
-    })
+    };
+    if conn.role == HandshakeRole::ActiveOpen {
+        crate::ethernet::build_tcp_rst_only_frame(&params)
+    } else {
+        crate::ethernet::build_tcp_rst_frame(&params)
+    }
 }
