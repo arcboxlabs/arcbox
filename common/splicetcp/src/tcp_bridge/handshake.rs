@@ -2,6 +2,7 @@ use super::{
     HANDSHAKE_MAX_RETRANSMITS, HANDSHAKE_TOTAL_TTL, HandshakeConn, HandshakeRole, MAX_PENDING_SYNS,
     SHIM_MSS, SHIM_WSCALE, SynFlowKey, TcpBridge, build_rst_from_syn, next_isn, should_retransmit,
 };
+use crate::egress::{EgressConn, EgressOutcome};
 use crate::ethernet::ETH_HEADER_LEN;
 use std::net::Ipv4Addr;
 use std::time::Instant as StdInstant;
@@ -114,9 +115,12 @@ impl TcpBridge {
         // connection's latency (sequential fetches ran at ~2 s/request).
         let result_rx = if let Some(waker) = &self.handshake_waker {
             let waker = std::sync::Arc::clone(waker);
-            let (tx, rx) = oneshot::channel();
+            let (mut tx, rx) = oneshot::channel();
             tokio::spawn(async move {
-                let value = result_rx.await.unwrap_or(None);
+                let value = tokio::select! {
+                    result = result_rx => result.unwrap_or(EgressOutcome::Reject),
+                    () = tx.closed() => return,
+                };
                 let _ = tx.send(value);
                 waker.notify_one();
             });
@@ -208,6 +212,54 @@ impl TcpBridge {
         let now = StdInstant::now();
 
         for (key, conn) in &mut self.handshake_conns {
+            // Consume a ready drop before the TTL can turn it into a reset.
+            if conn.role == HandshakeRole::PassiveOpen && conn.host_stream.is_none() {
+                let Some(rx) = conn.connect_rx.as_mut() else {
+                    // No stream, no pending connect — aborted.
+                    out.push(handshake_abort_rst(key, conn));
+                    to_abort.push(*key);
+                    continue;
+                };
+                match rx.try_recv() {
+                    Ok(EgressOutcome::Connect(EgressConn::Tcp(tokio_stream))) => {
+                        match tokio_stream.into_std() {
+                            Ok(std_stream) => {
+                                std_stream.set_nonblocking(true).ok();
+                                std_stream.set_nodelay(true).ok();
+                                conn.host_stream = Some(std_stream);
+                                conn.connect_rx = None;
+                            }
+                            Err(e) => {
+                                tracing::debug!("Handshake shim: into_std failed for {key:?}: {e}");
+                                out.push(handshake_abort_rst(key, conn));
+                                to_abort.push(*key);
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(EgressOutcome::Reject) => {
+                        // Host connect refused / timed out. Emit
+                        // RST|ACK toward the guest so the originating
+                        // socket sees an immediate ECONNREFUSED
+                        // instead of waiting for SYN retransmits.
+                        tracing::debug!("Handshake shim: host connect failed for {key:?}");
+                        out.push(handshake_abort_rst(key, conn));
+                        to_abort.push(*key);
+                        continue;
+                    }
+                    Ok(EgressOutcome::Drop) => {
+                        to_abort.push(*key);
+                        continue;
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {}
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        out.push(handshake_abort_rst(key, conn));
+                        to_abort.push(*key);
+                        continue;
+                    }
+                }
+            }
+
             // Global TTL — abort stuck handshakes, telling the guest: without
             // the RST it retries SYNs against a flow we already gave up on
             // and its socket only dies by its own (much longer) timeout.
@@ -220,52 +272,8 @@ impl TcpBridge {
 
             match conn.role {
                 HandshakeRole::PassiveOpen => {
-                    // If host connect hasn't resolved, try to pick up the result.
                     if conn.host_stream.is_none() {
-                        let Some(rx) = conn.connect_rx.as_mut() else {
-                            // No stream, no pending connect — aborted.
-                            out.push(handshake_abort_rst(key, conn));
-                            to_abort.push(*key);
-                            continue;
-                        };
-                        match rx.try_recv() {
-                            Ok(Some(crate::egress::EgressConn::Tcp(tokio_stream))) => {
-                                match tokio_stream.into_std() {
-                                    Ok(std_stream) => {
-                                        std_stream.set_nonblocking(true).ok();
-                                        std_stream.set_nodelay(true).ok();
-                                        conn.host_stream = Some(std_stream);
-                                        conn.connect_rx = None;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "Handshake shim: into_std failed for {key:?}: {e}"
-                                        );
-                                        out.push(handshake_abort_rst(key, conn));
-                                        to_abort.push(*key);
-                                        continue;
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                // Host connect refused / timed out. Emit
-                                // RST|ACK toward the guest so the originating
-                                // socket sees an immediate ECONNREFUSED
-                                // instead of waiting for SYN retransmits.
-                                tracing::debug!("Handshake shim: host connect failed for {key:?}");
-                                out.push(handshake_abort_rst(key, conn));
-                                to_abort.push(*key);
-                                continue;
-                            }
-                            Err(oneshot::error::TryRecvError::Empty) => {
-                                continue; // still connecting
-                            }
-                            Err(oneshot::error::TryRecvError::Closed) => {
-                                out.push(handshake_abort_rst(key, conn));
-                                to_abort.push(*key);
-                                continue;
-                            }
-                        }
+                        continue;
                     }
 
                     // Host stream is ready. Emit SYN-ACK (first time) or

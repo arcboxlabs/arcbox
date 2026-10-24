@@ -1,6 +1,7 @@
 use super::*;
 use crate::ethernet::ETH_HEADER_LEN;
 
+mod egress;
 mod handshake_payload;
 mod link_mss;
 mod read_batch;

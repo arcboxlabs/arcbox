@@ -36,10 +36,21 @@ pub enum EgressConn {
     Tcp(tokio::net::TcpStream),
 }
 
+/// The terminal result of resolving a guest TCP handshake.
+pub enum EgressOutcome {
+    /// Establish the guest handshake using this upstream transport.
+    Connect(EgressConn),
+    /// Refuse the guest handshake with a TCP reset.
+    Reject,
+    /// Remove the guest handshake without sending a response.
+    Drop,
+}
+
 /// Decides + establishes egress for a flow. Injected into the bridge so a
 /// consumer (e.g. an Inbound/Router/Outbound host) can replace the policy.
 pub trait EgressResolver: Send + Sync {
-    fn resolve(&self, flow: FlowMeta) -> oneshot::Receiver<Option<EgressConn>>;
+    /// Resolves the flow. A closed result channel refuses the guest handshake.
+    fn resolve(&self, flow: FlowMeta) -> oneshot::Receiver<EgressOutcome>;
 }
 
 /// A terminated fast-path flow's 4-tuple — the key handed to a [`FlowObserver`].
@@ -154,7 +165,7 @@ impl DefaultEgress {
 }
 
 impl EgressResolver for DefaultEgress {
-    fn resolve(&self, flow: FlowMeta) -> oneshot::Receiver<Option<EgressConn>> {
+    fn resolve(&self, flow: FlowMeta) -> oneshot::Receiver<EgressOutcome> {
         let proxy_target =
             self.resolve_proxy_target(flow.dst_ip, flow.dst_port, flow.domain.as_deref());
         // Direct connect target. Gateway IP → loopback for host.docker.internal.
@@ -188,7 +199,11 @@ impl EgressResolver for DefaultEgress {
                     .await
                     .ok()
                     .and_then(Result::ok);
-            let _ = tx.send(stream.map(EgressConn::Tcp));
+            let outcome = match stream {
+                Some(stream) => EgressOutcome::Connect(EgressConn::Tcp(stream)),
+                None => EgressOutcome::Reject,
+            };
+            let _ = tx.send(outcome);
         });
         rx
     }
