@@ -79,6 +79,28 @@ the next `poll_handshakes` observes the completed dial immediately. The
 bridge's optional handshake waker cancels its forwarding task when the
 handshake removes the result receiver.
 
+## Abandoning an inspected connection
+
+`EgressConn::controlled_tcp(stream)` returns a transport and an `AbandonHandle`.
+The consumer must call `handle.abandon()` before dropping its loopback stream on
+a late silent rejection. Dropping the handle alone preserves ordinary close
+behavior. Controlled connections stay on the polled path, including when a
+`ConnSink` is installed. The caller must continue calling `poll_fast_path`.
+
+Abandonment releases the host socket and relay buffers. The bridge emits no
+application data, FIN, or RST for that transition, including when abandonment
+races with host EOF or an I/O error. It retains cumulative TCP receive state,
+discards payload, ACKs contiguous bytes, client FIN, and TCP keepalive probes,
+and ignores other pure ACKs.
+Out-of-order payload receives duplicate ACKs and requires retransmission.
+
+The bridge removes discard state on client RST, after 120 seconds without a
+client packet, or when admitting a new entry would exceed 4096 entries. Capacity
+eviction removes the least recently active entry. Cleanup emits no packet.
+These are bounded ArcTap retention rules; they do not claim exact Surge lifetime
+parity. `fast_path_count()` counts host transports only. Idle cleanup runs in
+`poll_fast_path` even when that count is zero.
+
 ## Fast path and Tokio integration
 
 Without a `ConnSink`, host→guest bytes are drained by

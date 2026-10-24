@@ -69,7 +69,7 @@ fn emit_data_frames(
 }
 
 impl TcpBridge {
-    pub(super) fn intercept_at<const IP_START: usize, T: AsRef<[u8]>>(
+    pub(super) fn intercept_open_at<const IP_START: usize, T: AsRef<[u8]>>(
         &mut self,
         frames: &[T],
     ) -> Option<(usize, Vec<u8>)> {
@@ -396,6 +396,7 @@ impl TcpBridge {
     ///
     /// Returns frames to be written to the guest FD via `enqueue_or_write`.
     pub fn poll_fast_path(&mut self) -> Vec<Vec<u8>> {
+        let controlled = self.prepare_controlled_poll();
         let mut frames = Vec::new();
         let mut to_remove = Vec::new();
         let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
@@ -930,6 +931,7 @@ impl TcpBridge {
             }
         }
 
+        self.finish_controlled_poll(controlled, &mut frames);
         for key in to_remove {
             self.close_fast_path(&key);
         }
@@ -939,7 +941,8 @@ impl TcpBridge {
 
     /// Removes a fast-path flow and reports its byte totals to the observer
     /// (exactly once). The single choke point for fast-path teardown.
-    fn close_fast_path(&mut self, key: &SynFlowKey) {
+    pub(super) fn close_fast_path(&mut self, key: &SynFlowKey) {
+        self.flow_controls.remove(key);
         let Some(conn) = self.fast_path_conns.remove(key) else {
             return;
         };
