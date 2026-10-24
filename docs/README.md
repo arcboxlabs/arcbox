@@ -93,6 +93,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-24 — TCP egress resolution supports silent rejection](logs/2026-10-24-tcp-egress-drop.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)
 - [2026-10-08 — Sandbox benchmarks distinguish creation paths and preserve measurement units](logs/2026-10-08-sandbox-benchmark-integration.md)
 - [2026-10-07 — Caller-owned rootfs capacity and publication passed Linux validation](logs/2026-10-07-rootfs-capacity-integration.md)

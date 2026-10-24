@@ -33,7 +33,9 @@ pub mod tcp_bridge;
 #[cfg(target_os = "macos")]
 pub mod utun;
 
-pub use egress::{DefaultEgress, EgressConn, EgressResolver, FlowKey, FlowMeta, FlowObserver};
+pub use egress::{
+    DefaultEgress, EgressConn, EgressOutcome, EgressResolver, FlowKey, FlowMeta, FlowObserver,
+};
 #[cfg(target_os = "macos")]
 pub use frame_source::FdFrameSource;
 pub use frame_source::FrameSource;

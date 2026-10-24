@@ -237,7 +237,7 @@ pub(super) struct HandshakeConn {
     host_stream: Option<std::net::TcpStream>,
     /// Oneshot receiver for async host connect (PassiveOpen only).
     /// Consumed when connect resolves.
-    connect_rx: Option<oneshot::Receiver<Option<crate::egress::EgressConn>>>,
+    connect_rx: Option<oneshot::Receiver<crate::egress::EgressOutcome>>,
     /// Peer's TCP options, mirrored in our SYN-ACK (PassiveOpen) or
     /// captured from their SYN-ACK (ActiveOpen).
     peer_wscale: Option<u8>,

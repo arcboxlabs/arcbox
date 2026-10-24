@@ -54,7 +54,7 @@ The crate is split around a few seams:
 ## Egress resolution
 
 `TcpBridge` calls `EgressResolver::resolve` for every gated SYN and expects an
-async `oneshot::Receiver<Option<EgressConn>>`. `FlowMeta` contains the 4-tuple
+async `oneshot::Receiver<EgressOutcome>`. `FlowMeta` contains the 4-tuple
 and, when a shared fake-IP DNS log is installed on the bridge, the recovered
 destination domain.
 
@@ -63,12 +63,21 @@ Consumers typically wrap their router/outbound layer behind this trait:
 1. classify a SYN,
 2. map `FlowMeta` to routing metadata,
 3. dial an outbound,
-4. return `Some(EgressConn::Tcp(stream))` for a real fd that the bridge can
-   splice.
+4. return `EgressOutcome::Connect(EgressConn::Tcp(stream))` for a real fd that
+   the bridge can splice.
+
+Return `EgressOutcome::Reject` to reset the guest handshake. Return
+`EgressOutcome::Drop` to remove the handshake without a response. A closed
+result channel also resets the guest. A `Drop` already delivered to the bridge
+receiver stays silent even if the handshake deadline has elapsed before polling.
+Pending results retain the handshake timeout behavior. Dropped handshakes retain
+no transport or receiver; a later SYN for the same flow starts resolution again.
 
 For event-driven loops, wrap the resolver and notify the loop when the inner
 receiver completes. The wake should be sent **after** forwarding the result so
-the next `poll_handshakes` observes the completed dial immediately.
+the next `poll_handshakes` observes the completed dial immediately. The
+bridge's optional handshake waker cancels its forwarding task when the
+handshake removes the result receiver.
 
 ## Fast path and Tokio integration
 
