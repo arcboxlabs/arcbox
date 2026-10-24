@@ -58,7 +58,7 @@ impl TcpBridge {
         // the fixed 1460-byte GSO segments that path emits. A smaller-MSS peer
         // (e.g. a sub-1500 overlay bridge behind eth0) stays on the clamped
         // polling path below, where each segment matches its advertised MSS.
-        let inline_eligible = peer_mss >= GSO_SEGMENT_MSS;
+        let inline_eligible = peer_mss >= GSO_SEGMENT_MSS && !self.flow_controls.contains_key(&key);
         let mut dead: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         let mut retx: Option<crate::direct_rx::RetxRing> = None;
         if let Some(sink) = self.conn_sink.as_ref().filter(|_| inline_eligible) {

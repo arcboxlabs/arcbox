@@ -411,6 +411,7 @@ fn handshake_capacity_sends_rst() {
                 our_isn: 0,
                 peer_isn: 0,
                 host_stream: None,
+                abandon: None,
                 connect_rx: None,
                 peer_wscale: None,
                 peer_mss: 1460,

@@ -235,6 +235,7 @@ pub(super) struct HandshakeConn {
     /// connect completes. For ActiveOpen: set from the already-accepted
     /// stream at registration time.
     host_stream: Option<std::net::TcpStream>,
+    abandon: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Oneshot receiver for async host connect (PassiveOpen only).
     /// Consumed when connect resolves.
     connect_rx: Option<oneshot::Receiver<crate::egress::EgressOutcome>>,
@@ -307,6 +308,8 @@ pub struct TcpBridge {
     /// Silence deadline before a soliciting flow is declared dead
     /// ([`DEAD_FLOW_TIMEOUT`]; overridable in tests).
     dead_flow_timeout: std::time::Duration,
+    flow_controls: HashMap<SynFlowKey, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    abandoned_conns: HashMap<SynFlowKey, abandon::AbandonedConn>,
 }
 
 /// A TCP connection promoted to the fast path — bypasses any TCP state
@@ -548,6 +551,8 @@ impl TcpBridge {
             handshake_conns: HashMap::new(),
             handshake_waker: None,
             dead_flow_timeout: DEAD_FLOW_TIMEOUT,
+            flow_controls: HashMap::new(),
+            abandoned_conns: HashMap::new(),
         }
     }
 
@@ -607,6 +612,7 @@ impl TcpBridge {
     }
 }
 
+mod abandon;
 mod fast_path;
 mod handshake;
 mod intercept;

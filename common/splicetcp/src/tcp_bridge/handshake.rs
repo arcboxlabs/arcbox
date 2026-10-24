@@ -2,7 +2,7 @@ use super::{
     HANDSHAKE_MAX_RETRANSMITS, HANDSHAKE_TOTAL_TTL, HandshakeConn, HandshakeRole, MAX_PENDING_SYNS,
     SHIM_MSS, SHIM_WSCALE, SynFlowKey, TcpBridge, build_rst_from_syn, next_isn, should_retransmit,
 };
-use crate::egress::{EgressConn, EgressOutcome};
+use crate::egress::EgressOutcome;
 use crate::ethernet::ETH_HEADER_LEN;
 use std::net::Ipv4Addr;
 use std::time::Instant as StdInstant;
@@ -27,6 +27,11 @@ impl TcpBridge {
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
     ) -> Option<Vec<u8>> {
+        if !self.abandoned_conns.is_empty()
+            && let Some(reply) = self.try_fast_path_intercept(syn_frame)
+        {
+            return Some(reply);
+        }
         // Parse the SYN frame: ETH(14) + IP(var) + TCP(var).
         let ip_start = ETH_HEADER_LEN;
         if syn_frame.len() < ip_start + 40 {
@@ -138,6 +143,7 @@ impl TcpBridge {
                 our_isn,
                 peer_isn: guest_isn,
                 host_stream: None,
+                abandon: None,
                 connect_rx: Some(result_rx),
                 peer_wscale,
                 peer_mss,
@@ -184,6 +190,7 @@ impl TcpBridge {
                 our_isn,
                 peer_isn: 0, // filled in when SYN-ACK arrives
                 host_stream: Some(host_stream),
+                abandon: None,
                 connect_rx: None,
                 peer_wscale: Some(SHIM_WSCALE),
                 peer_mss: SHIM_MSS,
@@ -221,7 +228,9 @@ impl TcpBridge {
                     continue;
                 };
                 match rx.try_recv() {
-                    Ok(EgressOutcome::Connect(EgressConn::Tcp(tokio_stream))) => {
+                    Ok(EgressOutcome::Connect(transport)) => {
+                        let (tokio_stream, abandon) = transport.into_parts();
+                        conn.abandon = abandon;
                         match tokio_stream.into_std() {
                             Ok(std_stream) => {
                                 std_stream.set_nonblocking(true).ok();
@@ -258,6 +267,15 @@ impl TcpBridge {
                         continue;
                     }
                 }
+            }
+
+            if conn
+                .abandon
+                .as_ref()
+                .is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire))
+            {
+                to_abort.push(*key);
+                continue;
             }
 
             // Global TTL — abort stuck handshakes, telling the guest: without
@@ -483,6 +501,9 @@ impl TcpBridge {
                 let Some(stream) = conn.host_stream else {
                     return Some(Vec::new());
                 };
+                if let Some(abandon) = conn.abandon {
+                    self.flow_controls.insert(key, abandon);
+                }
                 self.promote_to_fast_path(key, stream, our_seq, last_ack, peer_mss, peer_wscale);
                 Some(Vec::new())
             }
@@ -537,6 +558,9 @@ impl TcpBridge {
                 let Some(stream) = conn.host_stream else {
                     return Some(vec![ack_frame]);
                 };
+                if let Some(abandon) = conn.abandon {
+                    self.flow_controls.insert(key, abandon);
+                }
                 self.promote_to_fast_path(key, stream, our_seq, last_ack, peer_mss, peer_wscale);
                 Some(vec![ack_frame])
             }

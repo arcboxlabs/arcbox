@@ -10,6 +10,10 @@
 //! resolver to inject its own egress policy.
 
 use std::net::Ipv4Addr;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use tokio::sync::oneshot;
@@ -34,6 +38,39 @@ pub struct FlowMeta {
 pub enum EgressConn {
     /// Has a real fd → the bridge splices it on the fast path.
     Tcp(tokio::net::TcpStream),
+    /// A polled transport with explicit control over guest-side abandonment.
+    ControlledTcp(tokio::net::TcpStream, AbandonHandle),
+}
+
+impl EgressConn {
+    /// Creates a transport that can stop relaying without closing the guest TCP connection.
+    /// Call the returned handle before dropping the consumer's stream on a silent rejection.
+    pub fn controlled_tcp(stream: tokio::net::TcpStream) -> (Self, AbandonHandle) {
+        let signal = Arc::new(AtomicBool::new(false));
+        (
+            Self::ControlledTcp(stream, AbandonHandle(Arc::clone(&signal))),
+            AbandonHandle(signal),
+        )
+    }
+
+    pub(crate) fn into_parts(self) -> (tokio::net::TcpStream, Option<Arc<AtomicBool>>) {
+        match self {
+            Self::Tcp(stream) => (stream, None),
+            Self::ControlledTcp(stream, control) => (stream, Some(control.0)),
+        }
+    }
+}
+
+/// One-shot control for abandoning a guest TCP connection after inspection.
+/// Dropping the handle without calling [`Self::abandon`] preserves ordinary close behavior.
+pub struct AbandonHandle(Arc<AtomicBool>);
+
+impl AbandonHandle {
+    /// Signals abandonment synchronously. Call before dropping the consumer's stream.
+    /// The next bridge poll or guest packet releases the transport without emitting FIN or RST.
+    pub fn abandon(self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// The terminal result of resolving a guest TCP handshake.
