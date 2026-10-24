@@ -12,9 +12,17 @@ impl EgressResolver for Resolver {
 }
 
 fn register(bridge: &mut TcpBridge, port: u16) -> oneshot::Sender<EgressOutcome> {
+    register_with_options(bridge, port, &[])
+}
+
+pub(super) fn register_with_options(
+    bridge: &mut TcpBridge,
+    port: u16,
+    options: &[u8],
+) -> oneshot::Sender<EgressOutcome> {
     let (tx, rx) = oneshot::channel();
     bridge.set_egress_resolver(Arc::new(Resolver(Mutex::new(Some(rx)))));
-    let syn = make_guest_syn_frame(port, Ipv4Addr::new(203, 0, 113, 1), 443, 100, &[]);
+    let syn = make_guest_syn_frame(port, Ipv4Addr::new(203, 0, 113, 1), 443, 100, options);
     assert!(
         bridge
             .handle_outbound_syn(&syn, GW_MAC, GUEST_MAC)

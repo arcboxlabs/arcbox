@@ -245,3 +245,22 @@ Run `devenv shell -- cargo bench --manifest-path .source/arcbox/Cargo.toml -p ar
 | `send_batch_to_v4` | 263.83 µs | 254.16–275.19 µs | 242,580 |
 
 The point estimate improves by 3.4%, but the intervals overlap. This single sequential run includes receiver cost and does not establish a NE throughput improvement. ArcTap integration requires a separate runtime comparison.
+
+## 2026-10-24 — Ordinary TCP ACK abandonment check
+
+The [ignored probe](../../common/splicetcp/src/tcp_bridge/tests/abandon_bench.rs) compares the existing `intercept_open_at` entry with the new `intercept_at` wrapper in the same release binary. Both paths process the same valid pure ACK for an ordinary inline connection. The control and discard maps are empty. Inputs, the bridge, and results pass through `black_box`.
+
+Run from an ArcTap checkout with this ArcBox submodule:
+
+```sh
+devenv shell -- cargo test -p splicetcp --release ordinary_ack_abandon_branch_cost -- --ignored --nocapture
+```
+
+Each path receives 10,000 warmup calls. Nine measurement rounds each execute 1,000,000 calls per path, alternating which path runs first. The probe prints every round and the median; the probe has no timing assertion. Host: Apple M5 Max, macOS 26.7.1, Rust 1.96.0.
+
+| Path | Median ns/ACK | Minimum ns/ACK | Maximum ns/ACK |
+| --- | ---: | ---: | ---: |
+| Existing entry | 21.025 | 20.699 | 21.328 |
+| Empty-map wrapper | 21.865 | 21.553 | 23.541 |
+
+The wrapper adds 0.840 ns/ACK, or 3.99%, in this run. This measures only the empty-map branch cost on a repeated ACK with a warm cache. It does not measure controlled connections, discard-table load, host I/O, packet batching, network throughput, or Network Extension CPU cost. Native runtime acceptance remains separate.
