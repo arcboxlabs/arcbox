@@ -278,6 +278,17 @@ macOS no other way — need an APFS data directory, and are capped at **2 guests
 per host** by Apple's license. Details in
 [docs/macos-guest.md](docs/macos-guest.md).
 
+## Self-hosted GitHub Actions runners
+
+ArcBox Runners turns Macs and Linux boxes you already own into GitHub Actions
+runners for every organization your workspace connects. Enroll a host and it
+takes jobs labeled `runs-on: arcbox-<os>-<arch>` (for example
+`arcbox-macos-arm64`): Linux jobs run in a fresh container, macOS jobs get a
+fresh disposable macOS guest, and Windows jobs run through WSL interop. Each
+host decides per job whether it has room, and the service offers the job to the
+next host when it does not. Enrollment is opt-in; nothing above needs an
+account.
+
 ## Built from scratch
 
 Most of ArcBox's performance-critical code is custom rather than vendored:

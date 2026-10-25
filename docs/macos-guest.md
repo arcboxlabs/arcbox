@@ -110,6 +110,16 @@ VmManager::start                 macos::MacVm
    prints it — the handle callers (e.g. a CI driver) use to `ssh` into the
    guest and run work directly, with no in-guest agent or provisioning channel.
 
+5. **Runner consumption (`runner/arcbox-runner-agent/src/vm.rs`).** The ArcBox
+   Runners agent's VM backend is a plain client of this surface: per darwin job
+   it `Create`s a `runner-<job>` clone, `Start`s it (the daemon's two-guest cap
+   is the admission signal), waits for the `Inspect`-reported address, runs the
+   image-baked Actions runner over SSH (`admin`/`admin` — the runner-image
+   contract; guests are host-only reachable via vmnet NAT), and treats the ssh
+   session's exit as job completion. `Remove(force)` is teardown *and*
+   cancellation. `ImagePull`/`ImageList` back the agent's `macos_runner_image`
+   prepare flow.
+
 Teardown for the disposable loop: `request_stop` (graceful) -> delete the per-VM clone.
 `save_state`/`restore_state` (macOS 14+) enable Anka-style instant start later.
 
