@@ -134,17 +134,14 @@ fn container_name(job_id: &str) -> String {
     format!("arcbox-{job_id}")
 }
 
-/// ArcBox's Docker-compatible socket path on macOS (`~/.arcbox/docker.sock`).
+/// ArcBox's Docker-compatible socket on macOS (`<data_dir>/run/docker.sock`,
+/// following the same profile and data-dir resolution as the daemon).
 fn arcbox_socket_path() -> Option<String> {
     if std::env::consts::OS != "macos" {
         return None;
     }
-    dirs::home_dir().map(|home| {
-        home.join(".arcbox")
-            .join("docker.sock")
-            .to_string_lossy()
-            .into_owned()
-    })
+    let layout = arcbox_constants::paths::HostLayout::from_env_or_default();
+    Some(layout.docker_socket.to_string_lossy().into_owned())
 }
 
 /// Connect to a Docker-compatible runtime and verify it answers a ping.
@@ -201,7 +198,7 @@ impl DockerRunner {
     /// Connect to the Docker-compatible runtime and prove it works by pulling
     /// the default runner image for each candidate arch.
     ///
-    /// On macOS, prefers ArcBox's own socket (`~/.arcbox/docker.sock`) and falls
+    /// On macOS, prefers ArcBox's own socket (`~/.arcbox/run/docker.sock`) and falls
     /// back to the system default (Docker Desktop, Colima, …) when ArcBox is
     /// absent or unresponsive. On Linux it uses the system default directly
     /// (`/var/run/docker.sock`).
