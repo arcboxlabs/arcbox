@@ -796,67 +796,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-fleet-agent"
-version = "0.1.7"
-dependencies = [
- "anyhow",
- "arcbox-connect",
- "arcbox-connectrpc",
- "arcbox-constants",
- "arcbox-fleet-control-proto",
- "arcbox-fleet-proto",
- "arcbox-grpc",
- "arcbox-logging",
- "arcbox-protocol",
- "async-stream",
- "bollard",
- "clap",
- "command-group",
- "dashmap",
- "dirs",
- "hostname",
- "hyper-util",
- "keyring",
- "libc",
- "plist",
- "prost",
- "reqwest 0.13.5",
- "russh",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "arcbox-fleet-control-proto"
-version = "0.10.5"
-dependencies = [
- "prost",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
-name = "arcbox-fleet-proto"
-version = "0.10.5"
-dependencies = [
- "prost",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
 name = "arcbox-fs"
 version = "0.10.5"
 dependencies = [
@@ -1112,6 +1051,67 @@ version = "0.10.5"
 dependencies = [
  "libc",
  "tracing",
+]
+
+[[package]]
+name = "arcbox-runner-agent"
+version = "0.1.7"
+dependencies = [
+ "anyhow",
+ "arcbox-connect",
+ "arcbox-connectrpc",
+ "arcbox-constants",
+ "arcbox-grpc",
+ "arcbox-logging",
+ "arcbox-protocol",
+ "arcbox-runner-control-proto",
+ "arcbox-runner-proto",
+ "async-stream",
+ "bollard",
+ "clap",
+ "command-group",
+ "dashmap",
+ "dirs",
+ "hostname",
+ "hyper-util",
+ "keyring",
+ "libc",
+ "plist",
+ "prost",
+ "reqwest 0.13.5",
+ "russh",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "arcbox-runner-control-proto"
+version = "0.10.5"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "arcbox-runner-proto"
+version = "0.10.5"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

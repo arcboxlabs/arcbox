@@ -1,6 +1,6 @@
 pub mod check_tool_updates;
-pub mod fleet_asset;
 pub mod package_tarball;
+pub mod runner_asset;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -27,6 +27,6 @@ pub fn run(args: ReleaseArgs) -> Result<()> {
     match args.command {
         ReleaseCommand::CheckToolUpdates(args) => check_tool_updates::run(args),
         ReleaseCommand::PackageTarball(args) => package_tarball::run(args),
-        ReleaseCommand::FleetAsset(args) => fleet_asset::run(args),
+        ReleaseCommand::RunnerAsset(args) => runner_asset::run(args),
     }
 }

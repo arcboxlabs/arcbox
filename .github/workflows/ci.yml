@@ -237,7 +237,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          module=fleet/arcbox-fleet-control-proto
+          module=runner/arcbox-runner-control-proto
           git fetch --depth=1 origin "$BASE_REF"
           if git cat-file -e "FETCH_HEAD:$module/buf.yaml" 2>/dev/null; then
             buf breaking "$module" --against ".git#ref=FETCH_HEAD,subdir=$module"

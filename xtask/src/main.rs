@@ -167,8 +167,8 @@ enum ReleaseCommand {
     CheckToolUpdates(CheckToolUpdatesArgs),
     /// Package the desktop release artifacts into a tar.gz and matching .sha256 file.
     PackageTarball(PackageTarballArgs),
-    /// Stage a single arcbox-fleet-agent binary as a raw release asset with a .sha256 file.
-    FleetAsset(FleetAssetArgs),
+    /// Stage a single arcbox-runner-agent binary as a raw release asset with a .sha256 file.
+    RunnerAsset(RunnerAssetArgs),
 }
 
 #[derive(Args)]
@@ -195,13 +195,13 @@ struct PackageTarballArgs {
 }
 
 #[derive(Args)]
-struct FleetAssetArgs {
-    /// Platform slug used in the asset name (`<os>-<arch>` in the fleet
+struct RunnerAssetArgs {
+    /// Platform slug used in the asset name (`<os>-<arch>` in the runner
     /// capability vocabulary), e.g. darwin-arm64, linux-amd64. The version
     /// lives in the release tag, not the asset name.
     #[arg(long)]
     platform: String,
-    /// Path to the built arcbox-fleet-agent binary.
+    /// Path to the built arcbox-runner-agent binary.
     #[arg(long)]
     binary: PathBuf,
     /// Directory to write the asset and checksum into.

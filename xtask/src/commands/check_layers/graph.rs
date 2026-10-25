@@ -27,7 +27,7 @@ pub enum Layer {
     App,
     Guest,
     Sdk,
-    Fleet,
+    Runner,
     Tests,
     Xtask,
 }
@@ -44,7 +44,7 @@ impl Layer {
         Self::App,
         Self::Guest,
         Self::Sdk,
-        Self::Fleet,
+        Self::Runner,
         Self::Tests,
         Self::Xtask,
     ];
@@ -61,7 +61,7 @@ impl Layer {
             Self::App => "app",
             Self::Guest => "guest",
             Self::Sdk => "sdk",
-            Self::Fleet => "fleet",
+            Self::Runner => "runner",
             Self::Tests => "tests",
             Self::Xtask => "xtask",
         }
