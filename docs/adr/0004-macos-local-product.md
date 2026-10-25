@@ -1,6 +1,6 @@
 # ADR 0004: ArcBox is a local macOS product
 
-- Status: accepted (2026-10-08)
+- Status: accepted (2026-10-08); decisions 2 and 3 superseded by [ADR 0006](0006-restore-arcbox-runners.md) (2026-10-25): the agent returns as ArcBox Runners
 - Deciders: ArcBox product owner
 - Archive: `archive/platform-before-macos-focus-2026-10-08`
 - Archive commit: `c6d818ad11f07c62c955e8b3653cf1ce3cb8df22`

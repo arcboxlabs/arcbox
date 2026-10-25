@@ -1,6 +1,6 @@
 # ArcBox Architecture Charter — the Engine/Computer Restructure
 
-Status: **active** (2026-08-13; product scope revised 2026-10-08 by [ADR 0004](../adr/0004-macos-local-product.md)). This document is the anchor for the
+Status: **active** (2026-08-13; product scope revised 2026-10-08 by [ADR 0004](../adr/0004-macos-local-product.md) and 2026-10-25 by [ADR 0006](../adr/0006-restore-arcbox-runners.md)). This document is the anchor for the
 workspace restructure: every restructure PR cites it, and changes to the
 decisions below happen here first.
 
@@ -23,7 +23,7 @@ points:
 1. `app/arcbox-daemon` — macOS desktop product (today's shape)
 2. `guest/arcbox-agent` — inside the System VM, managing nested Firecracker sandboxes
 
-Linux guest support, KVM, Firecracker, TAP networking, and portable libraries remain part of the local product. Fleet and the former bare-Linux node product expansion are archived under ADR 0004. The completed extraction phases below remain architectural history; they do not authorize those product expansions.
+Linux guest support, KVM, Firecracker, TAP networking, and portable libraries remain part of the local product. The former bare-Linux node product expansion is archived under ADR 0004. The ArcBox Runners agent (`runner/`, ADR 0006) is a separate shell over the daemon's public APIs, not an engine consumer. The completed extraction phases below remain architectural history; they do not authorize the node expansion.
 
 ## Locked decisions
 
@@ -39,7 +39,7 @@ Linux guest support, KVM, Firecracker, TAP networking, and portable libraries re
   in-process (existing skeleton, demoted to R&D). The "performance paths
   are custom-built" doctrine stays scoped to macOS, where it is the moat;
   on Linux differentiation lives above the VMM.
-- **D3 — Repo boundary follows the local product.** This repo contains the Rust library stack, macOS daemon, CLI, guest agent, protocol, and SDKs. Sibling repos provide the desktop app and guest image pipelines. Fleet services, K8s operators, and a cloud snapshot registry are outside the current product scope.
+- **D3 — Repo boundary follows the local product.** This repo contains the Rust library stack, macOS daemon, CLI, guest agent, protocol, SDKs, and the ArcBox Runners agent. Sibling repos provide the desktop app, guest image pipelines, and the Runners control plane (`arcboxlabs/platform`). K8s operators and a cloud snapshot registry are outside the current product scope.
 - **D4 — Layer dependency rules** (enforced the way `common/`'s "no VM
   dep" rule is): `engine/` and `computer/` crates depend on macOS-only
   crates (VZ/vmnet/HV) only through the hypervisor trait, and never on
@@ -86,6 +86,7 @@ arcbox/
 ├── app/               # L4 product shells: macOS daemon,
 │                      #   cli, docker compat, helper, migration
 ├── guest/             # arcbox-agent; vm-agent recomposed over engine/
+├── runner/            # ArcBox Runners agent + its gateway/control protocols
 ├── sdk/  runtime/  tests/  xtask/
 ```
 
