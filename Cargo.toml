@@ -101,6 +101,13 @@ members = [
     "tests/e2e",
     "virt/arcbox-net-inject",
     "xtask",
+
+    # ============================================
+    # Fleet (cross-platform runner agent, MIT OR Apache-2.0)
+    # ============================================
+    "fleet/arcbox-fleet-proto",
+    "fleet/arcbox-fleet-control-proto",
+    "fleet/arcbox-fleet-agent",
 ]
 
 [workspace.package]
@@ -201,6 +208,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Hostname
 hostname = "0.4"
 
+# System facts (memory, OS version) — cross-platform
+sysinfo = "0.33"
+
 # Nix (Unix APIs)
 nix = { version = "0.29", features = [
     "fs",
@@ -279,6 +289,8 @@ arcbox-protocol = { version = "0.10.5", path = "rpc/arcbox-protocol" } # x-relea
 arcbox-grpc = { version = "0.10.5", path = "rpc/arcbox-grpc" } # x-release-please-version
 arcbox-connect = { version = "0.10.5", path = "rpc/arcbox-connect" } # x-release-please-version
 arcbox-transport = { version = "0.10.5", path = "rpc/arcbox-transport" } # x-release-please-version
+arcbox-fleet-proto = { version = "0.10.5", path = "fleet/arcbox-fleet-proto" } # x-release-please-version
+arcbox-fleet-control-proto = { version = "0.10.5", path = "fleet/arcbox-fleet-control-proto" } # x-release-please-version
 arcbox-docker = { version = "0.10.5", path = "app/arcbox-docker" } # x-release-please-version
 # Pinned to app/arcbox-helper's own version (not workspace.package). Do not
 # attach x-release-please-version — helper releases are manual.
