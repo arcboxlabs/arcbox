@@ -20,8 +20,8 @@ use crate::shim::l2_to_l3;
 /// The 4-byte address-family header macOS prepends to each `utun` packet.
 pub const AF_HEADER_SIZE: usize = 4;
 
-/// Largest IP packet we read from the device in one shot.
-const MAX_IP_PACKET: usize = 65535;
+/// IPv6 has a 40-byte fixed header in addition to its 16-bit payload length.
+const MAX_IP_PACKET: usize = 40 + 65535;
 
 /// A [`FrameSource`] over a macOS `utun` fd, yielding bare IP packets.
 ///
@@ -67,7 +67,7 @@ impl FrameSource for UtunFrameSource {
 
 /// Writes L2 frames destined for the "guest" back to the `utun` as IP packets.
 ///
-/// The synthetic Ethernet header is stripped via [`l2_to_l3`] (ARP / non-IPv4
+/// The synthetic Ethernet header is stripped via [`l2_to_l3`] (ARP / non-IP
 /// frames have no L3 meaning and are dropped); the 4-byte AF header is then
 /// prepended.
 pub struct UtunSink {
@@ -82,7 +82,7 @@ impl UtunSink {
     }
 
     /// Writes one L2 frame to the `utun`. Returns `Ok(false)` if the frame had
-    /// no L3 representation (ARP / non-IPv4) and was dropped.
+    /// no L3 representation (ARP / non-IP) and was dropped.
     ///
     /// # Errors
     ///
@@ -280,5 +280,51 @@ mod tests {
         );
         assert!(utun_af_header(&[0x00]).is_err(), "non-IP version rejected");
         assert!(utun_af_header(&[]).is_err(), "empty packet rejected");
+    }
+
+    #[test]
+    fn frame_source_preserves_maximum_ipv6_packet() {
+        let (host, guest) = dgram_pair();
+        set_nonblocking(host.as_raw_fd());
+        socket2::SockRef::from(&host)
+            .set_recv_buffer_size(1024 * 1024)
+            .unwrap();
+        socket2::SockRef::from(&guest)
+            .set_send_buffer_size(1024 * 1024)
+            .unwrap();
+        let mut ip = vec![0x5a; 40 + 65535];
+        ip[..40].fill(0);
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&65535u16.to_be_bytes());
+        ip[6] = 17;
+        let mut datagram = (libc::AF_INET6 as u32).to_be_bytes().to_vec();
+        datagram.extend_from_slice(&ip);
+        write_raw(guest.as_raw_fd(), &datagram);
+        let mut source = UtunFrameSource::new(host.as_raw_fd());
+        let mut packets = Vec::new();
+        source.drain(|packet| packets.push(packet.to_vec()));
+        assert_eq!(packets, vec![ip]);
+    }
+
+    #[test]
+    fn sink_writes_ipv6_with_network_order_family() {
+        let (host, guest) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        guest.set_nonblocking(true).unwrap();
+        let mut ip = [0; 48];
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        ip[6] = 17;
+        let mut buf = [0; ETH_HEADER_LEN + 48];
+        let frame =
+            crate::shim::l3_to_l2(&ip, &crate::shim::synthetic_l2_header(), &mut buf).unwrap();
+        assert!(
+            UtunSink::new(host.as_raw_fd())
+                .send_l2_frame(frame)
+                .unwrap()
+        );
+        let mut datagram = [0; 64];
+        let size = guest.recv(&mut datagram).unwrap();
+        assert_eq!(&datagram[..4], &(libc::AF_INET6 as u32).to_be_bytes());
+        assert_eq!(&datagram[4..size], &ip);
     }
 }

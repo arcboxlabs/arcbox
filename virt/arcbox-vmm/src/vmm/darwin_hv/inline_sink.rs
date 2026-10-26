@@ -12,8 +12,16 @@ pub(super) struct InlineConnSinkAdapter {
 
 impl arcbox_net::direct_rx::ConnSink for InlineConnSinkAdapter {
     fn send_conn(&self, conn: arcbox_net::direct_rx::PromotedConn) -> bool {
+        // The inject worker cannot retain a managed lease; keep that flow on the bridge.
+        let stream = match conn.stream.into_unmanaged() {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::debug!(%error, "Inline injection declined managed TCP ownership");
+                return false;
+            }
+        };
         let inline = arcbox_net_inject::inline_conn::InlineConn {
-            stream: conn.stream,
+            stream,
             remote_ip: conn.remote_ip,
             guest_ip: conn.guest_ip,
             remote_port: conn.remote_port,

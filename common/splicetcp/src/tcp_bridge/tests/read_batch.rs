@@ -1,4 +1,5 @@
 use super::*;
+use arcbox_packet::checksum;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncWriteExt;
 
@@ -22,7 +23,7 @@ async fn check_download_batches(large_frames: bool) {
     let keys = [40210, 40211].map(|src_port| SynFlowKey {
         src_ip: GUEST_IP,
         src_port,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 150),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 150).into(),
         dst_port: 443,
     });
     let payloads = [17, 131].map(|seed| {
@@ -90,8 +91,8 @@ async fn check_download_batches(large_frames: bool) {
             if !large_frames {
                 assert_eq!(
                     checksum::tcp_checksum(
-                        keys[i].dst_ip.octets(),
-                        GUEST_IP.octets(),
+                        fixture_v4(keys[i].dst_ip).octets(),
+                        fixture_v4(GUEST_IP).octets(),
                         &frame[tcp..]
                     ),
                     0
@@ -144,7 +145,7 @@ async fn rejected_inline_flow_allocates_scratch_for_polling() {
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40212,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 151),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 151).into(),
         dst_port: 443,
     };
     let _inline_server = fast_path_pair(&mut bridge, key, 2000).await;

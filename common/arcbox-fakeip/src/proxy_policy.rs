@@ -94,17 +94,7 @@ impl ProxyScheme {
 
 impl fmt::Display for ProxyUrl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let host = &self.server.host;
-        if host.contains(':') {
-            write!(
-                f,
-                "{}://[{host}]:{}",
-                self.scheme.as_str(),
-                self.server.port
-            )
-        } else {
-            write!(f, "{}://{host}:{}", self.scheme.as_str(), self.server.port)
-        }
+        write!(f, "{}://{}", self.scheme.as_str(), self.server)
     }
 }
 

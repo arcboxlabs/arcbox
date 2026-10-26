@@ -1,0 +1,7 @@
+# Explicit TCP abort
+
+`TcpBridge::abort` drains handshake and established flows without forwarding buffered bytes. Each primary is released before reset delivery. Established and SYN-RECEIVED resets use SND.NXT with ACK clear. Pending passive resets count original SYN payload and FIN. Active handshakes are deleted without a reset, as specified by RFC 9293 section 3.10.5. Normal close and abort share observer accounting.
+
+The dedicated test Mac passed all 175 splicetcp all-feature library tests, formatting, and strict all-target/all-feature Clippy through devenv with Rust 1.96.0. No tests failed or were ignored. Regressions cover sequence wraparound, pending and resolved passive dials, active opens, buffered uploads, IPv4/IPv6, socket release before callback, and repeated abort. Downstream all-target checks passed in the preceding CLOSED batch. The first abort snapshot failed Clippy on an unused import; that diagnostic remains in `/private/tmp/arctap-explicit-abort-results-oct22-v1`.
+
+Final results: `/private/tmp/arctap-explicit-abort-results-oct22-v2`. Source manifest SHA-256: `b15a90744887e0d2ee7361054cb277e25f16beb0fa3fecb7ff6a09eb79bd74f6`. Source, native bindings, DNS, and interfaces remained unchanged. This batch does not establish native App/NE, TUN, or VM acceptance. Retained-reader and queued-waker abort coverage and final combined workspace validation remain separate work.

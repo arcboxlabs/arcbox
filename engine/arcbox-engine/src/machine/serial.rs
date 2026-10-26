@@ -117,7 +117,8 @@ impl Port {
 
 /// Reads `fd` until cancelled or closed, logging complete lines.
 async fn drain_port(fd: OwnedFd, port: Port, cancel: CancellationToken) {
-    let fd = match AsyncFd::with_interest(fd, Interest::READABLE) {
+    // SAFETY: AsyncFd owns the pipe until deregistration; the drain never replaces or closes it.
+    let fd = match unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) } {
         Ok(fd) => fd,
         Err(e) => {
             tracing::warn!("{}: cannot watch the console pipe: {e}", port.label);

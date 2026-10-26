@@ -47,6 +47,7 @@ from memory. Every new file is added to the index below.
 
 ### Reference
 
+- [Packet primitives](../common/arcbox-packet/README.md) — IP views, Ethernet framing, and checksums
 - [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle, force-stop completion, and storage maintenance
 - [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [Data directories](data-directories.md) — every path the daemon writes
@@ -97,13 +98,47 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-26 — Native TCP ownership and silent rejection share one bridge](logs/2026-10-26-native-tcp-drop-integration.md)
 - [2026-10-24 — TCP egress resolution supports silent rejection](logs/2026-10-24-tcp-egress-drop.md)
+- [2026-10-23 — E2E finalization requires successful daemon exit](logs/2026-10-23-e2e-finalization.md)
+- [2026-10-22 — Host egress IPv4 header guard](logs/2026-10-22-host-ipv4-guard.md)
+- [2026-10-22 — Inbound UDP associations](logs/2026-10-22-inbound-udp-associations.md)
+- [2026-10-22 — Abort ownership coverage](logs/2026-10-22-abort-ownership.md)
+- [2026-10-22 — Explicit TCP abort](logs/2026-10-22-explicit-tcp-abort.md)
+- [2026-10-22 — TCP CLOSED replies](logs/2026-10-22-tcp-closed-replies.md)
+- [2026-10-22 — Handshake cancellation](logs/2026-10-22-handshake-cancellation.md)
+- [2026-10-22 — Primary TCP cancellation](logs/2026-10-22-primary-tcp-cancellation.md)
+- [2026-10-22 — Reader cancellation](logs/2026-10-22-reader-cancellation.md)
+- [2026-10-22 — Native TCP ownership](logs/2026-10-22-native-tcp-ownership.md)
+- [2026-10-22 — IPv6 classifier activation](logs/2026-10-22-ipv6-classifier.md)
+- [2026-10-22 — Shared classifier parsing](logs/2026-10-22-shared-classifier-parsing.md)
+- [2026-10-22 — Classifier address types](logs/2026-10-22-classifier-address-types.md)
+- [2026-10-22 — IPv6 upload coalescing](logs/2026-10-22-ipv6-upload-coalescing.md)
+- [2026-10-22 — IPv6 TCP handshakes](logs/2026-10-22-ipv6-tcp-handshakes.md)
+- [2026-10-22 — IPv6 established TCP parser](logs/2026-10-22-ipv6-established-tcp-parser.md)
+- [2026-10-22 — IPv6 TCP bridge endpoints](logs/2026-10-22-ipv6-bridge-endpoints.md)
+- [2026-10-22 — TCP segmentation extraction](logs/2026-10-22-tcp-segmentation-extraction.md)
+- [2026-10-22 — Validated SYN rejection](logs/2026-10-22-validated-syn-rejection.md)
+- [2026-10-22 — Egress address families](logs/2026-10-22-egress-address-families.md)
+- [2026-10-22 — IPv6 L3 adapter](logs/2026-10-22-ipv6-l3-adapter.md)
+- [2026-10-22 — IPv6 system-proxy endpoints](logs/2026-10-22-ipv6-system-proxy-endpoints.md)
+- [2026-10-22 — Bounded IPv6 fragment reassembly](logs/2026-10-22-ipv6-fragment-reassembly.md)
+- [2026-10-22 — Pure TCP reset frames](logs/2026-10-22-pure-tcp-reset-frames.md)
+- [2026-10-22 — IPv4 and IPv6 TCP SYN frames](logs/2026-10-22-ipv4-ipv6-tcp-syn-frames.md)
+- [2026-10-22 — IPv6 TCP control and data frames](logs/2026-10-22-ipv6-tcp-control-data-frames.md)
+- [2026-10-22 — Shared TCP frame encoding](logs/2026-10-22-shared-tcp-frame-encoding.md)
+- [2026-10-22 — Borrowed TCP packet views](logs/2026-10-22-borrowed-tcp-packet-views.md)
+- [2026-10-22 — Borrowed IP packet views](logs/2026-10-22-borrowed-ip-packet-views.md)
+- [2026-10-22 — Migrate Tokio descriptor registration](logs/2026-10-22-tokio-descriptor-registration.md)
+- [2026-10-22 — Format HTTP CONNECT IPv6 authorities](logs/2026-10-22-http-connect-ipv6-authority.md)
+- [2026-10-22 — Preserve IPv6 DNS resolution records](logs/2026-10-22-ipv6-dns-resolution-log.md)
 - [2026-10-21 — Boot assets 0.8.10 restore bind mounts from macOS temporary directories](logs/2026-10-21-boot-0.8.10-private-mountpoint.md)
 - [2026-10-20 — Storage recovery rebinds a moved pair and boots the current recovery init](logs/2026-10-20-storage-recovery-moved-pair.md)
 - [2026-10-20 — Storage recovery rebuilds a stale Btrfs free space tree](logs/2026-10-20-storage-recovery-fst-repair.md)
 - [2026-10-19 — `host-gateway` reaches the Mac](logs/2026-10-19-host-gateway-reaches-the-mac.md)
 - [2026-10-19 — Child processes kept closed test listeners alive on macOS](logs/2026-10-19-test-listeners-held-by-children.md)
 - [2026-10-19 — Docker allocates /24 networks from the container pool](logs/2026-10-19-docker-network-pool-size.md)
+- [2026-10-19 — Align Clippy configuration with Rust 1.96](logs/2026-10-19-pinned-clippy.md)
 - [2026-10-14 — TCP promotion and receive batches preserve protocol state](logs/2026-10-14-network-followups.md)
 - [2026-10-12 — Passive-open completion preserves payload and receive window](logs/2026-10-12-passive-open-payload.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)

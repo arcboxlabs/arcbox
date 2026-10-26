@@ -176,7 +176,9 @@ mod macos {
             UTUN_MTU as usize,
         );
 
-        let async_fd = AsyncFd::new(RawFdWrapper(fd)).context("register utun with reactor")?;
+        // SAFETY: tun owns the unchanged descriptor and outlives this event loop and its registration.
+        let async_fd =
+            unsafe { AsyncFd::register(RawFdWrapper(fd)) }.context("register utun with reactor")?;
         let dns_upstream = args.dns;
         let mut maintenance = tokio::time::interval(Duration::from_secs(30));
         // Drive the common tail (handshake completion + fast-path reads)

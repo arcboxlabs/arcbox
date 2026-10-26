@@ -228,7 +228,8 @@ impl NetworkDatapath {
             None => tcp_bridge.set_dns_log(dns_log.clone()),
         }
 
-        let guest_async = AsyncFd::new(FdWrapper(guest_fd))?;
+        // SAFETY: FdWrapper owns guest_fd until deregistration; the datapath never replaces or closes it.
+        let guest_async = unsafe { AsyncFd::register(FdWrapper(guest_fd)) }?;
 
         // Clone the reply sender for async DNS forwarding tasks.
         let dns_reply_tx = egress.reply_sender();

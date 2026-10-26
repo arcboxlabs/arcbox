@@ -64,7 +64,7 @@ fn l3_classification_retains_mixed_protocol_bytes_and_order() {
             gated.dst_port,
             gated.syn_seq
         ),
-        (HOST, GATEWAY, 40000, 443, 1234)
+        (HOST.into(), GATEWAY.into(), 40000, 443, 1234)
     );
     assert_eq!(gated.frame, syn);
     let kinds = [
@@ -133,4 +133,66 @@ fn l3_reassembles_out_of_order_fragments_before_interception() {
         arcbox_packet::ethernet::ipv4_header_checksum(&packet[..20]),
         u16::from_be_bytes([packet[10], packet[11]])
     );
+}
+
+#[test]
+fn classification_validates_lengths_before_retention() {
+    let tcp = build_tcp_data_frame(
+        &TcpFrameParams {
+            src_ip: HOST,
+            dst_ip: GATEWAY,
+            src_port: 40000,
+            dst_port: 443,
+            seq: 10,
+            ack: 20,
+            window: 4096,
+            src_mac: HOST_MAC,
+            dst_mac: GATEWAY_MAC,
+        },
+        b"declared payload",
+    );
+    let udp = udp(b"declared datagram", 9999, 1500).remove(0);
+    for bare in [false, true] {
+        let mut device = FrameClassifier::with_pool_capacity(GATEWAY, 1500, 1);
+        let classify = |device: &mut FrameClassifier, frame: &[u8]| {
+            if bare {
+                device.classify_ip_packet(frame, &mut None);
+            } else {
+                device.classify_frame(frame, &mut None);
+            }
+        };
+        let offset = if bare { 0 } else { ETH_HEADER_LEN };
+        for frame in [&tcp, &udp] {
+            let input = &frame[ETH_HEADER_LEN - offset..];
+            for len in 0..input.len() {
+                classify(&mut device, &input[..len]);
+            }
+            for total_len in [0, 19, 21, u16::MAX] {
+                let mut invalid = input.to_vec();
+                invalid[offset + 2..offset + 4].copy_from_slice(&total_len.to_be_bytes());
+                classify(&mut device, &invalid);
+            }
+        }
+        for data_offset in [0x40, 0xf0] {
+            let mut invalid = tcp[ETH_HEADER_LEN - offset..].to_vec();
+            invalid[offset + 32] = data_offset;
+            classify(&mut device, &invalid);
+        }
+        for length in [0u16, 7, u16::MAX] {
+            let mut invalid = udp[ETH_HEADER_LEN - offset..].to_vec();
+            invalid[offset + 24..offset + 26].copy_from_slice(&length.to_be_bytes());
+            classify(&mut device, &invalid);
+        }
+        assert!(device.rx_queue.is_empty());
+        assert!(device.gated_syns.is_empty());
+        assert!(device.intercepted.is_empty());
+        assert_eq!(device.pool.free_count(), 1);
+        for frame in [&tcp, &udp] {
+            let mut padded = frame[ETH_HEADER_LEN - offset..].to_vec();
+            padded.extend_from_slice(&[0xee; 31]);
+            classify(&mut device, &padded);
+        }
+        assert_eq!(&*device.rx_queue.pop_front().unwrap(), tcp);
+        assert_eq!(&*device.take_intercepted().pop().unwrap().frame, udp);
+    }
 }

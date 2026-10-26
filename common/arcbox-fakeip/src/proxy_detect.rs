@@ -8,15 +8,25 @@
 //! `scutil`/`ifconfig` probes are macOS-specific and `cfg`-gated; on other
 //! targets `detect()` returns the environment-variable-only result.
 
-use std::net::Ipv4Addr;
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::{fmt, net::Ipv4Addr};
 
-/// Proxy server configuration.
+/// Proxy server configuration. Display formats a host:port authority with bracketed IPv6 hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     pub host: String,
     pub port: u16,
+}
+
+impl fmt::Display for ProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.host.contains(':') && !self.host.starts_with('[') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
+    }
 }
 
 /// Detected proxy/VPN environment on the host.
@@ -73,21 +83,9 @@ impl ProxyEnvironment {
         {
             tracing::info!(
                 fake_ip = env.fake_ip_active,
-                http_proxy = env
-                    .http_proxy
-                    .as_ref()
-                    .map(|p| format!("{}:{}", p.host, p.port))
-                    .as_deref(),
-                https_proxy = env
-                    .https_proxy
-                    .as_ref()
-                    .map(|p| format!("{}:{}", p.host, p.port))
-                    .as_deref(),
-                socks_proxy = env
-                    .socks_proxy
-                    .as_ref()
-                    .map(|p| format!("{}:{}", p.host, p.port))
-                    .as_deref(),
+                http_proxy = env.http_proxy.as_ref().map(ToString::to_string).as_deref(),
+                https_proxy = env.https_proxy.as_ref().map(ToString::to_string).as_deref(),
+                socks_proxy = env.socks_proxy.as_ref().map(ToString::to_string).as_deref(),
                 bypass_count = env.bypass_domains.len(),
                 "proxy environment detected"
             );
@@ -217,39 +215,17 @@ fn parse_proxy_block(
     host_key: &str,
     port_key: &str,
 ) -> Option<ProxyConfig> {
-    let enabled = text.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if trimmed.starts_with(enable_key) {
-            trimmed.split(':').nth(1).map(|v| v.trim() == "1")
-        } else {
-            None
-        }
-    })?;
-
-    if !enabled {
+    let value = |key: &str| {
+        text.lines().find_map(|line| {
+            let (field, value) = line.split_once(':')?;
+            (field.trim() == key).then(|| value.trim())
+        })
+    };
+    if value(enable_key)? != "1" {
         return None;
     }
-
-    let host = text.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if trimmed.starts_with(host_key) && !trimmed.starts_with(&format!("{host_key}E")) {
-            trimmed.split(':').nth(1).map(|v| v.trim().to_string())
-        } else {
-            None
-        }
-    })?;
-
-    let port: u16 = text.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if trimmed.starts_with(port_key) {
-            trimmed
-                .split(':')
-                .nth(1)
-                .and_then(|v| v.trim().parse().ok())
-        } else {
-            None
-        }
-    })?;
+    let host = value(host_key)?.to_string();
+    let port: u16 = value(port_key)?.parse().ok()?;
 
     if host.is_empty() || port == 0 {
         return None;
@@ -396,5 +372,35 @@ mod tests {
         let https = https.unwrap();
         assert_eq!(https.host, "127.0.0.1");
         assert_eq!(https.port, 6152);
+    }
+
+    #[test]
+    fn proxy_authorities_preserve_hostnames_ipv4_and_ipv6() {
+        for (host, expected) in [
+            ("proxy.example", "proxy.example:8080"),
+            ("192.0.2.1", "192.0.2.1:8080"),
+            ("::1", "[::1]:8080"),
+            ("2001:db8::1", "[2001:db8::1]:8080"),
+            ("[::1]", "[::1]:8080"),
+            ("fe80::1%en0", "[fe80::1%en0]:8080"),
+        ] {
+            let config = ProxyConfig {
+                host: host.into(),
+                port: 8080,
+            };
+            assert_eq!(config.to_string(), expected);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scutil_ipv6_values_preserve_colons_and_match_exact_keys() {
+        let text = "HTTPEnableExtra : 0\nHTTPEnable : 1\nHTTPProxyExtra : wrong\nHTTPProxy : 2001:db8::1\nHTTPPortExtra : 9999\nHTTPPort : 8080\nHTTPSEnable : 0\nSOCKSEnable : 1\nSOCKSProxy : ::1\nSOCKSPort : 1080";
+        let (http, https, socks, _) = detect_system_proxy_from_text(text);
+        let http = http.unwrap();
+        assert_eq!((http.host.as_str(), http.port), ("2001:db8::1", 8080));
+        assert!(https.is_none());
+        let socks = socks.unwrap();
+        assert_eq!((socks.host.as_str(), socks.port), ("::1", 1080));
     }
 }

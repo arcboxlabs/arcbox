@@ -4,6 +4,8 @@
 //! a [`FrameSink`]. The implementation (typically a crossbeam channel)
 //! delivers them to the RX injection thread which writes to guest memory.
 
+use tokio_util::sync::CancellationToken;
+
 #[cfg(feature = "tokio-frame-sink")]
 use std::sync::Arc;
 #[cfg(feature = "tokio-frame-sink")]
@@ -80,8 +82,11 @@ pub type RetxRing =
 /// dependency. The VMM layer implements [`ConnSink`] by converting
 /// `PromotedConn` into `arcbox_net_inject::InlineConn`.
 pub struct PromotedConn {
-    /// Host-side TCP stream (non-blocking).
-    pub stream: std::net::TcpStream,
+    /// Nonblocking host socket that retains the egress owner during handoff.
+    pub stream: crate::NativeTcp<std::net::TcpStream>,
+    /// Cancels reader waits when the bridge releases the primary owner.
+    /// The reader must not cancel this token on EOF or sink rejection.
+    pub reader_cancel: CancellationToken,
     /// Remote IP as seen by the guest.
     pub remote_ip: std::net::Ipv4Addr,
     /// Guest IP.
@@ -147,6 +152,7 @@ pub trait ConnSink: Send + Sync {
 /// socket readability wakes the task, the task builds the same TCP data/FIN
 /// frames the bridge would have built synchronously, and backpressure on the
 /// channel pauses socket reads instead of growing memory without bound.
+/// Cancellation releases the reader socket even while frame delivery is blocked.
 ///
 /// `send_conn` must be called from within a Tokio runtime because accepted
 /// connections are driven by spawned read tasks. The emitted frames mirror the
@@ -205,6 +211,7 @@ impl ConnSink for TokioFrameConnSink {
     fn send_conn(&self, conn: PromotedConn) -> bool {
         let PromotedConn {
             stream,
+            reader_cancel,
             remote_ip,
             guest_ip,
             remote_port,
@@ -222,7 +229,7 @@ impl ConnSink for TokioFrameConnSink {
         } = conn;
         // A `false` return means "not accepted": the flow stays on the
         // bridge's slow path, so `dead` must NOT be set here.
-        let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+        let Ok(stream) = stream.into_tokio() else {
             return false;
         };
         let conn = AsyncPromotedConn {
@@ -245,10 +252,20 @@ impl ConnSink for TokioFrameConnSink {
                 .guest_mss
                 .min((peer_mss as usize).max(crate::tcp_bridge::TCP_MIN_MSS as usize)),
         };
-        tokio::spawn(read_promoted_conn(stream, conn, self.tx.clone()));
+        let frames = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                () = reader_cancel.cancelled() => {}
+                () = read_promoted_conn(stream, conn, frames) => {}
+            }
+        });
         true
     }
 }
+
+#[cfg(all(test, feature = "tokio-frame-sink"))]
+mod lifecycle_tests;
 
 #[cfg(feature = "tokio-frame-sink")]
 struct AsyncPromotedConn {
@@ -276,7 +293,7 @@ fn guest_mss_for_mtu(mtu: usize) -> usize {
 
 #[cfg(feature = "tokio-frame-sink")]
 async fn read_promoted_conn(
-    mut stream: tokio::net::TcpStream,
+    mut stream: crate::NativeTcp<tokio::net::TcpStream>,
     conn: AsyncPromotedConn,
     frames: mpsc::Sender<Vec<u8>>,
 ) {
@@ -394,13 +411,10 @@ async fn read_promoted_conn(
                     src_mac: conn.gw_mac,
                     dst_mac: conn.guest_mac,
                 });
-                // RST-terminated: the guest sends no further frames for
-                // this flow, so tell the bridge to reap its inline-owned
-                // entry. A clean EOF deliberately leaves `dead` unset — the
-                // entry must survive for the guest's ACK/FIN and half-close
-                // writes (parity with the non-inline path).
-                conn.dead.store(true, Ordering::Relaxed);
+                // Reaping cancels this reader. Publish the RST before allowing
+                // the bridge to reap, including when frame delivery is blocked.
                 let _ = frames.send(rst).await;
+                conn.dead.store(true, Ordering::Relaxed);
                 return;
             }
         }
@@ -435,7 +449,8 @@ mod tests {
         )));
         let std_stream = accepted.into_std().unwrap();
         let accepted_conn = PromotedConn {
-            stream: std_stream,
+            stream: std_stream.into(),
+            reader_cancel: CancellationToken::new(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -493,7 +508,8 @@ mod tests {
         let (sink, mut rx) = TokioFrameConnSink::channel_with_mtu(4, 4000);
         let our_seq = Arc::new(AtomicU32::new(1000));
         let accepted_conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
+            reader_cancel: CancellationToken::new(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -550,7 +566,8 @@ mod tests {
         // Jumbo 4000-MTU sink, but the peer advertised only MSS 1460.
         let (sink, mut rx) = TokioFrameConnSink::channel_with_mtu(8, 4000);
         let accepted_conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
+            reader_cancel: CancellationToken::new(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -621,7 +638,8 @@ mod tests {
             None,
         )));
         let conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
+            reader_cancel: CancellationToken::new(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,
@@ -675,7 +693,8 @@ mod tests {
         let our_seq = Arc::new(AtomicU32::new(1000));
         let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conn = PromotedConn {
-            stream: accepted.into_std().unwrap(),
+            stream: accepted.into_std().unwrap().into(),
+            reader_cancel: CancellationToken::new(),
             remote_ip: std::net::Ipv4Addr::new(203, 0, 113, 10),
             guest_ip: std::net::Ipv4Addr::new(192, 168, 64, 2),
             remote_port: 443,

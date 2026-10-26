@@ -77,11 +77,11 @@ impl TcpBridge {
     pub fn initiate_inbound(
         &mut self,
         container_port: u16,
-        stream: tokio::net::TcpStream,
+        stream: impl Into<crate::NativeTcp<tokio::net::TcpStream>>,
         guest_ip: Ipv4Addr,
         gateway_ip: Ipv4Addr,
     ) {
-        let Ok(std_stream) = stream.into_std() else {
+        let Ok(std_stream) = stream.into().into_std() else {
             tracing::warn!(
                 "TCP bridge: inbound stream into_std() failed for guest:{container_port}"
             );
@@ -90,9 +90,9 @@ impl TcpBridge {
 
         let eph_port = self.allocate_ephemeral();
         let flow_key = SynFlowKey {
-            src_ip: guest_ip,
+            src_ip: guest_ip.into(),
             src_port: container_port,
-            dst_ip: gateway_ip,
+            dst_ip: gateway_ip.into(),
             dst_port: eph_port,
         };
 

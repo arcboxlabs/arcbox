@@ -28,6 +28,7 @@ pub mod direct_rx;
 pub mod egress;
 mod fragment;
 pub mod frame_source;
+mod native_tcp;
 pub mod shim;
 pub mod tcp_bridge;
 #[cfg(target_os = "macos")]
@@ -40,6 +41,7 @@ pub use egress::{
 #[cfg(target_os = "macos")]
 pub use frame_source::FdFrameSource;
 pub use frame_source::FrameSource;
+pub use native_tcp::NativeTcp;
 
 // `tcp_bridge` and `classifier` reference `crate::ethernet::*` pervasively;
 // re-export `arcbox-packet`'s ethernet module here so those paths resolve

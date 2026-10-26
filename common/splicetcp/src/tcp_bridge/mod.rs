@@ -31,12 +31,11 @@
 //!   under concurrency.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant as StdInstant;
 
 use tokio::sync::oneshot;
-
-use arcbox_packet::checksum;
 
 use crate::ethernet::ETH_HEADER_LEN;
 
@@ -196,12 +195,23 @@ pub(super) fn next_isn() -> u32 {
 }
 
 /// Full four-tuple key for deduplicating SYN gate entries and fast-path lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SynFlowKey {
-    src_ip: Ipv4Addr,
+    src_ip: IpAddr,
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: IpAddr,
     dst_port: u16,
+}
+
+impl Hash for SynFlowKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // IPv4 keys retain their compact hash input without two redundant family tags.
+        if let (IpAddr::V4(src), IpAddr::V4(dst)) = (self.src_ip, self.dst_ip) {
+            (src, self.src_port, dst, self.dst_port).hash(state);
+        } else {
+            (self.src_ip, self.src_port, self.dst_ip, self.dst_port).hash(state);
+        }
+    }
 }
 
 /// Role of a TCP connection whose handshake is being synthesized in-shim.
@@ -231,10 +241,12 @@ pub(super) struct HandshakeConn {
     /// Peer's ISN. Known immediately for PassiveOpen (from guest SYN);
     /// for ActiveOpen, set when the guest's SYN-ACK arrives.
     peer_isn: u32,
+    /// Original passive SYN sequence end, including payload and FIN, for explicit abort.
+    peer_syn_end: u32,
     /// Host-side TCP stream. For PassiveOpen: populated once the async host
     /// connect completes. For ActiveOpen: set from the already-accepted
     /// stream at registration time.
-    host_stream: Option<std::net::TcpStream>,
+    host_stream: Option<crate::NativeTcp<std::net::TcpStream>>,
     abandon: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Oneshot receiver for async host connect (PassiveOpen only).
     /// Consumed when connect resolves.
@@ -317,7 +329,9 @@ pub struct TcpBridge {
 /// intercepted inline or polled from the host stream.
 pub(super) struct FastPathConn {
     /// Host-side TCP stream (std blocking — used from the sync datapath loop).
-    stream: std::net::TcpStream,
+    stream: crate::NativeTcp<std::net::TcpStream>,
+    /// Only the primary owns this guard; reader EOF must preserve the upload half.
+    reader_guard: Option<tokio_util::sync::DropGuard>,
     /// Our SEQ number for frames sent TO guest. Shared atomic with the
     /// inject thread so ACKs emitted by `try_fast_path_intercept` always
     /// carry a SEQ matching the guest's rcv_nxt for this flow (the inject
@@ -329,9 +343,9 @@ pub(super) struct FastPathConn {
     /// Updated by try_fast_path_intercept when guest ACKs arrive.
     last_ack_shared: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
     /// Remote IP as seen by the guest.
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     /// Guest IP.
-    guest_ip: Ipv4Addr,
+    guest_ip: IpAddr,
     /// Remote port as seen by the guest.
     remote_port: u16,
     /// Guest port.
@@ -450,6 +464,19 @@ pub(super) struct FastPathConn {
     /// re-emits on dup-ACK/RTO — the inline counterpart of
     /// `retransmit_buf`. See [`crate::direct_rx::RetxRing`].
     retx: Option<crate::direct_rx::RetxRing>,
+}
+
+impl Drop for FastPathConn {
+    fn drop(&mut self) {
+        drop(self.reader_guard.take());
+        // Inline readers can outlive a replaced entry or the bridge.
+        if self.inline_owned {
+            if let Some(dead) = &self.dead {
+                dead.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 impl FastPathConn {
@@ -613,11 +640,17 @@ impl TcpBridge {
 }
 
 mod abandon;
+mod close;
+mod closed;
 mod fast_path;
 mod handshake;
 mod intercept;
+mod packet;
 mod promotion;
 pub use promotion::FastPathInit;
+mod reject;
+mod segmentation;
+use reject::build_rst_from_syn;
 mod settings;
 mod upload_batch;
 
@@ -632,88 +665,6 @@ pub(super) fn should_retransmit(conn: &HandshakeConn, now: StdInstant) -> bool {
     let idx = usize::from(conn.retransmit_count).min(HANDSHAKE_RETRANSMIT_DELAYS.len() - 1);
     let delay = HANDSHAKE_RETRANSMIT_DELAYS[idx];
     now.duration_since(last) >= delay
-}
-
-/// Constructs an RST|ACK Ethernet frame in response to a SYN frame.
-///
-/// The RST has: seq=0, ack=syn_seq+1, flags=RST|ACK.
-/// MAC addresses are swapped (gateway MAC as source, original source as dest).
-/// IP addresses are swapped. Ports are swapped.
-pub(super) fn build_rst_from_syn(syn_frame: &[u8], gateway_mac: [u8; 6]) -> Option<Vec<u8>> {
-    let ip_start = ETH_HEADER_LEN;
-    if syn_frame.len() < ip_start + 40 {
-        return None;
-    }
-
-    let ihl = ((syn_frame[ip_start] & 0x0F) as usize) * 4;
-    let l4_start = ip_start + ihl;
-    if ihl < 20 || l4_start + 20 > syn_frame.len() {
-        return None;
-    }
-
-    // Extract from original SYN.
-    let src_mac = &syn_frame[6..12];
-    let syn_src_ip = [
-        syn_frame[ip_start + 12],
-        syn_frame[ip_start + 13],
-        syn_frame[ip_start + 14],
-        syn_frame[ip_start + 15],
-    ];
-    let syn_dst_ip = [
-        syn_frame[ip_start + 16],
-        syn_frame[ip_start + 17],
-        syn_frame[ip_start + 18],
-        syn_frame[ip_start + 19],
-    ];
-    let syn_src_port = u16::from_be_bytes([syn_frame[l4_start], syn_frame[l4_start + 1]]);
-    let syn_dst_port = u16::from_be_bytes([syn_frame[l4_start + 2], syn_frame[l4_start + 3]]);
-    let syn_seq = u32::from_be_bytes([
-        syn_frame[l4_start + 4],
-        syn_frame[l4_start + 5],
-        syn_frame[l4_start + 6],
-        syn_frame[l4_start + 7],
-    ]);
-
-    // Build RST|ACK: ETH(14) + IP(20) + TCP(20) = 54 bytes.
-    let mut frame = vec![0u8; ETH_HEADER_LEN + 40];
-
-    // Ethernet header: dst=original src MAC, src=gateway MAC.
-    frame[0..6].copy_from_slice(src_mac);
-    frame[6..12].copy_from_slice(&gateway_mac);
-    frame[12..14].copy_from_slice(&[0x08, 0x00]); // IPv4
-
-    // IPv4 header (swapped IPs).
-    let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45; // version=4, IHL=5
-    frame[ip + 2..ip + 4].copy_from_slice(&40u16.to_be_bytes()); // total length
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF flag
-    frame[ip + 8] = 64; // TTL
-    frame[ip + 9] = 6; // TCP
-    // src = original dst, dst = original src (we're the "server" responding).
-    frame[ip + 12..ip + 16].copy_from_slice(&syn_dst_ip);
-    frame[ip + 16..ip + 20].copy_from_slice(&syn_src_ip);
-    // IP checksum.
-    let ip_cksum = checksum::ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    // TCP header (swapped ports).
-    let tcp_start = ip + 20;
-    frame[tcp_start..tcp_start + 2].copy_from_slice(&syn_dst_port.to_be_bytes()); // src port
-    frame[tcp_start + 2..tcp_start + 4].copy_from_slice(&syn_src_port.to_be_bytes()); // dst port
-    // seq = 0
-    frame[tcp_start + 4..tcp_start + 8].copy_from_slice(&0u32.to_be_bytes());
-    // ack = syn_seq + 1
-    frame[tcp_start + 8..tcp_start + 12].copy_from_slice(&(syn_seq.wrapping_add(1)).to_be_bytes());
-    frame[tcp_start + 12] = 0x50; // data offset = 5 (20 bytes)
-    frame[tcp_start + 13] = 0x14; // RST|ACK
-    frame[tcp_start + 14..tcp_start + 16].copy_from_slice(&0u16.to_be_bytes()); // window = 0
-
-    // TCP checksum.
-    let tcp_cksum =
-        checksum::tcp_checksum(syn_dst_ip, syn_src_ip, &frame[tcp_start..tcp_start + 20]);
-    frame[tcp_start + 16..tcp_start + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
-    Some(frame)
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::{
     ETH_HEADER_LEN,
@@ -6,10 +6,12 @@ use super::{
 };
 
 /// Parameters for constructing TCP frames on the fast path.
+///
+/// Both addresses must belong to the same IP family. IPv4 remains the default type.
 #[derive(Debug, Clone, Copy)]
-pub struct TcpFrameParams {
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+pub struct TcpFrameParams<A = Ipv4Addr> {
+    pub src_ip: A,
+    pub dst_ip: A,
     pub src_port: u16,
     pub dst_port: u16,
     pub seq: u32,
@@ -19,129 +21,155 @@ pub struct TcpFrameParams {
     pub dst_mac: [u8; 6],
 }
 
-/// Builds a TCP ACK frame (no payload) to acknowledge data from the guest.
-///
-/// Used by the TCP fast path to ACK guest data segments using the
-/// hand-rolled TCP state machine in `TcpBridge`.
-#[must_use]
-pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let TcpFrameParams {
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        seq,
-        ack,
-        window,
-        src_mac,
-        dst_mac,
-    } = *p;
-    // ACK frame: ETH(14) + IP(20) + TCP(20) = 54 bytes, no payload.
-    let tcp_hdr_len = 20;
-    let ip_total_len = 20 + tcp_hdr_len;
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
-
-    // -- Ethernet header --
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    // -- IPv4 header --
+fn build_frame<A: Copy + Into<IpAddr>>(
+    p: &TcpFrameParams<A>,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    let src = p.src_ip.into();
+    let dst = p.dst_ip.into();
+    let tcp_header_len = 20 + options.len();
+    let tcp_len = tcp_header_len + payload.len();
+    let ip_len = match (src, dst) {
+        (IpAddr::V4(_), IpAddr::V4(_)) => 20,
+        (IpAddr::V6(_), IpAddr::V6(_)) => 40,
+        _ => panic!("TCP frame addresses must use the same IP family"),
+    };
+    let length = if ip_len == 20 {
+        ip_len + tcp_len
+    } else {
+        tcp_len
+    };
+    let length = u16::try_from(length).expect("TCP frame exceeds the IP length field");
+    let tcp = ETH_HEADER_LEN + ip_len;
+    let mut frame = Vec::with_capacity(tcp + tcp_len);
+    // Reserved fields must be zero; payload bytes are copied without an initial clear.
+    frame.resize(tcp + 20, 0);
+    frame[..6].copy_from_slice(&p.dst_mac);
+    frame[6..12].copy_from_slice(&p.src_mac);
     let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45; // Version 4, IHL 5
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // Don't Fragment
-    frame[ip + 8] = 64; // TTL
-    frame[ip + 9] = 6; // Protocol: TCP
-    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    // -- TCP header (20 bytes, no options) --
-    let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
-    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
-    frame[tcp + 12] = 0x50; // Data offset: 5 (20 bytes), no options
-    frame[tcp + 13] = 0x10; // Flags: ACK
-    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
-    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
+    match (src, dst) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => {
+            frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+            frame[ip] = 0x45;
+            frame[ip + 2..ip + 4].copy_from_slice(&length.to_be_bytes());
+            frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+            frame[ip + 8] = 64;
+            frame[ip + 9] = 6;
+            frame[ip + 12..ip + 16].copy_from_slice(&src.octets());
+            frame[ip + 16..ip + 20].copy_from_slice(&dst.octets());
+            let checksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+            frame[ip + 10..ip + 12].copy_from_slice(&checksum.to_be_bytes());
+        }
+        (IpAddr::V6(src), IpAddr::V6(dst)) => {
+            frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+            frame[ip] = 0x60;
+            frame[ip + 4..ip + 6].copy_from_slice(&length.to_be_bytes());
+            frame[ip + 6] = 6;
+            frame[ip + 7] = 64;
+            frame[ip + 8..ip + 24].copy_from_slice(&src.octets());
+            frame[ip + 24..ip + 40].copy_from_slice(&dst.octets());
+        }
+        _ => unreachable!(),
+    }
+    frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&p.ack.to_be_bytes());
+    frame[tcp + 12] = ((tcp_header_len / 4) as u8) << 4;
+    frame[tcp + 13] = flags;
+    frame[tcp + 14..tcp + 16].copy_from_slice(&p.window.to_be_bytes());
+    frame.extend_from_slice(options);
+    frame.extend_from_slice(payload);
+    let checksum = match (src, dst) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => tcp_checksum(src, dst, &frame[tcp..]),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => {
+            let mut sum = crate::checksum::checksum_add(&src.octets())
+                + crate::checksum::checksum_add(&dst.octets())
+                + tcp_len as u32
+                + 6
+                + crate::checksum::checksum_add(&frame[tcp..]);
+            while sum > 0xffff {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            !sum as u16
+        }
+        _ => unreachable!(),
+    };
+    frame[tcp + 16..tcp + 18].copy_from_slice(&checksum.to_be_bytes());
     frame
 }
 
-/// Builds a TCP data frame carrying payload from the host to the guest.
+/// Builds a fully checksummed TCP ACK frame without payload.
 ///
-/// Used by the TCP fast path to inject host TcpStream data into the guest
-/// via `TcpBridge`'s hand-rolled TCP state machine.
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
-    let TcpFrameParams {
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        seq,
-        ack,
-        window,
-        src_mac,
-        dst_mac,
-    } = *p;
+pub fn build_tcp_ack_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
+    build_frame(p, 0x10, &[], &[])
+}
 
-    let tcp_hdr_len = 20;
-    let tcp_total_len = tcp_hdr_len + payload.len();
-    let ip_total_len = 20 + tcp_total_len;
-    // IPv4 encodes total length in a 16-bit field; the `as u16` cast below
-    // would silently truncate for oversized payloads. Assert so the failure
-    // is loud if a caller ever exceeds the per-frame MTU budget.
-    assert!(
-        u16::try_from(ip_total_len).is_ok(),
-        "build_tcp_data_frame: ip_total_len={ip_total_len} overflows u16"
-    );
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = Vec::with_capacity(frame_len);
-    // Preserve zeroed reserved fields without clearing payload bytes before copying.
-    frame.resize(ETH_HEADER_LEN + 20 + tcp_hdr_len, 0);
+/// Builds a fully checksummed TCP ACK/PSH frame carrying payload.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families or the payload exceeds
+/// 65495 bytes for IPv4 or 65515 bytes for IPv6.
+#[must_use]
+pub fn build_tcp_data_frame<A: Copy + Into<IpAddr>>(
+    p: &TcpFrameParams<A>,
+    payload: &[u8],
+) -> Vec<u8> {
+    build_frame(p, 0x18, &[], payload)
+}
 
-    // -- Ethernet header --
-    frame[0..6].copy_from_slice(&dst_mac);
-    frame[6..12].copy_from_slice(&src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+/// Builds a TCP FIN/ACK frame with a receive window of 65535.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
+#[must_use]
+pub fn build_tcp_fin_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
+    build_frame(
+        &TcpFrameParams {
+            window: 65535,
+            ..*p
+        },
+        0x11,
+        &[],
+        &[],
+    )
+}
 
-    // -- IPv4 header --
-    let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
-    frame[ip + 8] = 64; // TTL
-    frame[ip + 9] = 6; // TCP
-    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+/// Builds a TCP RST/ACK frame with a zero receive window.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
+#[must_use]
+pub fn build_tcp_rst_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
+    build_frame(&TcpFrameParams { window: 0, ..*p }, 0x14, &[], &[])
+}
 
-    // -- TCP header --
-    let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
-    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
-    frame[tcp + 12] = 0x50; // Data offset: 5
-    frame[tcp + 13] = 0x18; // Flags: ACK | PSH
-    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
-
-    // -- Payload --
-    frame.extend_from_slice(payload);
-
-    // TCP checksum over header + payload.
-    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
-    frame
+/// Builds a TCP RST frame with the ACK flag clear and zero acknowledgment and window fields.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
+#[must_use]
+pub fn build_tcp_rst_only_frame<A: Copy + Into<IpAddr>>(p: &TcpFrameParams<A>) -> Vec<u8> {
+    build_frame(
+        &TcpFrameParams {
+            ack: 0,
+            window: 0,
+            ..*p
+        },
+        0x04,
+        &[],
+        &[],
+    )
 }
 
 /// Builds a TCP data frame with only a pseudo-header checksum (for GSO).
@@ -234,22 +262,6 @@ pub fn tcp_pseudo_header_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_len: u
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !sum as u16
-}
-
-/// Builds a TCP FIN+ACK frame for connection teardown.
-#[must_use]
-pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let mut ack_params = *p;
-    ack_params.window = 65535;
-    let mut frame = build_tcp_ack_frame(&ack_params);
-    // Change flags from ACK to FIN|ACK.
-    let tcp = ETH_HEADER_LEN + 20;
-    frame[tcp + 13] = 0x11; // FIN | ACK
-    // Recompute TCP checksum.
-    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-    frame
 }
 
 /// Peer TCP options observed on an incoming SYN or SYN-ACK frame.
@@ -350,13 +362,13 @@ pub fn parse_tcp_syn_options(tcp_segment: &[u8]) -> TcpSynOptions {
 /// Parameters for constructing a TCP SYN-ACK frame.
 ///
 /// Used by the handshake synthesizer to respond to a guest SYN without
-/// going through a userspace TCP state machine. `mss` defaults to 1460 if
-/// unspecified; `wscale` and `sack_permitted` are conditionally included
-/// based on what the peer advertised.
+/// going through a userspace TCP state machine. The caller supplies `mss`;
+/// `wscale` and `sack_permitted` follow the peer advertisement.
+/// Both addresses must have the same IP family; IPv4 is the default type.
 #[derive(Debug, Clone, Copy)]
-pub struct SynAckParams {
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+pub struct SynAckParams<A = Ipv4Addr> {
+    pub src_ip: A,
+    pub dst_ip: A,
     pub src_port: u16,
     pub dst_port: u16,
     /// Our chosen ISN (appears as SEQ in the SYN-ACK).
@@ -374,87 +386,62 @@ pub struct SynAckParams {
     pub sack_permitted: bool,
 }
 
+fn syn_options(mss: u16, wscale: Option<u8>, sack_permitted: bool) -> Vec<u8> {
+    let mut options = Vec::with_capacity(12);
+    options.extend_from_slice(&[2, 4]);
+    options.extend_from_slice(&mss.to_be_bytes());
+    if sack_permitted {
+        options.extend_from_slice(&[4, 2]);
+    }
+    if let Some(shift) = wscale {
+        options.extend_from_slice(&[3, 3, shift]);
+    }
+    while !options.len().is_multiple_of(4) {
+        options.push(1);
+    }
+    options
+}
+
 /// Builds a TCP SYN-ACK frame that accepts a guest SYN.
 ///
 /// Options included: MSS (always), WScale (if `Some`), SACK-Permitted (if true).
 /// Timestamps are omitted — not echoing disables TSopt for the connection,
 /// saving 12 bytes/segment of overhead.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_syn_ack_frame(p: &SynAckParams) -> Vec<u8> {
-    // Assemble options. Pad to multiple of 4 bytes with NOPs.
-    let mut options: Vec<u8> = Vec::with_capacity(16);
-
-    // MSS (kind=2, len=4)
-    options.push(2);
-    options.push(4);
-    options.extend_from_slice(&p.mss.to_be_bytes());
-
-    // SACK-Permitted (kind=4, len=2) — placed before WScale so NOP padding
-    // lands naturally after WScale.
-    if p.sack_permitted {
-        options.push(4);
-        options.push(2);
-    }
-
-    // Window scale (kind=3, len=3)
-    if let Some(shift) = p.wscale {
-        options.push(3);
-        options.push(3);
-        options.push(shift);
-    }
-
-    while !options.len().is_multiple_of(4) {
-        options.push(1); // NOP padding
-    }
-
-    let tcp_hdr_len = 20 + options.len();
-    let ip_total_len = 20 + tcp_hdr_len;
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
-
-    // -- Ethernet header --
-    frame[0..6].copy_from_slice(&p.dst_mac);
-    frame[6..12].copy_from_slice(&p.src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    // -- IPv4 header --
-    let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
-    frame[ip + 8] = 64;
-    frame[ip + 9] = 6; // TCP
-    frame[ip + 12..ip + 16].copy_from_slice(&p.src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&p.dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    // -- TCP header --
-    let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
-    frame[tcp + 8..tcp + 12].copy_from_slice(&p.ack.to_be_bytes());
-    frame[tcp + 12] = ((tcp_hdr_len / 4) as u8) << 4;
-    frame[tcp + 13] = 0x12; // Flags: SYN | ACK
-    frame[tcp + 14..tcp + 16].copy_from_slice(&65535u16.to_be_bytes());
-    frame[tcp + 20..tcp + 20 + options.len()].copy_from_slice(&options);
-
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
-    frame
+pub fn build_tcp_syn_ack_frame<A: Copy + Into<IpAddr>>(p: &SynAckParams<A>) -> Vec<u8> {
+    let params = TcpFrameParams {
+        src_ip: p.src_ip,
+        dst_ip: p.dst_ip,
+        src_port: p.src_port,
+        dst_port: p.dst_port,
+        seq: p.seq,
+        ack: p.ack,
+        window: 65535,
+        src_mac: p.src_mac,
+        dst_mac: p.dst_mac,
+    };
+    build_frame(
+        &params,
+        0x12,
+        &syn_options(p.mss, p.wscale, p.sack_permitted),
+        &[],
+    )
 }
 
 /// Parameters for constructing a TCP SYN frame (active open).
 ///
 /// Used when arcbox initiates a TCP connection toward the guest for an
 /// inbound port-forward. MSS is always included. WScale and SACK-Permitted
-/// are included only when requested by the caller.
+/// are included only when requested by the caller. Both addresses must have
+/// the same IP family; IPv4 is the default type.
 #[derive(Debug, Clone, Copy)]
-pub struct SynParams {
-    pub src_ip: Ipv4Addr,
-    pub dst_ip: Ipv4Addr,
+pub struct SynParams<A = Ipv4Addr> {
+    pub src_ip: A,
+    pub dst_ip: A,
     pub src_port: u16,
     pub dst_port: u16,
     pub seq: u32,
@@ -467,77 +454,27 @@ pub struct SynParams {
 }
 
 /// Builds a TCP SYN frame for active open toward the guest.
+///
+/// # Panics
+///
+/// Panics if the addresses have different IP families.
 #[must_use]
-pub fn build_tcp_syn_frame(p: &SynParams) -> Vec<u8> {
-    let mut options: Vec<u8> = Vec::with_capacity(12);
-
-    // MSS
-    options.push(2);
-    options.push(4);
-    options.extend_from_slice(&p.mss.to_be_bytes());
-
-    if p.sack_permitted {
-        options.push(4);
-        options.push(2);
-    }
-
-    if let Some(shift) = p.wscale {
-        options.push(3);
-        options.push(3);
-        options.push(shift);
-    }
-
-    while !options.len().is_multiple_of(4) {
-        options.push(1);
-    }
-
-    let tcp_hdr_len = 20 + options.len();
-    let ip_total_len = 20 + tcp_hdr_len;
-    let frame_len = ETH_HEADER_LEN + ip_total_len;
-    let mut frame = vec![0u8; frame_len];
-
-    frame[0..6].copy_from_slice(&p.dst_mac);
-    frame[6..12].copy_from_slice(&p.src_mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    let ip = ETH_HEADER_LEN;
-    frame[ip] = 0x45;
-    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
-    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
-    frame[ip + 8] = 64;
-    frame[ip + 9] = 6;
-    frame[ip + 12..ip + 16].copy_from_slice(&p.src_ip.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&p.dst_ip.octets());
-    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
-    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
-
-    let tcp = ip + 20;
-    frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
-    frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
-    frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
-    // ack = 0 for pure SYN
-    frame[tcp + 12] = ((tcp_hdr_len / 4) as u8) << 4;
-    frame[tcp + 13] = 0x02; // SYN
-    frame[tcp + 14..tcp + 16].copy_from_slice(&65535u16.to_be_bytes());
-    frame[tcp + 20..tcp + 20 + options.len()].copy_from_slice(&options);
-
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-
-    frame
-}
-
-/// Builds a TCP RST frame for connection abort.
-#[must_use]
-pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
-    let mut rst_params = *p;
-    rst_params.window = 0;
-    let mut frame = build_tcp_ack_frame(&rst_params);
-    // Change flags from ACK to RST|ACK.
-    let tcp = ETH_HEADER_LEN + 20;
-    frame[tcp + 13] = 0x14; // RST | ACK
-    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
-    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
-    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
-    frame
+pub fn build_tcp_syn_frame<A: Copy + Into<IpAddr>>(p: &SynParams<A>) -> Vec<u8> {
+    let params = TcpFrameParams {
+        src_ip: p.src_ip,
+        dst_ip: p.dst_ip,
+        src_port: p.src_port,
+        dst_port: p.dst_port,
+        seq: p.seq,
+        ack: 0,
+        window: 65535,
+        src_mac: p.src_mac,
+        dst_mac: p.dst_mac,
+    };
+    build_frame(
+        &params,
+        0x02,
+        &syn_options(p.mss, p.wscale, p.sack_permitted),
+        &[],
+    )
 }

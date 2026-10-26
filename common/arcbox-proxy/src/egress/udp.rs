@@ -227,7 +227,7 @@ impl UdpProxy {
             }
             env.socks_proxy
                 .as_ref()
-                .map(|p| (format!("{}:{}", p.host, p.port), host.clone()))
+                .map(|p| (p.to_string(), host.clone()))
         });
 
         tokio::spawn(async move {
@@ -309,6 +309,43 @@ impl UdpProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_egress_rejects_ipv6_before_ipv4_udp_dispatch() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut egress = super::super::HostEgress::new(
+            Ipv4Addr::LOCALHOST,
+            [2; 6],
+            Ipv4Addr::LOCALHOST,
+            tx,
+            CancellationToken::new(),
+            1500,
+        );
+        let mut frame = vec![0; ETH_HEADER_LEN + 48];
+        let ip = &mut frame[ETH_HEADER_LEN..];
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        ip[6] = 17;
+        ip[7] = 64;
+        ip[9] = 17; // The IPv4 protocol offset points into the IPv6 source address.
+        ip[23] = 1;
+        ip[39] = 2;
+        ip[40..42].copy_from_slice(&1234u16.to_be_bytes());
+        ip[42..44].copy_from_slice(&53u16.to_be_bytes());
+        ip[44..46].copy_from_slice(&8u16.to_be_bytes());
+        let sum = arcbox_packet::checksum::checksum_add(&ip[8..40])
+            + 8
+            + 17
+            + arcbox_packet::checksum::checksum_add(&ip[40..]);
+        ip[46..48].copy_from_slice(&arcbox_packet::checksum::checksum_fold(sum).to_be_bytes());
+        // No Tokio runtime: an invalid dispatch would try to spawn a socket task.
+        for ether_type in [0x0800u16, 0x86dd] {
+            frame[12..14].copy_from_slice(&ether_type.to_be_bytes());
+            egress.handle_outbound(&frame, [4; 6]);
+            assert!(egress.udp.flows.is_empty());
+        }
+    }
+
     use tokio_util::sync::CancellationToken;
 
     /// Builds a minimal Ethernet + IPv4 + UDP frame.
@@ -409,14 +446,15 @@ mod tests {
     /// With a SOCKS proxy in the env, a non-gateway flow is relayed through the
     /// SOCKS5 proxy (UDP ASSOCIATE) instead of a direct host socket; the echoed
     /// reply still comes back to the guest as an L2 frame.
-    #[tokio::test]
-    async fn udp_proxy_routes_through_socks5_when_configured() {
+    async fn udp_proxy_through_socks5(proxy_ip: std::net::IpAddr) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         // Mock SOCKS5 UDP proxy: control handshake + a UDP relay that echoes the
         // datagram (header preserved) back to the client.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind(SocketAddr::new(proxy_ip, 0))
+            .await
+            .unwrap();
         let proxy_addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -478,5 +516,15 @@ mod tests {
             "echoed payload returns to the guest via the SOCKS5 relay"
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_proxy_routes_through_socks5_when_configured() {
+        udp_proxy_through_socks5(Ipv4Addr::LOCALHOST.into()).await;
+    }
+
+    #[tokio::test]
+    async fn udp_proxy_uses_ipv6_socks5_control_endpoint() {
+        udp_proxy_through_socks5(std::net::Ipv6Addr::LOCALHOST.into()).await;
     }
 }

@@ -425,6 +425,39 @@ fn test_tcp_rst_frame_flags() {
 }
 
 #[test]
+fn control_frames_preserve_window_and_sequence_contracts() {
+    let mut p = make_tcp_params(
+        [192, 0, 2, 1],
+        [192, 0, 2, 2],
+        80,
+        1234,
+        0x12345678,
+        0x89abcdef,
+    );
+    p.window = 4096;
+    for (frame, flags, window) in [
+        (build_tcp_ack_frame(&p), 0x10, 4096),
+        (build_tcp_fin_frame(&p), 0x11, 65535),
+        (build_tcp_rst_frame(&p), 0x14, 0),
+    ] {
+        assert_eq!(
+            &frame[38..46],
+            &[0x12, 0x34, 0x56, 0x78, 0x89, 0xab, 0xcd, 0xef]
+        );
+        assert_eq!(frame[47], flags);
+        assert_eq!(u16::from_be_bytes([frame[48], frame[49]]), window);
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    }
+}
+
+#[test]
+#[should_panic(expected = "TCP frame exceeds the IP length field")]
+fn tcp_data_frame_rejects_payload_above_ipv4_limit() {
+    let p = make_tcp_params([192, 0, 2, 1], [192, 0, 2, 2], 80, 1234, 100, 200);
+    let _ = build_tcp_data_frame(&p, &vec![0; 65496]);
+}
+
+#[test]
 fn test_tcp_checksum_standalone() {
     let p = make_tcp_params([192, 168, 1, 1], [192, 168, 1, 2], 80, 443, 0, 0);
     let frame = build_tcp_ack_frame(&p);

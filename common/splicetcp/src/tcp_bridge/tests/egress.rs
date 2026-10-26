@@ -20,14 +20,14 @@ pub(super) fn register_with_options(
     port: u16,
     options: &[u8],
 ) -> oneshot::Sender<EgressOutcome> {
+    let syn = make_guest_syn_frame(port, Ipv4Addr::new(203, 0, 113, 1), 443, 100, options);
+    register_syn(bridge, &syn)
+}
+
+pub(super) fn register_syn(bridge: &mut TcpBridge, syn: &[u8]) -> oneshot::Sender<EgressOutcome> {
     let (tx, rx) = oneshot::channel();
     bridge.set_egress_resolver(Arc::new(Resolver(Mutex::new(Some(rx)))));
-    let syn = make_guest_syn_frame(port, Ipv4Addr::new(203, 0, 113, 1), 443, 100, options);
-    assert!(
-        bridge
-            .handle_outbound_syn(&syn, GW_MAC, GUEST_MAC)
-            .is_none()
-    );
+    assert!(bridge.handle_outbound_syn(syn, GW_MAC, GUEST_MAC).is_none());
     assert_eq!(bridge.handshake_count(), 1);
     tx
 }

@@ -18,7 +18,7 @@ async fn controlled_pair(
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: port,
-        dst_ip: Ipv4Addr::new(203, 0, 113, 1),
+        dst_ip: Ipv4Addr::new(203, 0, 113, 1).into(),
         dst_port: 443,
     };
     let ack = packet(key, 101, tcp_seq_of(&syn_ack).wrapping_add(1), 0x10, &[]);
@@ -274,4 +274,96 @@ async fn capacity_eviction_does_not_restore_a_raced_close_frame() {
         bridge.abandoned_conns.contains_key(&key_a),
         bridge.abandoned_conns.contains_key(&key_b)
     );
+}
+
+#[tokio::test]
+async fn managed_ipv6_abandonment_releases_owner_and_keeps_acknowledging_guest_data() {
+    use crate::NativeTcp;
+    use crate::ethernet::{
+        SynParams, TcpFrameParams, build_tcp_ack_frame, build_tcp_data_frame, build_tcp_syn_frame,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    let (client, mut server) = super::ownership::socket_pair().await;
+    let owner = Arc::new(());
+    let released = Arc::downgrade(&owner);
+    let cancellation = CancellationToken::new();
+    let (transport, handle) = EgressConn::controlled_tcp(NativeTcp::with_lifecycle(
+        client,
+        owner,
+        cancellation.clone(),
+    ));
+    let key = SynFlowKey {
+        src_ip: "2001:db8::2".parse().unwrap(),
+        src_port: 40001,
+        dst_ip: "2001:db8::1".parse().unwrap(),
+        dst_port: 443,
+    };
+    let mut bridge = TcpBridge::new(GW_IP);
+    bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+    let syn = build_tcp_syn_frame(&SynParams {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        seq: 100,
+        src_mac: GUEST_MAC,
+        dst_mac: GW_MAC,
+        mss: 1440,
+        wscale: None,
+        sack_permitted: false,
+    });
+    let tx = super::egress::register_syn(&mut bridge, &syn);
+    assert!(tx.send(EgressOutcome::Connect(transport)).is_ok());
+    let syn_ack = bridge.poll_handshakes().pop().unwrap();
+    let our_seq = super::super::packet::tcp_at(&syn_ack, ETH_HEADER_LEN)
+        .unwrap()
+        .sequence()
+        .wrapping_add(1);
+    let params = TcpFrameParams {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        seq: 101,
+        ack: our_seq,
+        window: 65535,
+        src_mac: GUEST_MAC,
+        dst_mac: GW_MAC,
+    };
+    assert!(
+        bridge
+            .try_complete_handshake(&build_tcp_ack_frame(&params))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(released.upgrade().is_some());
+    handle.abandon();
+    cancellation.cancel();
+    assert!(bridge.poll_fast_path().is_empty());
+    assert!(released.upgrade().is_none());
+    assert_eq!(bridge.fast_path_count(), 0);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), server.read_u8())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    let upload = build_tcp_data_frame(&params, b"tail");
+    let (consumed, reply) = bridge
+        .try_fast_path_intercept_ip_batch(&[&upload[ETH_HEADER_LEN..]])
+        .unwrap();
+    assert_eq!(consumed, 1);
+    let tcp = super::super::packet::tcp_at(&reply, ETH_HEADER_LEN).unwrap();
+    assert_eq!(tcp.ip().source(), key.dst_ip);
+    assert_eq!(tcp.ip().destination(), key.src_ip);
+    assert_eq!(tcp.flags(), 0x10);
+    assert_eq!(tcp.sequence(), our_seq);
+    assert_eq!(tcp.acknowledgment(), 105);
+    assert!(tcp.payload().is_empty());
+    bridge.abort(|_| panic!("an abandoned flow must not produce a reset"));
+    assert!(bridge.abandoned_conns.is_empty());
 }

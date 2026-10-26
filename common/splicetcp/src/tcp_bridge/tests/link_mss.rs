@@ -1,4 +1,5 @@
 use super::*;
+use arcbox_packet::checksum;
 
 fn assert_handshake_mss(frame: &[u8], expected: u16) {
     let tcp = ETH_HEADER_LEN + 20;
@@ -24,7 +25,7 @@ async fn passive_handshake_advertises_link_mss_and_retains_peer_mss() {
     let key = SynFlowKey {
         src_ip: GUEST_IP,
         src_port: 40300,
-        dst_ip: Ipv4Addr::LOCALHOST,
+        dst_ip: Ipv4Addr::LOCALHOST.into(),
         dst_port: port,
     };
     let syn = make_guest_syn_frame(key.src_port, key.dst_ip, port, 100, &[2, 4, 5, 180]);
@@ -74,7 +75,7 @@ async fn active_handshake_advertises_bounded_link_mss_without_changing_peer_fall
         let key = SynFlowKey {
             src_ip: GUEST_IP,
             src_port: 8080,
-            dst_ip: GW_IP,
+            dst_ip: GW_IP.into(),
             dst_port: 61500,
         };
         bridge.initiate_active_handshake(key, client.into_std().unwrap(), GW_MAC, GUEST_MAC);

@@ -46,34 +46,17 @@ struct Segment {
 
 impl Segment {
     fn parse(frame: &[u8], ip_start: usize) -> Option<Self> {
-        let ip = frame.get(ip_start..)?;
-        if ip.len() < 40
-            || ip[0] >> 4 != 4
-            || ip[9] != 6
-            || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
-        {
-            return None;
-        }
-        let ihl = usize::from(ip[0] & 0x0f) * 4;
-        let total = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
-        let tcp = ip.get(ihl..total)?;
-        if ihl < 20 || tcp.len() < 20 {
-            return None;
-        }
-        let offset = usize::from(tcp[12] >> 4) * 4;
-        if offset < 20 || offset > tcp.len() {
-            return None;
-        }
+        let tcp = super::packet::tcp_at(frame, ip_start)?;
         Some(Self {
             key: SynFlowKey {
-                src_ip: [ip[12], ip[13], ip[14], ip[15]].into(),
-                dst_ip: [ip[16], ip[17], ip[18], ip[19]].into(),
-                src_port: u16::from_be_bytes([tcp[0], tcp[1]]),
-                dst_port: u16::from_be_bytes([tcp[2], tcp[3]]),
+                src_ip: tcp.ip().source(),
+                dst_ip: tcp.ip().destination(),
+                src_port: tcp.source_port(),
+                dst_port: tcp.destination_port(),
             },
-            seq: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
-            flags: tcp[13],
-            payload_len: (tcp.len() - offset) as u32,
+            seq: tcp.sequence(),
+            flags: tcp.flags(),
+            payload_len: tcp.payload().len() as u32,
         })
     }
 }

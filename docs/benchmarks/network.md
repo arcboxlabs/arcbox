@@ -277,3 +277,241 @@ Each path receives 10,000 warmup calls. Nine measurement rounds each execute 1,0
 | Empty-map wrapper | 21.865 | 21.553 | 23.541 |
 
 The wrapper adds 0.840 ns/ACK, or 3.99%, in this run. This measures only the empty-map branch cost on a repeated ACK with a warm cache. It does not measure controlled connections, discard-table load, host I/O, packet batching, network throughput, or Network Extension CPU cost. Native runtime acceptance remains separate.
+
+## 2026-10-22 — Shared TCP frame encoding
+
+Correction: the original comparison reused one Cargo build directory and did not recompile the candidate. The original values below do not compare the two revisions. Use the independent-build correction later in this document.
+
+Compare the data-frame builder at `5a8c5d66` with the commit containing this entry. Both checkouts use the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`, then execute each resulting benchmark binary. Run order: baseline, candidate, candidate, baseline. Each execution contains seven rounds per payload and checksum mode; the table pools 14 samples per implementation.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. The benchmark includes allocation, header writes, payload copying, checksums, and deallocation. The original App and NE remain running; their binding is checked before and after the measurement.
+
+| Payload bytes | Baseline full checksum ns/frame | Shared encoder ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 14.621 | 15.083 | +3.2% |
+| 1 | 14.639 | 15.174 | +3.7% |
+| 64 | 14.979 | 15.157 | +1.2% |
+| 1460 | 35.687 | 37.692 | +5.6% |
+| 3960 | 86.749 | 81.280 | -6.3% |
+| 32768 | 715.995 | 715.086 | -0.1% |
+| 65495 | 1546.463 | 1570.518 | +1.6% |
+
+The full-checksum medians range from 6.3% faster to 5.6% slower. The 1460-byte case is about 2 ns slower; the maximum payload is about 24 ns slower. The unchanged partial-checksum builder ranges from 3.5% faster to 14.2% slower, and baseline executions also differ. These results show the measured cost and variation, not a consistent speedup or native throughput improvement. The refactor consolidates IPv4 encoding before adding IPv6 support.
+
+## 2026-10-22 — IPv6-capable TCP frame encoder
+
+Correction: the original comparison reused one Cargo build directory and did not recompile the candidate. The original values below do not compare the two revisions. Use the independent-build correction later in this document.
+
+Compare `2001d081` with the commit containing this entry using the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build both with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`. Execute the resulting binaries in baseline, candidate, candidate, baseline order. The table pools 14 samples per implementation from two executions of seven rounds. The benchmark uses IPv4 inputs to measure the effect on existing callers.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. Original App and NE bindings are checked before and after execution.
+
+| IPv4 payload bytes | Baseline full checksum ns/frame | IPv6-capable encoder ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 12.326 | 12.672 | +2.8% |
+| 1 | 13.690 | 14.306 | +4.5% |
+| 64 | 19.038 | 18.337 | -3.7% |
+| 1460 | 37.529 | 37.682 | +0.4% |
+| 3960 | 89.038 | 89.489 | +0.5% |
+| 32768 | 732.148 | 733.217 | +0.1% |
+| 65495 | 1604.738 | 1628.648 | +1.5% |
+
+Full-checksum median changes range from -3.7% to +4.5%. These measurements include allocation, frame initialization, payload copies, and checksums. They do not measure IPv6 throughput or establish a native application performance improvement.
+
+## 2026-10-22 — TCP options in the shared frame encoder
+
+Compare `ecc02b43` with the commit containing this entry using the unchanged `common/arcbox-packet/examples/tcp_frame_bench.rs`. Build both with `devenv shell -- cargo build --locked -p arcbox-packet --example tcp_frame_bench --release`. Use a fresh and separate `CARGO_TARGET_DIR` for each source snapshot. Execute the binaries in baseline, candidate, candidate, baseline order. Each table value pools 14 samples from two executions of seven rounds. IPv4 data inputs measure the effect on existing callers; the benchmark does not measure handshake throughput.
+
+Host: dedicated `xuan-work-mbp`, Apple M5 Pro (Mac17,9), macOS 26.5 (25F71), Rust 1.96.0. Original App and NE bindings are checked before and after execution.
+
+| IPv4 payload bytes | Baseline full checksum ns/frame | Encoder with options ns/frame | Change |
+| --- | ---: | ---: | ---: |
+| 0 | 11.843 | 13.106 | +10.7% |
+| 1 | 12.725 | 12.788 | +0.5% |
+| 64 | 13.587 | 13.779 | +1.4% |
+| 1460 | 36.974 | 37.874 | +2.4% |
+| 3960 | 89.021 | 89.242 | +0.2% |
+| 32768 | 2525.008 | 747.298 | -70.4% |
+| 65495 | 1617.079 | 1616.706 | -0.0% |
+
+Full-checksum median changes range from -70.4% to +10.7%. The measurements include allocation, frame initialization, payload copies, and checksums. An earlier run reused one build directory and produced identical binaries without recompiling the candidate; that run is excluded from this comparison. They do not establish a native application throughput improvement.
+
+The SYN comparison has run-to-run variation: the baseline median for 32768-byte payloads changed from 731.717 to 4331.929 ns between executions. The pooled decrease at this payload size is not evidence of an encoder speedup. The zero-payload candidate median increased by 1.264 ns; the 1460-byte median increased by 0.900 ns.
+
+## 2026-10-22 — Independent-build corrections for TCP frame comparisons
+
+The two original comparisons above produced identical baseline and candidate binaries, and the candidate build logs contained no compilation. Their performance conclusions are withdrawn. Each corrected build uses a fresh, separate `CARGO_TARGET_DIR`; verbose compiler logs and dependency files identify the source snapshot. The unchanged benchmark runs in baseline, candidate, candidate, baseline order on the same dedicated test Mac. Each value pools 14 samples. Source and original App/NE bindings remained unchanged.
+
+| Change | Payload bytes | Baseline ns/frame | Candidate ns/frame | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Shared IPv4 encoder | 0 | 12.690 | 12.599 | -0.7% |
+| Shared IPv4 encoder | 1 | 12.797 | 13.133 | +2.6% |
+| Shared IPv4 encoder | 64 | 13.493 | 13.780 | +2.1% |
+| Shared IPv4 encoder | 1460 | 36.243 | 37.197 | +2.6% |
+| Shared IPv4 encoder | 3960 | 88.124 | 89.240 | +1.3% |
+| Shared IPv4 encoder | 32768 | 746.370 | 730.982 | -2.1% |
+| Shared IPv4 encoder | 65495 | 1581.741 | 1615.075 | +2.1% |
+| IPv6-capable encoder | 0 | 12.155 | 12.070 | -0.7% |
+| IPv6-capable encoder | 1 | 12.995 | 13.036 | +0.3% |
+| IPv6-capable encoder | 64 | 13.633 | 13.978 | +2.5% |
+| IPv6-capable encoder | 1460 | 37.075 | 37.935 | +2.3% |
+| IPv6-capable encoder | 3960 | 87.525 | 89.542 | +2.3% |
+| IPv6-capable encoder | 32768 | 731.844 | 734.985 | +0.4% |
+| IPv6-capable encoder | 65495 | 1610.253 | 1617.429 | +0.4% |
+
+The corrected measurements include run-to-run variation and establish neither a consistent speedup nor native application throughput. The functional packet regressions are independent of these microbenchmarks.
+
+## 2026-10-22 — L3 adapter validation
+
+Compare `902f73f5` with the commit containing this entry using the same `common/splicetcp/examples/l3_frame_bench.rs` in both snapshots. Build each through `devenv shell -- cargo build --locked -p splicetcp --example l3_frame_bench --release` with separate, initially absent `CARGO_TARGET_DIR` directories. Execute the binaries in baseline, candidate, candidate, baseline order. Run the candidate once more with the `ipv6` argument. Compiler logs and dependency files identify each source snapshot.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process warms up once, then collects seven samples per payload. The IPv4 columns pool 14 samples; IPv6 has seven samples. Preallocated buffers exclude allocation and socket work. Inputs have valid declared lengths. The measurement includes IP validation, Ethernet header writes, and packet copies.
+
+| Payload bytes | IPv4 baseline ns/frame | IPv4 candidate ns/frame | Difference ns/frame | IPv6 candidate ns/frame |
+|---:|---:|---:|---:|---:|
+| 0 | 2.375 | 3.040 | +0.665 | 3.975 |
+| 64 | 3.112 | 3.851 | +0.739 | 3.822 |
+| 1460 | 16.534 | 16.400 | -0.134 | 16.403 |
+| 32768 | 287.913 | 290.096 | +2.183 | 275.982 |
+
+The candidate replaces a version/minimum-length check with shared structural parsing, declared-length validation, and EtherType selection. Small-packet differences measure that added fixed work; large-packet results also include memory-copy and scheduling variation. These are adapter measurements, not native application throughput or end-to-end IPv6 acceptance.
+
+## 2026-10-22 — TCP segmentation extraction
+
+Compare `ded7cbe5` with the commit containing this entry. Both snapshots use identical `common/splicetcp/examples/tcp_bridge_bench.rs` source. Build with `devenv shell -- cargo build --locked -p splicetcp --example tcp_bridge_bench --release`. Give each snapshot a separate, initially absent `CARGO_TARGET_DIR`. Compiler logs and dependency files identify both snapshots. Run baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0, aarch64-apple-darwin. Each process establishes 1 or 64 flows through public handshake APIs over owned loopback sockets. Setup is outside timing. Each mode warms up once, then records seven samples; the table pools 14 samples per snapshot. ACK samples contain 200,000 established pure ACK operations. Download samples contain 10,000 transfers of 1400 bytes. Each transfer includes a socket write, bridge polling, output parsing and payload checks, and injected ACKs. Polling visits all active flows. These measurements are not pure encoder timing or native tunnel throughput.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 27.855 | 27.590 | -0.95% |
+| ack | 64 | 24.883 | 24.424 | -1.84% |
+| download | 1 | 7125.167 | 7174.013 | +0.69% |
+| download | 64 | 21397.131 | 20968.273 | -2.00% |
+
+The production change moves the same encoder body to an internal module. Differences include compiler layout and host scheduling variation; download timings also include socket and validation costs. These measurements establish the baseline for the next address-family migration.
+
+## 2026-10-22 — TCP bridge address families
+
+Compare `56fc9bd7` with the commit containing this entry using the [TCP bridge benchmark method](#2026-10-22--tcp-segmentation-extraction). Both snapshots use the same checked-in driver, separate fresh release build directories, and baseline/candidate/candidate/baseline execution order. Compiler logs and dependency files identify each snapshot. Each cell pools 14 samples on the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0. The traffic is IPv4; IPv6 correctness is checked separately by the socket-backed library test.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 28.498 | 21.820 | -23.43% |
+| ack | 64 | 24.814 | 22.928 | -7.60% |
+| download | 1 | 5964.004 | 4986.370 | -16.39% |
+| download | 64 | 19799.879 | 18773.054 | -5.19% |
+
+The initial derived-hash candidate increased pure ACK time by 16.98% with one flow and 25.84% with 64 flows while download times remained within 0.2%. The final candidate keeps `IpAddr` storage but hashes IPv4 endpoints as the original compact four-tuple. Non-IPv4 keys retain their address-family tags, and the standard randomized hasher is unchanged. The table reports a new paired run after that correction. Address-family checks still select frame encoding. Pure ACK operations expose lookup and dispatch costs. Download operations also include socket I/O, scanning active flows, output parsing, and content validation. These measurements do not establish native tunnel throughput.
+
+The final candidate's two pure ACK run medians were 21.790/21.845 ns with one flow and 23.053/22.925 ns with 64 flows. Baseline single-flow download medians varied from 7118.446 to 4950.142 ns between runs; candidate medians were 4946.425 and 5030.133 ns. That baseline variation prevents attributing the pooled download difference to the code change.
+
+## 2026-10-22 — Established TCP input validation
+
+Compare `27b859ce` with the commit containing this entry using the [TCP bridge benchmark method](#2026-10-22--tcp-segmentation-extraction). Both snapshots use the same driver and separate fresh release build directories. Compiler logs and dependency files identify each snapshot. Execution order is baseline/candidate/candidate/baseline. Each cell pools 14 samples on the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0. Benchmarked traffic is IPv4; IPv6 behavior is covered by the socket-backed regression.
+
+| Operation | Active flows | Baseline ns/operation | Candidate ns/operation | Difference |
+|---|---:|---:|---:|---:|
+| ack | 1 | 21.827 | 30.579 | +40.10% |
+| ack | 64 | 22.720 | 31.261 | +37.59% |
+| download | 1 | 6972.965 | 6993.820 | +0.30% |
+| download | 64 | 19308.479 | 19405.408 | +0.50% |
+
+The parser now validates IP version, declared lengths, fragmentation, TCP header bounds, and Ethernet/IP family agreement before accessing connection state. Pure ACK operations expose the fixed parsing cost. Download operations also include socket I/O, active-flow scans, frame encoding, and payload validation. These measurements do not establish native tunnel throughput.
+
+The final parser adds 8.753 ns per pure ACK with one flow and 8.541 ns with 64 flows. An earlier snapshot without the two parsing inline hints measured 10.6–13.3 ns of added ACK cost. The final paired run retains all structural checks; download differences are 0.30% and 0.50%. The ACK microbenchmark records the remaining cost of the added structural checks.
+
+## 2026-10-22 — IPv6 upload coalescing
+
+Compare `54b699c4` with the commit containing this entry using identical `common/splicetcp/examples/tcp_upload_bench.rs` drivers. Build through `devenv shell -- cargo build --locked -p splicetcp --example tcp_upload_bench --release`, with separate initially absent `CARGO_TARGET_DIR` directories. Compiler logs and dependency files identify both snapshots. Run baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and records seven samples per case; the table pools 14 samples. Each sample uploads 2000 batches through one established flow over an owned IPv4 or IPv6 loopback socket. Each packet carries 1400 bytes. Timing includes frame encoding, bridge interception, socket writes, ACK parsing, peer reads, and content validation. The driver consumes every packet and drains retained suffixes before the next batch. Setup is excluded. These results do not measure native tunnel throughput.
+
+| Input | Packets per batch | Baseline ns/batch | Candidate ns/batch | Difference |
+|---|---:|---:|---:|---:|
+| ipv4-ethernet | 1 | 8081.781 | 8246.729 | +2.04% |
+| ipv4-ethernet | 32 | 24834.730 | 25030.531 | +0.79% |
+| ipv4-ip | 1 | 7873.198 | 8117.427 | +3.10% |
+| ipv4-ip | 32 | 24801.125 | 24924.531 | +0.50% |
+| ipv6-ethernet | 1 | 7823.781 | 8068.157 | +3.12% |
+| ipv6-ethernet | 32 | 269824.115 | 25510.677 | -90.55% |
+| ipv6-ip | 1 | 7885.511 | 7937.844 | +0.66% |
+| ipv6-ip | 32 | 270998.750 | 25388.344 | -90.63% |
+
+IPv4 already coalesced uploads; its comparison measures the shared parser and complete endpoint checks plus socket and scheduling variation. The IPv6 baseline processes every packet separately. The candidate can process all 32 packets in one vectored write and one ACK when the socket accepts the batch.
+
+The final run records 90.55% and 90.63% lower IPv6 32-packet times. IPv4 32-packet times increase by 0.50% and 0.79%. Single-packet times increase by 0.66% to 3.12% (52 to 244 ns); socket and scheduling variation prevent attributing those differences solely to parsing. An earlier snapshot reparsed the first packet and recorded an 8.42% IPv4 Ethernet single-packet increase. The final implementation reuses the validated first view. The baseline single-packet times also changed between runs, so the measurements do not isolate the performance benefit of removing that parse.
+
+## 2026-10-22 — Classifier address types
+
+Compare `e0ff997d` with this commit using identical `common/splicetcp/examples/classifier_bench.rs` drivers. Build through `devenv shell -- cargo build --locked -p splicetcp --example classifier_bench --release`. Use separate initially absent `CARGO_TARGET_DIR` directories. Compiler logs and dependency files identify both snapshots. Execute baseline, candidate, candidate, baseline.
+
+Host: Apple M5 Pro, macOS 26.5, Rust 1.96.0. Each process warms up once and records seven samples per case. Each sample classifies and drains 100,000 IPv4 frames, with four pool slots and one queued frame at a time. Construction is outside timing. Timing includes SYN allocation or pooled data copies, queue draining, and retained-byte assertions. The table pools 14 samples. The driver supports an `ipv6` argument for later activation; this batch measures IPv4 only.
+
+| Mode | Entry | Baseline ns/frame | Candidate ns/frame | Difference |
+|---|---|---:|---:|---:|
+| syn | ethernet | 36.288 | 39.809 | +9.70% |
+| syn | ip | 30.506 | 33.521 | +9.88% |
+| data64 | ethernet | 11.657 | 11.639 | -0.15% |
+| data64 | ip | 12.268 | 12.286 | +0.15% |
+| data1400 | ethernet | 46.336 | 47.385 | +2.26% |
+| data1400 | ip | 48.078 | 47.721 | -0.74% |
+
+The production change widens SYN metadata to `IpAddr`. Only SYN retention changes its allocation layout. Data cases retain the same behavior and expose compiler-layout and timing variation. These measurements do not establish socket or native tunnel throughput.
+
+## 2026-10-22 — Shared classifier parsing
+
+Compare `1b7726be` with this commit using the [classifier benchmark method](#2026-10-22--classifier-address-types). Both snapshots use the same driver, separate fresh release build directories, and baseline/candidate/candidate/baseline execution order. Compiler logs and dependency files identify each source. Each cell pools 14 IPv4 samples from the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0.
+
+| Mode | Entry | Baseline ns/frame | Candidate ns/frame | Difference ns/frame |
+|---|---|---:|---:|---:|
+| syn | ethernet | 35.733 | 37.460 | +1.727 |
+| syn | ip | 34.447 | 37.175 | +2.728 |
+| data64 | ethernet | 11.248 | 12.851 | +1.602 |
+| data64 | ip | 11.880 | 13.300 | +1.421 |
+| data1400 | ethernet | 47.602 | 48.968 | +1.365 |
+| data1400 | ip | 48.100 | 49.574 | +1.473 |
+
+The old classifier read a few fixed header fields and retained incomplete TCP segments. The candidate validates declared IP lengths, fragmentation, complete TCP header bounds, and UDP lengths before retaining bytes. The benchmark includes that fixed validation cost, allocation or pool operations, queue draining, and byte assertions. No socket or native tunnel throughput claim follows from this table.
+
+The pooled differences are +1.366 to +2.728 ns/frame. Baseline SYN run medians changed from 33.831 to 37.800 ns for Ethernet and from 32.945 to 35.695 ns for bare IP; candidate medians lie within or near those ranges. Timing variation therefore prevents attributing the full SYN difference to validation. The 64-byte data run medians were 11.162–11.249 ns baseline and 12.748–13.172 ns candidate for Ethernet, and 11.750–12.249 ns baseline and 13.289–13.315 ns candidate for bare IP.
+
+## 2026-10-22 — IPv6 classifier
+
+Compare `6dd0c89c` with this commit using the [classifier benchmark method](#2026-10-22--classifier-address-types). Both snapshots use the same driver and separate fresh release build directories. IPv4 runs use baseline/candidate/candidate/baseline order, followed by two candidate IPv6 runs. Compiler logs and dependency files identify each source. Each cell pools 14 samples from the Apple M5 Pro test Mac, macOS 26.5, Rust 1.96.0.
+
+| Mode | Entry | Baseline IPv4 ns/frame | Candidate IPv4 ns/frame | Difference ns/frame | Candidate IPv6 ns/frame |
+|---|---|---:|---:|---:|---:|
+| syn | ethernet | 38.545 | 40.670 | +2.125 | 46.516 |
+| syn | ip | 43.922 | 46.070 | +2.148 | 45.761 |
+| data64 | ethernet | 12.820 | 12.848 | +0.027 | 13.279 |
+| data64 | ip | 13.377 | 15.671 | +2.294 | 16.069 |
+| data1400 | ethernet | 49.713 | 58.587 | +8.873 | 58.672 |
+| data1400 | ip | 50.424 | 59.887 | +9.463 | 60.145 |
+
+The candidate dispatches both families after shared validation and selects the synthetic EtherType for bare input. The measurements include classification, allocation or pool operations, queue draining, and byte assertions. IPv6 has no supported baseline in the parent. The driver excludes socket forwarding, the HostEgress boundary check, and native tunnels; no forwarding throughput claim follows from these results.
+
+The 1400-byte IPv4 path increases by 8.873 ns/frame for Ethernet and 9.463 ns/frame for bare IP, about 18%. Both runs show this difference. SYN timing varies substantially: baseline Ethernet run medians are 37.369 and 51.853 ns, so the pooled SYN comparison cannot isolate the implementation cost. The feature adds family selection; these measurements do not identify which generated instructions account for the full difference.
+
+A separate candidate added only `#[inline]` to the shared dispatcher. Its paired 1400-byte medians were 47.499/53.825 ns for Ethernet baseline/candidate and 47.919/56.539 ns for bare IP. The remaining increases were 13.3% and 18.0%; the hint did not eliminate the regression. Different baseline timings limit cross-run attribution. This commit retains the direct implementation without the hint. Both experiments retain compiler logs, source manifests, and per-run CSV evidence under `/private/tmp/arctap-classifier-ipv6-benchmark-oct22-v2` and `-v3` on the test Mac.
+
+## 2026-10-22 — Primary cancellation
+
+Compare `df036498` with this commit using `common/splicetcp/examples/tcp_bridge_bench.rs`. The driver accepts `--managed` to retain a native lifecycle token. Both snapshots use the same driver, independent fresh release targets, and Rust 1.96.0 on the dedicated test Mac. Each ownership mode uses baseline/candidate/candidate/baseline order, with 14 samples per cell. Downloads transfer 1400 bytes through real loopback sockets, verify payload and sequence numbers, and send guest ACKs.
+
+| Socket mode | Operation | Flows | Baseline ns/op | Candidate ns/op | Difference |
+|---|---|---:|---:|---:|---:|
+| managed | ack | 1 | 41.887 | 44.037 | +5.13% |
+| managed | ack | 64 | 42.495 | 45.685 | +7.51% |
+| managed | download | 1 | 6631.629 | 6287.223 | -5.19% |
+| managed | download | 64 | 25483.150 | 26247.935 | +3.00% |
+| unmanaged | ack | 1 | 42.590 | 46.112 | +8.27% |
+| unmanaged | ack | 64 | 42.758 | 44.971 | +5.18% |
+| unmanaged | download | 1 | 7036.283 | 10780.013 | +53.21% |
+| unmanaged | download | 64 | 26006.933 | 32171.525 | +23.70% |
+
+These initial runs overlapped compilation on the test Mac, including an unrelated Rust 1.98 workspace build. They do not isolate the implementation cost. ACK medians increased by 2.150–3.522 ns/op; unmanaged download medians increased by 23.70–53.21%, while managed download medians changed by -5.19%/+3.00%. Do not interpret the unmanaged download difference as an established code regression or the managed decrease as an improvement. A compiler-idle repeat remains pending.
+
+Source manifests, fresh-build compiler logs, dependency paths, binary hashes, all 224 timing samples, and native binding snapshots are in `/private/tmp/arctap-primary-cancel-benchmark-oct22-v1`. Reproduce with `devenv shell -- cargo run --release -p splicetcp --example tcp_bridge_bench` and add `-- --managed` for managed sockets. This driver does not measure VM, TUN, or native App/NE throughput.
+
+The first compiler-idle repeat stopped after ten minutes because another Cargo task remained active. No repeat samples ran. The waiting record is `/private/tmp/arctap-primary-cancel-benchmark-oct22-v2`; the isolated performance verdict remains pending.

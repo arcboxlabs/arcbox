@@ -1,0 +1,7 @@
+# Inbound UDP associations
+
+Inbound UDP identity now includes the listener address and client address. A live association retains one guest-visible source port across datagrams. The listener owns one reply queue and its socket; reply messages identify their client. Removing the listener closes the reply queue and releases the socket before returning. Idle expiry and listener replacement remove the paired indexes. Allocation skips active ports and rejects exhaustion without replacing another client.
+
+The dedicated test Mac passed 38 arcbox-proxy and 177 splicetcp all-feature library tests through devenv with Rust 1.96.0. No tests failed or were ignored. Formatting, strict all-target/all-feature Clippy for both libraries, and all-target checks for splicetcp, arcbox-proxy, arcbox-net, and arcbox-vmm passed. Four regressions cover multi-client replies, empty datagrams, expiry and replacement, port wrap and exhaustion, and real socket release. Existing IPv6 SOCKS5 control-endpoint support remains in place.
+
+Results: `/private/tmp/arctap-inbound-udp-results-oct22-v1`. Source manifest SHA-256: `560b7a073609c012fab47069f4a62212caa24aa70dcd21c8f78ca3cfd7b74b08`. Source, native bindings, DNS, and interfaces remained unchanged. This library validation does not establish native App/NE, TUN, VM, or final combined workspace acceptance. Isolated performance comparison remains pending while the test Mac has another project running.

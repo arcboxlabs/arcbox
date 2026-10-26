@@ -121,13 +121,7 @@ run fails, and which paths must change together.
   post-readiness agent ping (`AgentPingRequest.timestamp_secs`, see app/AGENTS.md)
   until PL031 lands (ABX-416). Route to the clock/ping path, not the
   registry.
-- Daemon exits with a signal (e.g. SIGSEGV/signal 11) AFTER the assertions
-  passed -> known teardown bug ABX-415. No code path turns a teardown
-  signal-exit into a test failure. `DaemonHandle::drop` discards the status
-  (`let _ = self.terminate()`); it is surfaced only by `TestContext::drop`
-  (`boot_assets`/`backend_matrix`), which calls `daemon.shutdown()` and logs
-  `info!(%status, "daemon stopped")` — a handle dropped directly (e.g.
-  `virtio_debug`) logs the signal nowhere. Not a correctness regression.
+- Daemon exits with a signal after the scenario assertions pass -> investigate daemon teardown. The `boot_assets` and shared VZ scenario runners explicitly require a successful daemon exit before recording passing metrics. These runners propagate cleanup and metrics failures while retaining the original scenario error. Other callers that only drop a `DaemonHandle` still discard its termination result; their successful test exit does not prove successful daemon shutdown.
 - Boots fail in confusing ways -> a stale staged agent (newest-mtime wins),
   or the `hv_e2e` home fallback missing a newer version: `home_asset` is
   pinned to `~/.arcbox/boot/0.5.5/`, so once `assets.lock` moves past 0.5.5

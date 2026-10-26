@@ -29,6 +29,8 @@ vsock.send(Bytes::from("ping")).await?;
 
 ## Raw Vsock Streams
 
+Construct `VsockStream` inside a Tokio runtime. The raw stream owns its file descriptor until drop. A registration failure releases the descriptor.
+
 `VsockTransport::close()` and `BlockingVsockTransport::close()` immediately release the owned stream. Use `close()` when cancellation can leave an incomplete frame. A closed blocking transport cannot reconnect; create a new transport with a new connected fd.
 
 Use `VsockTransport` for framed ArcBox RPC traffic. Use `VsockStream` when a

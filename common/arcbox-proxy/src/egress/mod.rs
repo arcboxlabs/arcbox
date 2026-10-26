@@ -92,11 +92,15 @@ impl HostEgress {
     }
 
     /// Dispatches an outbound IPv4 frame to the appropriate protocol proxy.
+    /// Requires IPv4 EtherType and IP version before relay matching or transport dispatch.
     ///
     /// Inbound reply frames (matching an active inbound connection) are
     /// intercepted first; everything else is proxied through host sockets.
     pub fn handle_outbound(&mut self, frame: &[u8], guest_mac: [u8; 6]) {
-        if frame.len() < ETH_HEADER_LEN + 20 {
+        if frame.len() < ETH_HEADER_LEN + 20
+            || frame[12..14] != [0x08, 0x00]
+            || frame[ETH_HEADER_LEN] >> 4 != 4
+        {
             return;
         }
 
@@ -125,16 +129,23 @@ impl HostEgress {
     ) {
         use super::inbound_relay::InboundCommand;
         if let InboundCommand::UdpReceived {
-            host_port,
+            host_addr,
+            client_addr,
             data,
             reply_tx,
             ..
         } = cmd
         {
-            // Use host_port (the Docker-exposed port on the guest), not
-            // container_port (the port inside the container).
-            self.inbound
-                .inject_udp(host_port, &data, reply_tx, guest_mac);
+            // The guest exposes the host listener's port through Docker DNAT.
+            self.inbound.inject_udp(
+                super::inbound_relay::InboundUdpPeer {
+                    listener: host_addr,
+                    client: client_addr,
+                },
+                &data,
+                reply_tx,
+                guest_mac,
+            );
         }
     }
 
