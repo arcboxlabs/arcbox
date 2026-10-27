@@ -7,6 +7,7 @@ mod closed;
 mod egress;
 mod handshake_cancel;
 mod handshake_payload;
+mod host_first_close;
 mod ipv6_download;
 mod ipv6_fast_path;
 mod ipv6_handshake;
