@@ -70,6 +70,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.0
+          # The action installs the minimal profile by default, so the two
+          # components the gates below run must be requested explicitly.
+          components: rustfmt, clippy
 
       - uses: actions/cache@v4
         with:

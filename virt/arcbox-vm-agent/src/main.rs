@@ -689,7 +689,8 @@ mod agent {
             // SAFETY: ifreq is POD; fully initialized below.
             let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
             for (dst, src) in req.ifr_name.iter_mut().zip(IFNAME) {
-                *dst = *src as libc::c_char;
+                // c_char is i8 on x86_64 and u8 on aarch64 Linux; keep the byte unchanged on both.
+                *dst = libc::c_char::from_ne_bytes([*src]);
             }
             req.ifr_ifru.ifru_addr = addr;
             req

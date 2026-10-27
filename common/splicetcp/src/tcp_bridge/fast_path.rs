@@ -207,16 +207,19 @@ impl TcpBridge {
                 // bytes already accounted for above).
                 conn.set_last_ack(conn.last_ack.wrapping_add(1));
                 let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
-                // Non-inline flow whose host side is still open: a genuine
-                // half-close. Shut only the upstream's receive side (the guest
-                // will send no more), keep relaying host→guest until the host
-                // EOFs on its own (poll then emits OUR FIN), and just ACK the
-                // FIN here — reaping happens in poll once both sides are closed.
-                // A full close here would truncate the still-in-flight response
-                // and, with unread bytes buffered, RST the real upstream.
-                // Inline flows (whose reader owns host→guest) and flows where
-                // the host already closed fall through to the full teardown.
-                if !conn.host_eof && !conn.inline_owned {
+                // Non-inline flow: shut only the upstream's write side (the guest
+                // will send no more) and just ACK the FIN here. If the host is
+                // still open, poll keeps relaying host→guest until the host EOFs
+                // and then emits OUR FIN. If the host already closed, our FIN
+                // and any unacknowledged download bytes stay in the recovery
+                // state, so poll retransmits them with the original sequence
+                // numbers. Reaping happens in poll once both sides are closed.
+                // A full close here would discard that recovery state, send a
+                // second FIN at a new sequence number, and, with unread bytes
+                // buffered, RST the real upstream.
+                // Inline flows (whose reader owns host→guest) fall through to
+                // the full teardown.
+                if !conn.inline_owned {
                     tracing::debug!(
                         "Fast path: guest half-close {src_ip}:{src_port}→{dst_ip}:{dst_port}"
                     );
