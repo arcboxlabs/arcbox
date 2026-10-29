@@ -2,6 +2,8 @@
 
 Host socket egress, SOCKS5 and HTTP CONNECT clients, and inbound relay for ArcBox and host proxy consumers. This crate has no VM or device dependency.
 
+The `egress` module and its `HostEgress` UDP/ICMP frame dispatcher require Unix. SOCKS5 and HTTP CONNECT clients, including SOCKS5 UDP associations, remain portable. The inbound listener manager and its command channel are also portable. Windows has no host ICMP backend in this crate.
+
 Pass a hostname or an unbracketed IP address to `http_connect::connect_via_http_proxy`. The client brackets IPv6 addresses in both the CONNECT authority and the `Host` header. The returned stream preserves tunnel data that follows the response headers.
 
 ```rust

@@ -3,6 +3,8 @@
 //! Instead of using utun + kernel routing, we inject crafted L2 Ethernet frames
 //! directly into the guest FD (socketpair) so that host-side TCP/UDP listeners
 //! can reach services inside the guest VM.
+//! The public listener manager and command channel are portable. Unix host egress
+//! owns the private frame relay; its packet logic remains available to unit tests.
 //!
 //! # Architecture
 //!
@@ -25,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+#[cfg(any(unix, test))]
 use std::time::Instant;
 
 use socket2::SockRef;
@@ -33,6 +36,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(unix, test))]
 use arcbox_packet::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 
 /// Socket buffer size applied to accepted inbound TCP streams.
@@ -51,15 +55,19 @@ const INBOUND_TCP_BUF_SIZE: usize = 4 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Start of the inbound ephemeral port range (guest kernel uses 32768-60999).
+#[cfg(any(unix, test))]
 const EPHEMERAL_START: u16 = 61000;
 /// End of the inbound ephemeral port range (inclusive).
+#[cfg(any(unix, test))]
 const EPHEMERAL_END: u16 = 65535;
 
 /// Wrapping ephemeral port allocator for inbound connections.
+#[cfg(any(unix, test))]
 pub(crate) struct EphemeralPorts {
     next: u16,
 }
 
+#[cfg(any(unix, test))]
 impl EphemeralPorts {
     pub(crate) fn new() -> Self {
         Self {
@@ -113,6 +121,7 @@ pub enum InboundCommand {
 // ---------------------------------------------------------------------------
 
 /// Host endpoints that identify one inbound UDP association.
+#[cfg(any(unix, test))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct InboundUdpPeer {
     pub(crate) listener: SocketAddr,
@@ -120,6 +129,7 @@ pub(crate) struct InboundUdpPeer {
 }
 
 /// Per-flow inbound UDP state.
+#[cfg(any(unix, test))]
 struct InboundUdpFlow {
     peer: InboundUdpPeer,
     /// Channel to send reply datagrams back to the host-side client.
@@ -134,6 +144,7 @@ struct InboundUdpFlow {
 
 /// Handles inbound (host → guest) connections by injecting L2 Ethernet frames
 /// directly into the guest FD through the `reply_tx` channel.
+#[cfg(any(unix, test))]
 pub(crate) struct InboundRelay {
     /// Active UDP flows keyed by (gateway_ip, ephemeral_port, guest_ip, container_port).
     udp_flows: HashMap<(Ipv4Addr, u16, Ipv4Addr, u16), InboundUdpFlow>,
@@ -149,6 +160,7 @@ pub(crate) struct InboundRelay {
     ephemeral_ports: EphemeralPorts,
 }
 
+#[cfg(any(unix, test))]
 impl InboundRelay {
     pub(crate) fn new(
         reply_tx: mpsc::Sender<Vec<u8>>,

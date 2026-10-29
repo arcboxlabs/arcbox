@@ -5,11 +5,11 @@
 //!
 //! - [`classifier`] — demultiplexes inbound Ethernet frames (ARP / TCP-SYN /
 //!   TCP / DHCP / DNS / UDP / ICMP). It is *fed* frames via
-//!   [`FrameClassifier::classify_frame`] rather than owning an fd, so the
+//!   [`FrameClassifier::classify_frame`](classifier::FrameClassifier::classify_frame) rather than owning an fd, so the
 //!   ingest source is pluggable.
-//! - [`frame_source`] — the [`FrameSource`] ingest seam (an fd to await for
-//!   readiness plus a non-blocking `drain`) and [`FdFrameSource`], a raw-fd
-//!   implementation used by both the VM (socketpair) and host (utun) datapaths.
+//! - `frame_source` (Unix) — the `FrameSource` ingest seam: an fd for readiness
+//!   and a non-blocking `drain`. The macOS `FdFrameSource` reads raw fds for the
+//!   VM (socketpair) and host (utun) datapaths.
 //! - [`tcp_bridge`] — a hand-rolled TCP handshake synthesizer + fast-path data
 //!   plane that terminates TCP without a full userspace stack.
 //! - [`direct_rx`] — the [`FrameSink`](direct_rx::FrameSink) /
@@ -17,7 +17,7 @@
 //! - [`shim`] — an L3 ↔ L2 shim that wraps a host's `utun` IP packets in a
 //!   synthetic Ethernet header so the L2 classifier and TCP shim run unmodified
 //!   over an L3 link.
-//! - [`utun`] (macOS) — a [`FrameSource`](frame_source::FrameSource) and sink
+//! - `utun` (macOS) — a `FrameSource` and sink
 //!   over a host `utun` fd, stripping/prepending the device's 4-byte AF header.
 //!
 //! Extracted from `arcbox-net` so a host-level proxy can reuse the same TCP
@@ -27,6 +27,7 @@ pub mod classifier;
 pub mod direct_rx;
 pub mod egress;
 mod fragment;
+#[cfg(unix)]
 pub mod frame_source;
 mod native_tcp;
 pub mod shim;
@@ -40,6 +41,7 @@ pub use egress::{
 };
 #[cfg(target_os = "macos")]
 pub use frame_source::FdFrameSource;
+#[cfg(unix)]
 pub use frame_source::FrameSource;
 pub use native_tcp::NativeTcp;
 

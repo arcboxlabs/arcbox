@@ -5,6 +5,8 @@ the frame plane between an L2/L3 packet source and an egress dialer: it
 classifies Ethernet frames, synthesizes the guest-facing TCP handshake, and then
 promotes established flows to a fast path backed by a real host `TcpStream`.
 
+The packet classifier, TCP bridge, L3/L2 conversion functions, and Tokio frame sink are portable. The fd-based `FrameSource` and `shim::L3ToL2Source` APIs require Unix. `FdFrameSource` and `utun` require macOS. Windows callers supply packets through the push APIs and provide handlers for intercepted protocols.
+
 It is intentionally **not** a full TCP/IP stack. The guest kernel still owns the
 guest TCP state. `splicetcp` only gates outbound SYNs, creates the host-side
 egress connection, mirrors the minimal sequence/ack state needed for frame

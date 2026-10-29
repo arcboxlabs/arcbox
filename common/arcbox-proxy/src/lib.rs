@@ -8,7 +8,7 @@
 //!   ([`socks5::Socks5UdpAssociation`]), connecting by hostname so Fake-IP
 //!   destinations resolve on the proxy's side.
 //! - [`http_connect`] — the HTTP CONNECT tunnel client.
-//! - [`egress`] — proxies guest UDP/ICMP through real host sockets (bypassing
+//! - `egress` (Unix) — proxies guest UDP/ICMP through real host sockets (bypassing
 //!   kernel routing / VPN interference), optionally via the SOCKS5 proxy, and
 //!   dispatches inbound datagrams through the [`inbound_relay`].
 //! - [`inbound_relay`] — host → guest port forwarding by injecting crafted L2
@@ -17,6 +17,7 @@
 //! Extracted from `arcbox-net` so a host-level proxy can reuse the same egress
 //! and relay machinery as the VM datapath.
 
+#[cfg(unix)]
 pub mod egress;
 pub mod http_connect;
 pub mod inbound_relay;

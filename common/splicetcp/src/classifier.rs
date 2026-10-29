@@ -1,9 +1,9 @@
 //! Ethernet and bare IPv4/IPv6 packet classifier for the datapath.
 //!
 //! Demultiplexes inbound Ethernet frames by protocol. Frames are *fed* to
-//! [`FrameClassifier::classify_frame`] — typically by an
-//! [`FdFrameSource`](crate::frame_source::FdFrameSource) draining the guest
-//! socketpair (VM) or a `utun` (host tunnel) — and routed:
+//! [`FrameClassifier::classify_frame`] by a caller-owned source. On macOS,
+//! `FdFrameSource` drains the guest socketpair (VM) or a `utun` (host tunnel).
+//! The classifier routes frames by protocol:
 //!
 //! - **ARP** → [`ArpResponder`] — synthesizes the reply inline
 //! - **TCP SYN** → gated for `TcpBridge::handle_outbound_syn`
@@ -82,8 +82,8 @@ pub enum InterceptedKind {
 ///
 /// Fed Ethernet frames via [`classify_frame`](Self::classify_frame), it
 /// responds to ARP inline and routes TCP / UDP / ICMP into the appropriate
-/// queues for downstream handlers. It owns no fd — the ingest source (see
-/// [`FrameSource`](crate::frame_source::FrameSource)) is the caller's.
+/// queues for downstream handlers. The caller owns the ingest source;
+/// Unix callers may use `FrameSource` to drain an fd.
 pub struct FrameClassifier {
     /// Gateway IP for DNS interception.
     gateway_ip: Ipv4Addr,
@@ -287,8 +287,7 @@ impl FrameClassifier {
 
     /// Classifies a frame and routes it to the appropriate queue.
     ///
-    /// The frame is a raw Ethernet frame borrowed from the ingest source (see
-    /// [`FrameSource::drain`](crate::frame_source::FrameSource::drain)). Only
+    /// The frame is a raw Ethernet frame borrowed from the caller's ingest source. Only
     /// the branches that retain a frame (TCP rx queue, intercepted UDP/ICMP,
     /// gated SYNs) copy it into a pooled [`FrameBuf`]; ARP and dropped frames
     /// never touch the pool. Also learns the guest MAC from the source address.

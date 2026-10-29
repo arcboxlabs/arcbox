@@ -4,13 +4,13 @@
 //! (ARP, a gateway+guest MAC). A host `utun` is an L3 link that carries bare IP
 //! packets with no L2 header. This shim bridges the gap:
 //!
-//! - [`L3ToL2Source`] wraps an L3 [`FrameSource`] (IP packets) so the
+//! - `L3ToL2Source` (Unix) wraps an L3 `FrameSource` (IP packets) so the
 //!   classifier sees Ethernet frames — each IP packet is prefixed with a fixed
 //!   synthetic Ethernet header.
 //! - [`synthetic_l2_header`] + [`l3_to_l2`] are the same wrapping as free
 //!   functions, for callers that drive the classifier directly from a callback
 //!   instead of an fd (e.g. a Network Extension's `NEPacketTunnelFlow`, which
-//!   has no pollable fd and so cannot implement [`FrameSource`]).
+//!   has no pollable fd and so cannot implement `FrameSource`).
 //! - [`l2_to_l3`] is the egress filter: it strips the synthetic Ethernet header
 //!   from a frame the datapath wants to send "to the guest", yielding the IP
 //!   packet to write back to the `utun`. ARP and other non-IP frames have no
@@ -19,10 +19,12 @@
 //! There is no real L2 on a `utun`, so the MACs are fixed constants and ARP is
 //! never emitted upstream.
 
+#[cfg(unix)]
 use std::os::fd::RawFd;
 
 use arcbox_packet::ethernet::{ETH_HEADER_LEN, EtherType, EthernetHeader, strip_ethernet_header};
 
+#[cfg(unix)]
 use crate::frame_source::FrameSource;
 
 /// Synthetic gateway MAC — the source of host → "guest" frames on the L3 link.
@@ -38,7 +40,7 @@ pub const HOST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
 /// ingest counterpart to [`l2_to_l3`] for callers that drive the classifier
 /// directly (e.g. a callback-based source such as a Network Extension's
 /// `NEPacketTunnelFlow`, which has no fd and so cannot implement
-/// [`FrameSource`]).
+/// `FrameSource`).
 #[must_use]
 pub fn synthetic_l2_header() -> [u8; ETH_HEADER_LEN] {
     EthernetHeader {
@@ -57,7 +59,7 @@ pub fn synthetic_l2_header() -> [u8; ETH_HEADER_LEN] {
 /// Trims input padding to the declared IP length. Returns `None` for malformed
 /// IP packets, unsupported IPv6 extensions/jumbograms, or an undersized buffer.
 ///
-/// This is the standalone, push-friendly form of [`L3ToL2Source`]'s wrapping:
+/// This is the portable, push-friendly form of `L3ToL2Source`'s wrapping:
 /// a consumer that receives IP packets via a callback can frame each one
 /// without owning a pollable fd.
 #[must_use]
@@ -88,6 +90,7 @@ pub fn l3_to_l2<'b>(
 /// Each inbound IP packet from `inner` is prefixed with a synthetic Ethernet
 /// header (`HOST_MAC` → `GATEWAY_MAC`) into an internal buffer. The EtherType
 /// follows the IP version; malformed packets are dropped.
+#[cfg(unix)]
 pub struct L3ToL2Source<S: FrameSource> {
     inner: S,
     /// Synthetic Ethernet header (`HOST_MAC` → `GATEWAY_MAC`, IPv4), built once.
@@ -96,6 +99,7 @@ pub struct L3ToL2Source<S: FrameSource> {
     buf: Vec<u8>,
 }
 
+#[cfg(unix)]
 impl<S: FrameSource> L3ToL2Source<S> {
     /// Wraps an L3 frame source.
     #[must_use]
@@ -113,6 +117,7 @@ impl<S: FrameSource> L3ToL2Source<S> {
     }
 }
 
+#[cfg(unix)]
 impl<S: FrameSource> FrameSource for L3ToL2Source<S> {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
@@ -150,13 +155,16 @@ pub fn l2_to_l3(frame: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::frame_source::FrameSource;
 
     /// A [`FrameSource`] that replays a fixed list of IP packets once.
+    #[cfg(unix)]
     struct VecSource {
         packets: Vec<Vec<u8>>,
     }
 
+    #[cfg(unix)]
     impl FrameSource for VecSource {
         fn as_raw_fd(&self) -> RawFd {
             -1
@@ -177,6 +185,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     #[test]
     fn wraps_ipv4_with_synthetic_ethernet_header() {
         let mut src = L3ToL2Source::new(VecSource {
@@ -268,6 +277,7 @@ mod tests {
         assert!(l3_to_l2(&ipv4_packet(6), &header, &mut tiny).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn wraps_maximum_ipv6_packet_without_truncation() {
         let mut ip = vec![0xa5; 40 + usize::from(u16::MAX)];
