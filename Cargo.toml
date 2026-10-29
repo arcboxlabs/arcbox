@@ -113,7 +113,7 @@ authors = ["ArcBox Labs <team@arcbox.dev>", "AprilNEA <dev@aprilnea.me> (https:/
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full", "tracing"] }
+tokio = { version = "1.53.3", features = ["full", "tracing"] }
 
 # Error handling
 thiserror = "2"

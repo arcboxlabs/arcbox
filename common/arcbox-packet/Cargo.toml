@@ -10,3 +10,6 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+etherparse = "0.21"

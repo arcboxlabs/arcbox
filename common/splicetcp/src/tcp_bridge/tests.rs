@@ -1,7 +1,10 @@
 use super::*;
 use crate::ethernet::ETH_HEADER_LEN;
+use arcbox_packet::checksum;
 
 mod handshake_payload;
+mod ipv6;
+mod lifecycle;
 mod link_mss;
 mod read_batch;
 mod upload_backpressure;
@@ -27,7 +30,7 @@ fn test_next_isn_distinct_values() {
 /// Builds a synthetic guest SYN frame with the given options.
 fn make_guest_syn_frame(
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: impl Into<IpAddr>,
     dst_port: u16,
     seq: u32,
     options: &[u8],
@@ -47,7 +50,7 @@ fn make_guest_syn_frame(
     frame[ip + 8] = 64;
     frame[ip + 9] = 6;
     frame[ip + 12..ip + 16].copy_from_slice(&GUEST_IP.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&fixture_v4(dst_ip).octets());
     // TCP.
     let tcp = 34;
     frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
@@ -63,7 +66,7 @@ fn make_guest_syn_frame(
 /// Builds a guest ACK frame (pure ACK, no payload).
 fn make_guest_ack_frame(
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: impl Into<IpAddr>,
     dst_port: u16,
     seq: u32,
     ack: u32,
@@ -77,7 +80,7 @@ fn make_guest_ack_frame(
     frame[ip + 2..ip + 4].copy_from_slice(&40u16.to_be_bytes());
     frame[ip + 9] = 6;
     frame[ip + 12..ip + 16].copy_from_slice(&GUEST_IP.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&fixture_v4(dst_ip).octets());
     let tcp = 34;
     frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
     frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
@@ -91,7 +94,7 @@ fn make_guest_ack_frame(
 /// Builds a guest SYN-ACK frame (for ActiveOpen completion tests).
 fn make_guest_syn_ack_frame(
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: impl Into<IpAddr>,
     dst_port: u16,
     seq: u32,
     ack: u32,
@@ -219,9 +222,9 @@ async fn handshake_active_open_emits_syn_and_completes() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
     let flow_key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 8080,
-        dst_ip: GW_IP,
+        dst_ip: GW_IP.into(),
         dst_port: 61500,
     };
     bridge.initiate_active_handshake(flow_key, host_stream, GW_MAC, GUEST_MAC);
@@ -270,9 +273,9 @@ async fn active_open_host_eof_does_not_abort() {
     let mut bridge = TcpBridge::new(GW_IP);
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let flow_key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 8080,
-        dst_ip: GW_IP,
+        dst_ip: GW_IP.into(),
         dst_port: 61501,
     };
     bridge.initiate_active_handshake(flow_key, host_stream, GW_MAC, GUEST_MAC);
@@ -311,9 +314,9 @@ async fn active_open_host_reset_aborts_with_guest_rst() {
     let mut bridge = TcpBridge::new(GW_IP);
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let flow_key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 8080,
-        dst_ip: GW_IP,
+        dst_ip: GW_IP.into(),
         dst_port: 61502,
     };
     bridge.initiate_active_handshake(flow_key, host_stream, GW_MAC, GUEST_MAC);
@@ -398,9 +401,9 @@ fn handshake_capacity_sends_rst() {
     // Fill to capacity with fake entries.
     for i in 0..MAX_PENDING_SYNS {
         let k = SynFlowKey {
-            src_ip: GUEST_IP,
+            src_ip: GUEST_IP.into(),
             src_port: 10000 + i as u16,
-            dst_ip: Ipv4Addr::new(203, 0, 113, 1),
+            dst_ip: Ipv4Addr::new(203, 0, 113, 1).into(),
             dst_port: 80,
         };
         bridge.handshake_conns.insert(
@@ -410,6 +413,7 @@ fn handshake_capacity_sends_rst() {
                 role: HandshakeRole::PassiveOpen,
                 our_isn: 0,
                 peer_isn: 0,
+                peer_syn_end: 1,
                 host_stream: None,
                 connect_rx: None,
                 peer_wscale: None,
@@ -451,9 +455,9 @@ async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
     let (mut accepted, _) = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 12345,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 95).into(),
         dst_port: 443,
     };
     // Jumbo peer MSS so the dgram limit — not the peer bound — drives sizing.
@@ -515,9 +519,9 @@ async fn poll_fast_path_segments_frames_for_configured_mtu() {
     let (mut accepted, _) = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 12345,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 95).into(),
         dst_port: 443,
     };
     // Jumbo peer MSS so the configured MTU — not the peer bound — drives sizing.
@@ -574,9 +578,9 @@ async fn poll_fast_path_clamps_segments_to_peer_mss() {
     let (mut accepted, _) = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 12345,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 95).into(),
         dst_port: 443,
     };
     // …but the peer (a 1500-MTU bridged container) advertised MSS 1460.
@@ -640,9 +644,9 @@ async fn large_frames_below_gso_mss_falls_back_to_clamped_segmentation() {
     let (mut accepted, _) = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 12345,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 95).into(),
         dst_port: 443,
     };
     // …but the peer advertised MSS 1400, below the 1460 GSO segment size.
@@ -700,9 +704,9 @@ async fn poll_fast_path_read_error_emits_rst_and_removes_flow() {
     let (accepted, _) = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 12345,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 95).into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -761,9 +765,9 @@ async fn inline_dead_flag_reaps_bridge_entry() {
     let _accepted = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 23456,
-        dst_ip: Ipv4Addr::new(198, 18, 30, 96),
+        dst_ip: Ipv4Addr::new(198, 18, 30, 96).into(),
         dst_port: 443,
     };
     // peer_mss ≥ GSO_SEGMENT_MSS → inline-eligible, handed to the sink.
@@ -820,9 +824,9 @@ async fn inline_zero_window_persist_probes() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 130);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40070,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     // peer_mss ≥ GSO_SEGMENT_MSS → inline-owned.
@@ -938,7 +942,7 @@ async fn handshake_ttl_abort_emits_rst() {
 /// Builds a guest TCP segment with explicit flags, window, and payload.
 /// `flow` is the guest-side (src_port, dst_ip, dst_port) tuple.
 fn make_guest_segment(
-    flow: (u16, Ipv4Addr, u16),
+    flow: (u16, impl Into<IpAddr>, u16),
     seq: u32,
     ack: u32,
     window: u16,
@@ -957,7 +961,7 @@ fn make_guest_segment(
     frame[ip + 8] = 64;
     frame[ip + 9] = 6;
     frame[ip + 12..ip + 16].copy_from_slice(&GUEST_IP.octets());
-    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&fixture_v4(dst_ip).octets());
     let tcp = 34;
     frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
     frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
@@ -1005,9 +1009,9 @@ async fn upload_hole_is_never_acked_or_written() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 96);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40021,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -1081,9 +1085,9 @@ async fn upload_ooo_reassembly_flushes_on_gap_fill() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 99);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40031,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let mut server = fast_path_pair(&mut bridge, key, 2000).await;
@@ -1121,9 +1125,9 @@ async fn upload_ooo_duplicate_parked_segment_writes_once() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 100);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40032,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let mut server = fast_path_pair(&mut bridge, key, 2000).await;
@@ -1160,9 +1164,9 @@ async fn upload_ooo_beyond_cap_is_dropped() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 101);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40033,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let _server = fast_path_pair(&mut bridge, key, 2000).await;
@@ -1202,9 +1206,9 @@ async fn upload_ooo_overlapping_segments_write_each_byte_once() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 104);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40036,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let mut server = fast_path_pair(&mut bridge, key, 2000).await;
@@ -1259,9 +1263,9 @@ async fn upload_ooo_segment_count_is_bounded() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 105);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40037,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let _server = fast_path_pair(&mut bridge, key, 2000).await;
@@ -1302,9 +1306,9 @@ async fn upload_ooo_reassembly_across_seq_wraparound() {
     bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
     let dst_ip = Ipv4Addr::new(198, 18, 30, 102);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40034,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     let base: u32 = u32::MAX - 60;
@@ -1388,9 +1392,9 @@ async fn upload_ooo_drain_respects_host_writable() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 103);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40035,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
@@ -1507,9 +1511,9 @@ async fn upload_fin_with_gap_defers_teardown() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 97);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40022,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -1594,9 +1598,9 @@ async fn guest_half_close_shuts_host_write_side() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 97);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40044,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -1644,9 +1648,9 @@ async fn half_closed_flow_reaps_after_host_eof() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 98);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40055,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -1722,9 +1726,9 @@ async fn upload_ack_never_exceeds_host_writable() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 98);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40023,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
@@ -1811,9 +1815,9 @@ async fn poll_fast_path_respects_guest_window() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 99);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40024,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
@@ -1888,9 +1892,9 @@ async fn poll_retransmits_unacked_data_after_rto() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 100);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40025,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
@@ -1950,9 +1954,9 @@ async fn triple_dup_ack_triggers_fast_retransmit() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 101);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40026,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
@@ -2010,9 +2014,9 @@ async fn download_ack_beyond_sent_is_ignored() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 102);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40027,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1, 1460, None);
@@ -2078,9 +2082,9 @@ async fn half_closed_flow_reaped_after_idle_timeout() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 120);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40060,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2138,9 +2142,9 @@ async fn malformed_data_offset_is_not_spliced_to_host() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 99);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40077,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -2181,9 +2185,9 @@ async fn retransmitted_syn_ack_gets_reack() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 110);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40040,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     // last_ack = 2000 ⇒ the guest's ISN was 1999 (SYN consumed one seq).
@@ -2225,9 +2229,9 @@ async fn pure_ack_returns_no_frame() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 111);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40041,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2267,9 +2271,9 @@ async fn zero_window_stall_is_broken_by_a_persist_probe() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 100);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40088,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1000, 2000, 1460, None);
@@ -2344,9 +2348,9 @@ async fn promotion_arms_upstream_keepalive() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 140);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40100,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(key, std_client, 1000, 2000, 1460, None);
@@ -2376,9 +2380,9 @@ async fn silent_guest_with_data_in_flight_is_rst_reaped() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 141);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40101,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2429,9 +2433,9 @@ async fn silent_guest_at_zero_window_is_rst_reaped() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 142);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40102,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2481,9 +2485,9 @@ async fn guest_ack_refreshes_dead_flow_clock() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 143);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40103,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2549,9 +2553,9 @@ async fn inline_silent_guest_with_data_in_flight_is_rst_reaped() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 144);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40104,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     // peer_mss ≥ GSO_SEGMENT_MSS → inline-owned.
@@ -2616,9 +2620,9 @@ async fn long_idle_flow_survives_upstream_wakeup() {
 
     let dst_ip = Ipv4Addr::new(198, 18, 30, 145);
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port: 40105,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     bridge.promote_to_fast_path(
@@ -2687,7 +2691,7 @@ impl crate::direct_rx::ConnSink for CaptureSink {
 /// half (whose ring/atomics the test drives in the owner's stead).
 async fn inline_fixture(
     src_port: u16,
-    dst_ip: Ipv4Addr,
+    dst_ip: impl Into<IpAddr>,
 ) -> (TcpBridge, crate::direct_rx::PromotedConn, SynFlowKey) {
     let sink = std::sync::Arc::new(CaptureSink(std::sync::Mutex::new(None)));
     let mut bridge = TcpBridge::new(GW_IP);
@@ -2701,9 +2705,9 @@ async fn inline_fixture(
     let _accepted = accepted.unwrap();
 
     let key = SynFlowKey {
-        src_ip: GUEST_IP,
+        src_ip: GUEST_IP.into(),
         src_port,
-        dst_ip,
+        dst_ip: dst_ip.into(),
         dst_port: 443,
     };
     // peer_mss ≥ GSO_SEGMENT_MSS → inline-owned.
@@ -2868,4 +2872,11 @@ async fn inline_retransmit_never_exceeds_sent() {
         40,
         "retransmission is clamped to the committed sequence space"
     );
+}
+
+fn fixture_v4(ip: impl Into<IpAddr>) -> Ipv4Addr {
+    let IpAddr::V4(ip) = ip.into() else {
+        panic!("IPv4 fixture requires an IPv4 address");
+    };
+    ip
 }

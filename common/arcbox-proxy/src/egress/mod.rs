@@ -95,8 +95,12 @@ impl HostEgress {
     ///
     /// Inbound reply frames (matching an active inbound connection) are
     /// intercepted first; everything else is proxied through host sockets.
+    /// Non-IPv4 frames are ignored before inbound matching.
     pub fn handle_outbound(&mut self, frame: &[u8], guest_mac: [u8; 6]) {
-        if frame.len() < ETH_HEADER_LEN + 20 {
+        if frame.len() < ETH_HEADER_LEN + 20
+            || frame[12..14] != [0x08, 0x00]
+            || frame[ETH_HEADER_LEN] >> 4 != 4
+        {
             return;
         }
 
@@ -125,16 +129,23 @@ impl HostEgress {
     ) {
         use super::inbound_relay::InboundCommand;
         if let InboundCommand::UdpReceived {
-            host_port,
+            host_addr,
+            client_addr,
             data,
             reply_tx,
             ..
         } = cmd
         {
-            // Use host_port (the Docker-exposed port on the guest), not
-            // container_port (the port inside the container).
-            self.inbound
-                .inject_udp(host_port, &data, reply_tx, guest_mac);
+            // The guest exposes the host listener's port through Docker DNAT.
+            self.inbound.inject_udp(
+                super::inbound_relay::InboundUdpPeer {
+                    listener: host_addr,
+                    client: client_addr,
+                },
+                &data,
+                reply_tx,
+                guest_mac,
+            );
         }
     }
 
@@ -203,6 +214,129 @@ mod tests {
         let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
         // Frame shorter than Ethernet + IP minimum.
         egress.handle_outbound(&[0u8; 10], guest_mac);
+    }
+
+    fn ipv6_udp_frame(source: std::net::Ipv6Addr, flow_label: u32) -> Vec<u8> {
+        use arcbox_packet::checksum::{checksum_add, checksum_fold};
+        use arcbox_packet::ip::IpPacketView;
+
+        let destination: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let mut frame = vec![0u8; ETH_HEADER_LEN + 40 + 12];
+        frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+        let ip = ETH_HEADER_LEN;
+        frame[ip..ip + 4].copy_from_slice(&(0x6000_0000 | flow_label).to_be_bytes());
+        frame[ip + 4..ip + 6].copy_from_slice(&12u16.to_be_bytes());
+        frame[ip + 6] = 17;
+        frame[ip + 7] = 64;
+        frame[ip + 8..ip + 24].copy_from_slice(&source.octets());
+        frame[ip + 24..ip + 40].copy_from_slice(&destination.octets());
+        let udp = ip + 40;
+        frame[udp..udp + 2].copy_from_slice(&12345u16.to_be_bytes());
+        frame[udp + 2..udp + 4].copy_from_slice(&443u16.to_be_bytes());
+        frame[udp + 4..udp + 6].copy_from_slice(&12u16.to_be_bytes());
+        frame[udp + 8..].copy_from_slice(b"data");
+        let checksum = checksum_fold(
+            checksum_add(&source.octets())
+                + checksum_add(&destination.octets())
+                + 12
+                + 17
+                + checksum_add(&frame[udp..]),
+        );
+        let checksum = if checksum == 0 { u16::MAX } else { checksum };
+        frame[udp + 6..udp + 8].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(IpPacketView::parse(&frame[ip..]).unwrap().protocol(), 17);
+        frame
+    }
+
+    #[test]
+    fn ipv6_udp_does_not_dispatch_ipv4_protocols() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
+        let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
+        let gateway_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+        let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
+        let mut egress = HostEgress::new(
+            gateway_ip,
+            gateway_mac,
+            guest_ip,
+            tx,
+            CancellationToken::new(),
+            1500,
+        );
+
+        // The IPv6 source bytes alias IPv4 UDP/ICMP protocol numbers.
+        // Rejection must not require a runtime or start a proxy task.
+        for prefix in [0x2011, 0x2001] {
+            let source = std::net::Ipv6Addr::new(prefix, 0, 0, 0, 0x7f00, 1, 0, 1);
+            let frame = ipv6_udp_frame(source, 443);
+            egress.handle_outbound(&frame, guest_mac);
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[test]
+    fn ipv6_udp_cannot_match_an_ipv4_inbound_flow() {
+        use crate::inbound_relay::InboundCommand;
+        use arcbox_packet::ethernet::build_udp_ip_ethernet;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
+        let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
+        let gateway_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+        let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
+        let mut egress = HostEgress::new(
+            gateway_ip,
+            gateway_mac,
+            guest_ip,
+            tx,
+            CancellationToken::new(),
+            1500,
+        );
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        let client = "127.0.0.1:45678".parse().unwrap();
+        // The first two IPv6 bytes alias source port 0x6000 in an IPv4 parse.
+        egress.handle_inbound_command(
+            InboundCommand::UdpReceived {
+                host_addr: "127.0.0.1:24576".parse().unwrap(),
+                container_port: 24576,
+                data: b"query".to_vec(),
+                reply_tx: client_tx,
+                client_addr: client,
+            },
+            guest_mac,
+        );
+        let injected = rx.try_recv().unwrap();
+        let udp = ETH_HEADER_LEN + 20;
+        let relay_port = u16::from_be_bytes([injected[udp], injected[udp + 1]]);
+
+        // These source bytes alias the active IPv4 flow under the IPv4 offsets.
+        let source = std::net::Ipv6Addr::new(0x2011, 0, 0xc0a8, 0x4002, 0xc0a8, 0x4001, 0, 1);
+        let frame = ipv6_udp_frame(source, u32::from(relay_port));
+        egress.handle_outbound(&frame, guest_mac);
+        assert!(matches!(
+            client_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        for frame in build_udp_ip_ethernet(
+            guest_ip,
+            gateway_ip,
+            24576,
+            relay_port,
+            b"ipv4 reply",
+            guest_mac,
+            gateway_mac,
+            1500,
+        ) {
+            egress.handle_outbound(&frame, guest_mac);
+        }
+        assert_eq!(
+            client_rx.try_recv().unwrap(),
+            (client, b"ipv4 reply".to_vec())
+        );
     }
 
     /// Verifies that reply frames from the egress flow through the mpsc channel.

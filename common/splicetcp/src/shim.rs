@@ -13,7 +13,7 @@
 //!   has no pollable fd and so cannot implement [`FrameSource`]).
 //! - [`l2_to_l3`] is the egress filter: it strips the synthetic Ethernet header
 //!   from a frame the datapath wants to send "to the guest", yielding the IP
-//!   packet to write back to the `utun`. ARP and other non-IPv4 frames have no
+//!   packet to write back to the `utun`. ARP and other non-IP frames have no
 //!   meaning on an L3 link and are dropped.
 //!
 //! There is no real L2 on a `utun`, so the MACs are fixed constants and ARP is
@@ -49,12 +49,12 @@ pub fn synthetic_l2_header() -> [u8; ETH_HEADER_LEN] {
     .to_bytes()
 }
 
-/// Prepends `header` to a bare IPv4 packet into `buf`, returning the framed
+/// Prepends `header` to a bare IP packet into `buf`, returning the framed
 /// slice ready for [`FrameClassifier::classify_frame`](crate::classifier::FrameClassifier::classify_frame).
 ///
 /// `header` is a synthetic Ethernet header from [`synthetic_l2_header`].
-/// Returns `None` if `ip_packet` is not IPv4 (a `utun`/NE link only carries IP;
-/// IPv6 is out of scope) or if `buf` is too small to hold header + packet.
+/// The EtherType follows each packet family, so callers may reuse one header.
+/// Returns `None` for malformed IP packets or an undersized output buffer.
 ///
 /// This is the standalone, push-friendly form of [`L3ToL2Source`]'s wrapping:
 /// a consumer that receives IP packets via a callback can frame each one
@@ -65,17 +65,18 @@ pub fn l3_to_l2<'b>(
     header: &[u8; ETH_HEADER_LEN],
     buf: &'b mut [u8],
 ) -> Option<&'b [u8]> {
-    // Reject anything too short to hold a minimal IPv4 header (20 bytes) or
-    // whose version nibble is not 4. The length guard also subsumes the empty
-    // case and rejects a lone version byte like `[0x40]`.
-    if ip_packet.len() < 20 || (ip_packet[0] >> 4) != 4 {
-        return None;
-    }
+    let ip = arcbox_packet::ip::IpPacketView::parse(ip_packet)?;
+    let ip_packet = ip.packet();
     let total = ETH_HEADER_LEN + ip_packet.len();
     if total > buf.len() {
         return None;
     }
     buf[..ETH_HEADER_LEN].copy_from_slice(header);
+    buf[12..14].copy_from_slice(if ip.source().is_ipv6() {
+        &[0x86, 0xdd]
+    } else {
+        &[0x08, 0x00]
+    });
     buf[ETH_HEADER_LEN..total].copy_from_slice(ip_packet);
     Some(&buf[..total])
 }
@@ -83,9 +84,8 @@ pub fn l3_to_l2<'b>(
 /// Wraps an L3 [`FrameSource`] so the L2 classifier sees Ethernet frames.
 ///
 /// Each inbound IP packet from `inner` is prefixed with a synthetic Ethernet
-/// header (`HOST_MAC` → `GATEWAY_MAC`, EtherType IPv4) into an internal buffer
-/// before being handed to the classifier. Non-IPv4 packets are dropped (a
-/// `utun` only carries IP; IPv6 is out of scope for this shim).
+/// header (`HOST_MAC` → `GATEWAY_MAC`) into an internal buffer. The EtherType
+/// follows the IP version; malformed packets are dropped.
 pub struct L3ToL2Source<S: FrameSource> {
     inner: S,
     /// Synthetic Ethernet header (`HOST_MAC` → `GATEWAY_MAC`, IPv4), built once.
@@ -101,7 +101,7 @@ impl<S: FrameSource> L3ToL2Source<S> {
         Self {
             inner,
             header: synthetic_l2_header(),
-            buf: vec![0u8; ETH_HEADER_LEN + 65535],
+            buf: vec![0u8; ETH_HEADER_LEN + 40 + 65535],
         }
     }
 
@@ -133,10 +133,13 @@ impl<S: FrameSource> FrameSource for L3ToL2Source<S> {
 /// destined for the "guest", returning the IP packet to write to the `utun`.
 ///
 /// Returns `None` for frames that have no L3 meaning — ARP replies the
-/// classifier may synthesize, or any non-IPv4 EtherType.
+/// classifier may synthesize, or any non-IP EtherType.
 #[must_use]
 pub fn l2_to_l3(frame: &[u8]) -> Option<&[u8]> {
-    if EthernetHeader::parse(frame)?.ethertype != EtherType::Ipv4 {
+    if !matches!(
+        EthernetHeader::parse(frame)?.ethertype,
+        EtherType::Ipv4 | EtherType::Ipv6
+    ) {
         return None;
     }
     Some(strip_ethernet_header(frame))
@@ -167,6 +170,7 @@ mod tests {
     fn ipv4_packet(proto: u8) -> Vec<u8> {
         let mut p = vec![0u8; 20];
         p[0] = 0x45; // version 4, IHL 5
+        p[2..4].copy_from_slice(&20u16.to_be_bytes());
         p[9] = proto;
         p
     }
@@ -190,14 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn drops_non_ipv4_l3_packets() {
-        // A packet whose first nibble is 6 (IPv6) must be dropped.
-        let mut p = vec![0u8; 40];
-        p[0] = 0x60;
-        let mut src = L3ToL2Source::new(VecSource { packets: vec![p] });
-        let mut count = 0;
-        src.drain(|_| count += 1);
-        assert_eq!(count, 0, "IPv6 must not be wrapped");
+    fn reusable_header_tracks_each_packet_family() {
+        let mut v6 = vec![0; 40];
+        v6[0] = 0x60;
+        v6[6] = 59;
+        let v4 = ipv4_packet(1);
+        let header = synthetic_l2_header();
+        let mut buf = [0; 80];
+        for packet in [&v6, &v4, &v6] {
+            let frame = l3_to_l2(packet, &header, &mut buf).unwrap();
+            let expected = if packet[0] >> 4 == 6 {
+                [0x86, 0xdd]
+            } else {
+                [0x08, 0x00]
+            };
+            assert_eq!(&frame[12..14], &expected);
+            assert_eq!(l2_to_l3(frame), Some(packet.as_slice()));
+        }
     }
 
     #[test]
@@ -233,11 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn l3_to_l2_rejects_non_ipv4_and_undersized_buf() {
+    fn l3_to_l2_rejects_malformed_ip_and_undersized_buf() {
         let header = synthetic_l2_header();
         let mut buf = [0u8; ETH_HEADER_LEN + 64];
 
-        // IPv6 (nibble 6) and empty packets are dropped.
+        // A truncated IPv6 extension and empty packets are dropped.
         let mut v6 = vec![0u8; 40];
         v6[0] = 0x60;
         assert!(l3_to_l2(&v6, &header, &mut buf).is_none());

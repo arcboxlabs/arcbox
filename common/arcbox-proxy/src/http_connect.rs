@@ -17,7 +17,11 @@ use tokio::net::TcpStream;
 pub async fn connect_via_http_proxy(proxy: &str, host: &str, port: u16) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy).await?;
 
-    let request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+    let authority = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+        Err(_) => format!("{host}:{port}"),
+    };
+    let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
     // Read until we find "\r\n" marking the end of the status line. The
@@ -82,7 +86,7 @@ pub async fn connect_via_http_proxy(proxy: &str, host: &str, port: u16) -> io::R
 
     tracing::debug!(
         proxy = proxy,
-        target = %format!("{host}:{port}"),
+        target = %authority,
         "HTTP CONNECT tunnel established"
     );
     Ok(stream)
@@ -123,6 +127,38 @@ mod tests {
         let mut got = [0u8; 3];
         stream.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"abc");
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn ipv6_authority_and_tunnel_bytes_are_preserved() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+                assert!(request.len() < 1024);
+            }
+            assert_eq!(
+                request,
+                b"CONNECT [2001:db8::1]:443 HTTP/1.1\r\nHost: [2001:db8::1]:443\r\n\r\n"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\n\r\nhello")
+                .await
+                .unwrap();
+            let mut payload = [0; 5];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"world");
+        });
+        let mut tunnel = connect_via_http_proxy(&address.to_string(), "2001:db8::1", 443)
+            .await
+            .unwrap();
+        let mut payload = [0; 5];
+        tunnel.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"hello");
+        tunnel.write_all(b"world").await.unwrap();
         server.await.unwrap();
     }
 }

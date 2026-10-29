@@ -62,7 +62,8 @@ impl VsockStream {
     pub fn from_fd_with_shutdown(fd: OwnedFd, shutdown: VsockShutdown) -> io::Result<Self> {
         Self::set_nonblocking(fd.as_raw_fd())?;
         Ok(Self {
-            inner: VsockStreamInner::Fd(AsyncFd::new(fd)?),
+            // SAFETY: AsyncFd owns fd until deregistration; stream operations never replace or close it.
+            inner: VsockStreamInner::Fd(unsafe { AsyncFd::register(fd) }?),
             shutdown,
         })
     }

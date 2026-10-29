@@ -78,7 +78,8 @@ async fn test_write_to_guest_roundtrip() {
     let (a, b) = socketpair();
 
     set_nonblocking(a.as_raw_fd()).unwrap();
-    let guest_async = AsyncFd::new(FdWrapper(a)).unwrap();
+    // SAFETY: FdWrapper owns a until deregistration; the test only reads and writes the socketpair.
+    let guest_async = unsafe { AsyncFd::register(FdWrapper(a)) }.unwrap();
 
     let frame = b"test ethernet frame data";
     write_to_guest(&guest_async, frame);

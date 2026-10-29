@@ -1,13 +1,13 @@
 //! DNS resolution log: maps IP addresses back to domain names.
 //!
-//! When the DNS forwarder receives an upstream response containing A records,
+//! When the DNS forwarder receives an upstream response containing A or AAAA records,
 //! it records (IP → domain) entries here. The TcpBridge consults this log to
 //! determine the original domain name for a given destination IP, enabling
 //! proxy-aware connection strategies (HTTP CONNECT / SOCKS5 use the domain
 //! rather than the raw IP).
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ pub struct DnsResolutionLog {
 
 struct LogInner {
     /// IP → (domain, recorded_at). Most recent resolution wins.
-    entries: HashMap<Ipv4Addr, Entry>,
+    entries: HashMap<IpAddr, Entry>,
 }
 
 impl DnsResolutionLog {
@@ -54,7 +54,7 @@ impl DnsResolutionLog {
     ///
     /// Called by the datapath DNS handler after receiving an upstream response.
     /// Overwrites previous entries for the same IPs (latest resolution wins).
-    pub fn record(&self, domain: &str, ips: &[Ipv4Addr]) {
+    pub fn record<T: Copy + Into<IpAddr>>(&self, domain: &str, ips: &[T]) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
@@ -70,7 +70,7 @@ impl DnsResolutionLog {
         let now = Instant::now();
         for &ip in ips {
             inner.entries.insert(
-                ip,
+                ip.into(),
                 Entry {
                     domain: domain.to_string(),
                     recorded_at: now,
@@ -84,9 +84,9 @@ impl DnsResolutionLog {
     /// Returns `None` if the IP wasn't seen in a recent DNS response or if
     /// the entry has expired.
     #[must_use]
-    pub fn lookup(&self, ip: Ipv4Addr) -> Option<String> {
+    pub fn lookup(&self, ip: impl Into<IpAddr>) -> Option<String> {
         let inner = self.inner.lock().ok()?;
-        let entry = inner.entries.get(&ip)?;
+        let entry = inner.entries.get(&ip.into())?;
         if entry.recorded_at.elapsed() < ENTRY_TTL {
             Some(entry.domain.clone())
         } else {
@@ -99,9 +99,9 @@ impl DnsResolutionLog {
     /// For targeted invalidation (e.g. a single re-pointed mapping). A full flush
     /// should use [`clear`](Self::clear) so the reverse log can't be left
     /// partially in sync with a fake-IP allocator.
-    pub fn remove(&self, ip: Ipv4Addr) -> Option<String> {
+    pub fn remove(&self, ip: impl Into<IpAddr>) -> Option<String> {
         let mut inner = self.inner.lock().ok()?;
-        inner.entries.remove(&ip).map(|e| e.domain)
+        inner.entries.remove(&ip.into()).map(|e| e.domain)
     }
 
     /// Clears every IP → domain entry — a full DNS-resolution-log flush.
@@ -140,6 +140,19 @@ impl Default for DnsResolutionLog {
 /// Returns `(domain, [ips])` or `None` if the response can't be parsed.
 /// Minimal parser — only extracts the question name and A record addresses.
 pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr>)> {
+    let (domain, addresses) = parse_dns_response_addresses(data)?;
+    let ips: Vec<_> = addresses
+        .into_iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    (!ips.is_empty()).then_some((domain, ips))
+}
+
+/// Extracts A and AAAA answer addresses with the original question name.
+pub fn parse_dns_response_addresses(data: &[u8]) -> Option<(String, Vec<IpAddr>)> {
     // Minimum DNS header (12 bytes) + at least 1 question.
     if data.len() < 12 {
         return None;
@@ -188,7 +201,7 @@ pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr
         return None;
     }
 
-    // Parse answer section for A records.
+    // Parse answer section for A and AAAA records.
     let mut ips = Vec::new();
     for _ in 0..ancount {
         if offset + 2 > data.len() {
@@ -230,12 +243,18 @@ pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr
 
         // Type A (1) with 4-byte RDATA.
         if rtype == 1 && rdlength == 4 {
-            ips.push(Ipv4Addr::new(
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ));
+            ips.push(
+                Ipv4Addr::new(
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                )
+                .into(),
+            );
+        } else if rtype == 28 && rdlength == 16 {
+            let octets: [u8; 16] = data[offset..offset + 16].try_into().ok()?;
+            ips.push(Ipv6Addr::from(octets).into());
         }
 
         offset += rdlength;
@@ -251,6 +270,58 @@ pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn families_remain_distinct_and_share_expiry_and_removal() {
+        let log = DnsResolutionLog::new();
+        let ipv4 = Ipv4Addr::new(192, 0, 2, 1);
+        let mapped = ipv4.to_ipv6_mapped();
+        let native: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        log.record("v4.test", &[ipv4]);
+        log.record("mapped.test", &[mapped]);
+        log.record("native.test", &[native]);
+        assert_eq!(log.lookup(ipv4).as_deref(), Some("v4.test"));
+        assert_eq!(log.lookup(mapped).as_deref(), Some("mapped.test"));
+        assert_eq!(log.remove(native).as_deref(), Some("native.test"));
+        assert_eq!(log.lookup(native), None);
+        log.inner
+            .lock()
+            .unwrap()
+            .entries
+            .get_mut(&mapped.into())
+            .unwrap()
+            .recorded_at = Instant::now().checked_sub(ENTRY_TTL).unwrap();
+        assert_eq!(log.lookup(mapped), None);
+        assert_eq!(log.lookup(ipv4).as_deref(), Some("v4.test"));
+    }
+
+    #[test]
+    fn aaaa_extraction_preserves_the_ipv4_only_entry_point() {
+        let ipv6: Ipv6Addr = "2001:db8::1234".parse().unwrap();
+        let mut response = vec![0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+        response.extend_from_slice(b"\x01v\x04test\0\0\x1c\0\x01");
+        response.extend_from_slice(&[0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16]);
+        response.extend_from_slice(&ipv6.octets());
+        assert_eq!(
+            parse_dns_response_addresses(&response),
+            Some(("v.test".into(), vec![ipv6.into()]))
+        );
+        assert_eq!(parse_dns_response_a_records(&response), None);
+        assert_eq!(
+            parse_dns_response_addresses(&response[..response.len() - 1]),
+            None
+        );
+        response[7] = 2;
+        response.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1]);
+        assert_eq!(
+            parse_dns_response_addresses(&response).unwrap().1,
+            vec![IpAddr::V6(ipv6), IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]
+        );
+        assert_eq!(
+            parse_dns_response_a_records(&response).unwrap().1,
+            vec![Ipv4Addr::new(192, 0, 2, 1)]
+        );
+    }
 
     #[test]
     fn record_and_lookup() {

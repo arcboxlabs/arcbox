@@ -9,17 +9,19 @@
 //! timeout). A consumer (e.g. an Inbound/Router/Outbound host) can replace the
 //! resolver to inject its own egress policy.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use tokio::sync::oneshot;
 
+pub use crate::native_tcp::NativeTcp;
+
 /// The flow a SYN opened — everything a resolver needs to decide egress.
 #[derive(Clone, Debug)]
 pub struct FlowMeta {
-    pub src_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
     pub src_port: u16,
-    pub dst_ip: Ipv4Addr,
+    pub dst_ip: IpAddr,
     pub dst_port: u16,
     /// Destination domain recovered from the DNS log, if known.
     pub domain: Option<String>,
@@ -33,7 +35,7 @@ pub struct FlowMeta {
 /// a consumer.
 pub enum EgressConn {
     /// Has a real fd → the bridge splices it on the fast path.
-    Tcp(tokio::net::TcpStream),
+    Tcp(NativeTcp<tokio::net::TcpStream>),
 }
 
 /// Decides + establishes egress for a flow. Injected into the bridge so a
@@ -46,9 +48,9 @@ pub trait EgressResolver: Send + Sync {
 /// A public mirror of the bridge's internal flow key (whose fields are private).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FlowKey {
-    pub src_ip: Ipv4Addr,
+    pub src_ip: IpAddr,
     pub src_port: u16,
-    pub dst_ip: Ipv4Addr,
+    pub dst_ip: IpAddr,
     pub dst_port: u16,
 }
 
@@ -59,8 +61,8 @@ pub struct FlowKey {
 /// bridge (mirroring [`EgressResolver`]) so a consumer can account per-flow traffic.
 pub trait FlowObserver: Send + Sync {
     /// Called once when a fast-path flow is torn down (guest FIN/RST, host EOF,
-    /// or an I/O error). `up_bytes` = guest→host (client→server), `down_bytes` =
-    /// host→guest (server→client).
+    /// an I/O error, or explicit abort). `up_bytes` = guest→host (client→server);
+    /// `down_bytes` = host→guest (server→client).
     fn on_flow_close(&self, key: FlowKey, up_bytes: u64, down_bytes: u64);
 }
 
@@ -95,15 +97,16 @@ impl DefaultEgress {
     /// both IP addresses and hostnames like `proxy.corp.com`).
     fn resolve_proxy_target(
         &self,
-        dst_ip: Ipv4Addr,
+        dst_ip: impl Into<IpAddr>,
         dst_port: u16,
         domain: Option<&str>,
     ) -> Option<(String, String, u16, &'static str)> {
+        let dst_ip = dst_ip.into();
         // The gateway IP means "the host itself" (`host.docker.internal`):
         // it is translated to loopback at connect time and must never be
         // tunnelled through a proxy — the proxy would dial a virtual
         // address that exists only inside the datapath.
-        if dst_ip == self.gateway_ip {
+        if dst_ip == IpAddr::V4(self.gateway_ip) {
             return None;
         }
 
@@ -135,21 +138,28 @@ impl DefaultEgress {
         // then HTTPS proxy (HTTP CONNECT works on any port, not just 443),
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
-            let authority = format!("{}:{}", socks.host, socks.port);
+            let authority = proxy_authority(&socks.host, socks.port);
             return Some((authority, host, dst_port, "socks5"));
         }
 
         if let Some(ref https) = env.https_proxy {
-            let authority = format!("{}:{}", https.host, https.port);
+            let authority = proxy_authority(&https.host, https.port);
             return Some((authority, host, dst_port, "http-connect"));
         }
 
         if let Some(ref http) = env.http_proxy {
-            let authority = format!("{}:{}", http.host, http.port);
+            let authority = proxy_authority(&http.host, http.port);
             return Some((authority, host, dst_port, "http-connect"));
         }
 
         None
+    }
+}
+
+fn proxy_authority(host: &str, port: u16) -> String {
+    match host.parse::<IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, port).to_string(),
+        Err(_) => format!("{host}:{port}"),
     }
 }
 
@@ -158,13 +168,12 @@ impl EgressResolver for DefaultEgress {
         let proxy_target =
             self.resolve_proxy_target(flow.dst_ip, flow.dst_port, flow.domain.as_deref());
         // Direct connect target. Gateway IP → loopback for host.docker.internal.
-        let target_ip = if flow.dst_ip == self.gateway_ip {
-            Ipv4Addr::LOCALHOST
+        let target_ip = if flow.dst_ip == IpAddr::V4(self.gateway_ip) {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
         } else {
             flow.dst_ip
         };
-        let connect_addr =
-            std::net::SocketAddr::V4(std::net::SocketAddrV4::new(target_ip, flow.dst_port));
+        let connect_addr = SocketAddr::new(target_ip, flow.dst_port);
         let timeout_secs = self.connect_timeout_secs;
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -188,7 +197,7 @@ impl EgressResolver for DefaultEgress {
                     .await
                     .ok()
                     .and_then(Result::ok);
-            let _ = tx.send(stream.map(EgressConn::Tcp));
+            let _ = tx.send(stream.map(|stream| EgressConn::Tcp(NativeTcp::new(stream))));
         });
         rx
     }

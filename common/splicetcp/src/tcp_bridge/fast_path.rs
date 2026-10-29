@@ -1,6 +1,6 @@
 use super::{FastPathConn, GSO_SEGMENT_MSS, SynFlowKey, TCP_MIN_MSS, TcpBridge};
 use crate::ethernet::ETH_HEADER_LEN;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 /// Frame-construction context shared by the first-transmission and
 /// retransmission paths of `poll_fast_path`.
@@ -24,11 +24,14 @@ fn emit_data_frames(
     data: &[u8],
     frames: &mut Vec<Vec<u8>>,
 ) {
-    if ctx.large_frames && conn.peer_mss >= GSO_SEGMENT_MSS {
+    if let (IpAddr::V4(remote_ip), IpAddr::V4(guest_ip)) = (conn.remote_ip, conn.guest_ip)
+        && ctx.large_frames
+        && conn.peer_mss >= GSO_SEGMENT_MSS
+    {
         let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
         let params = crate::ethernet::TcpFrameParams {
-            src_ip: conn.remote_ip,
-            dst_ip: conn.guest_ip,
+            src_ip: remote_ip,
+            dst_ip: guest_ip,
             src_port: conn.remote_port,
             dst_port: conn.guest_port,
             seq: seq_start,
@@ -44,9 +47,12 @@ fn emit_data_frames(
         });
         return;
     }
-    let seg = ctx
-        .guest_mss
-        .min(usize::from(conn.peer_mss.max(TCP_MIN_MSS)));
+    let peer_mss = if conn.guest_ip.is_ipv6() {
+        conn.peer_mss.max(1)
+    } else {
+        conn.peer_mss.max(TCP_MIN_MSS)
+    };
+    let seg = super::family_mss(conn.guest_ip, ctx.guest_mss).min(usize::from(peer_mss));
     let mut offset = 0;
     while offset < data.len() {
         let chunk_end = (offset + seg).min(data.len());
@@ -75,39 +81,14 @@ impl TcpBridge {
     ) -> Option<(usize, Vec<u8>)> {
         let frame = frames.first()?.as_ref();
         let mut consumed = 1;
-        if frame.len() < IP_START + 40 {
-            return None;
-        }
-
+        let tcp = super::tcp_at(frame, IP_START)?;
         let ip_start = IP_START;
-        let protocol = frame[ip_start + 9];
-        if protocol != 6 {
-            return None; // Not TCP
-        }
-
-        let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
-        let l4_start = ip_start + ihl;
-        // IHL < 20 would collapse l4_start into the IP header, so every TCP
-        // field below (ports, seq/ack, flags) would be read from IP bytes.
-        if ihl < 20 || frame.len() < l4_start + 20 {
-            return None;
-        }
-
-        let src_ip = Ipv4Addr::new(
-            frame[ip_start + 12],
-            frame[ip_start + 13],
-            frame[ip_start + 14],
-            frame[ip_start + 15],
-        );
-        let dst_ip = Ipv4Addr::new(
-            frame[ip_start + 16],
-            frame[ip_start + 17],
-            frame[ip_start + 18],
-            frame[ip_start + 19],
-        );
-        let src_port = u16::from_be_bytes([frame[l4_start], frame[l4_start + 1]]);
-        let dst_port = u16::from_be_bytes([frame[l4_start + 2], frame[l4_start + 3]]);
-        let flags = frame[l4_start + 13];
+        let ip_end = ip_start + tcp.ip().packet().len();
+        let src_ip = tcp.ip().source();
+        let dst_ip = tcp.ip().destination();
+        let src_port = tcp.source_port();
+        let dst_port = tcp.destination_port();
+        let flags = tcp.flags();
 
         let key = SynFlowKey {
             src_ip,
@@ -117,16 +98,19 @@ impl TcpBridge {
         };
 
         let conn = self.fast_path_conns.get_mut(&key)?;
+        if conn.stream.is_cancelled() {
+            let rst = conn.reset_frame(
+                self.fast_path_gateway_mac,
+                self.fast_path_guest_mac.unwrap_or([0xFF; 6]),
+            );
+            self.close_fast_path(&key);
+            return Some((1, rst));
+        }
         // Any guest frame for the flow — data, ACK, dup-ACK, even a bare
         // window probe — is its sign of life for the dead-flow reaper.
         conn.last_guest_activity = std::time::Instant::now();
 
-        let guest_seq = u32::from_be_bytes([
-            frame[l4_start + 4],
-            frame[l4_start + 5],
-            frame[l4_start + 6],
-            frame[l4_start + 7],
-        ]);
+        let guest_seq = tcp.sequence();
 
         // FIN or RST → handle teardown ourselves.
         if flags & 0x04 != 0 {
@@ -136,20 +120,11 @@ impl TcpBridge {
             return Some((consumed, Vec::new())); // Intercepted, no reply frame.
         }
 
-        // Extract payload using IPv4 total_length to exclude Ethernet padding.
-        // NOTE: FIN check is deferred until after payload write — RFC 793
-        // allows FIN segments to carry data.
-        let ip_total_len = u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]) as usize;
-        let ip_end = ip_start + ip_total_len;
-        let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
-        // The data offset must cover the 20-byte TCP header; a smaller value
-        // would splice TCP header bytes into the payload written to the host.
-        if tcp_data_offset < 20 || l4_start + tcp_data_offset > frame.len() {
-            return None;
-        }
-        let payload_start = l4_start + tcp_data_offset;
-        let payload_end = ip_end.min(frame.len());
-        let payload_len = payload_end.saturating_sub(payload_start);
+        // The validated IP/TCP views exclude padding and include extension/header lengths.
+        // FIN processing follows payload writes because a FIN can carry data.
+        let payload_len = tcp.payload().len();
+        let payload_end = ip_end;
+        let payload_start = payload_end - payload_len;
 
         // Download flow control: every guest frame carrying ACK updates our
         // view of how much of OUR stream it received and how much receive
@@ -160,12 +135,7 @@ impl TcpBridge {
         // is a duplicate ACK — three of them mean the guest is missing a
         // frame and triggers fast retransmit in `poll_fast_path`.
         if flags & 0x10 != 0 {
-            let guest_ack = u32::from_be_bytes([
-                frame[l4_start + 8],
-                frame[l4_start + 9],
-                frame[l4_start + 10],
-                frame[l4_start + 11],
-            ]);
+            let guest_ack = tcp.acknowledgment();
             let current = conn.guest_acked.load(std::sync::atomic::Ordering::Relaxed);
             let advance = guest_ack.wrapping_sub(current);
             // Reject an ACK beyond what we actually sent (RFC 793: an ACK
@@ -177,10 +147,7 @@ impl TcpBridge {
             let beyond_sent =
                 guest_ack.wrapping_sub(sent) != 0 && guest_ack.wrapping_sub(sent) < 0x8000_0000;
             if advance < 0x8000_0000 && !beyond_sent {
-                let scaled_win = u32::from(u16::from_be_bytes([
-                    frame[l4_start + 14],
-                    frame[l4_start + 15],
-                ])) << conn.guest_wscale;
+                let scaled_win = u32::from(tcp.window()) << conn.guest_wscale;
                 // FIN|SYN|RST all clear — `trailing_zeros` (clippy's
                 // suggestion) would obscure that this is a flag test.
                 let plain_ack = flags & (0x01 | 0x02 | 0x04) == 0;
@@ -416,6 +383,11 @@ impl TcpBridge {
         };
 
         for (key, conn) in &mut self.fast_path_conns {
+            if conn.stream.is_cancelled() {
+                frames.push(conn.reset_frame(gw_mac, guest_mac));
+                to_remove.push(*key);
+                continue;
+            }
             // Failed inline readers mark the shared stream dead before poll reaps it.
             if conn
                 .dead
@@ -935,57 +907,5 @@ impl TcpBridge {
         }
 
         frames
-    }
-
-    /// Removes a fast-path flow and reports its byte totals to the observer
-    /// (exactly once). The single choke point for fast-path teardown.
-    fn close_fast_path(&mut self, key: &SynFlowKey) {
-        let Some(conn) = self.fast_path_conns.remove(key) else {
-            return;
-        };
-        // An inline flow shares its host socket with an independent reader (the
-        // inject thread / direct_rx task) holding a cloned fd. Dropping only our
-        // clone leaves that reader running on the sibling fd — spinning forever
-        // once its send window freezes. Signal its cancel flag and shut the
-        // socket so it exits and releases the fd (guest-initiated FIN/RST, and
-        // the host-error paths, all funnel through here).
-        if conn.inline_owned {
-            if let Some(dead) = &conn.dead {
-                dead.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
-        }
-        if conn.up_would_block + conn.up_short_writes + conn.up_out_of_order + conn.retransmits > 0
-        {
-            tracing::debug!(
-                "Fast path close {}:{} → {}:{}: loss recovery (up: would_block={}, short_writes={}, out_of_order={}, ooo_dropped={}; down: retransmits={})",
-                key.src_ip,
-                key.src_port,
-                key.dst_ip,
-                key.dst_port,
-                conn.up_would_block,
-                conn.up_short_writes,
-                conn.up_out_of_order,
-                conn.up_ooo_dropped,
-                conn.retransmits,
-            );
-        }
-        if let Some(ref obs) = self.observer {
-            let down = conn.down_bytes
-                + conn
-                    .down_shared
-                    .as_ref()
-                    .map_or(0, |a| a.load(std::sync::atomic::Ordering::Relaxed));
-            obs.on_flow_close(
-                crate::egress::FlowKey {
-                    src_ip: key.src_ip,
-                    src_port: key.src_port,
-                    dst_ip: key.dst_ip,
-                    dst_port: key.dst_port,
-                },
-                conn.up_bytes,
-                down,
-            );
-        }
     }
 }

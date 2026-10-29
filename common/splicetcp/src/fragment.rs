@@ -1,4 +1,4 @@
-//! IPv4 fragment reassembly for guest-originated frames (ABX-429).
+//! IP fragment reassembly for guest-originated frames (ABX-429).
 //!
 //! The guest kernel IP-fragments UDP datagrams larger than its link MTU.
 //! Downstream consumers (`UdpProxy`, `InboundRelay`, the DHCP/DNS handlers)
@@ -8,6 +8,8 @@
 //! Every field here is guest-controlled input: all arithmetic is checked, all
 //! bounds verified before slicing, and both the entry count and per-datagram
 //! size are capped so a hostile guest can only waste a bounded buffer.
+
+mod ipv6;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -22,8 +24,8 @@ use crate::ethernet::ETH_HEADER_LEN;
 /// this is malformed and drops the whole entry.
 const MAX_REASSEMBLED_PAYLOAD: usize = 65_535 - 20;
 
-/// Maximum datagrams under reassembly at once. A benign guest has a handful
-/// in flight; the cap bounds a hostile guest to ~2 MiB of buffer.
+/// Maximum datagrams per address family. The two tables hold at most 64
+/// contexts in total, bounding payload buffers to approximately 4 MiB.
 const MAX_ENTRIES: usize = 32;
 
 /// Maximum disjoint received ranges per datagram. A benign sender needs at
@@ -61,15 +63,17 @@ impl Entry {
     }
 }
 
-/// Reassembles guest IPv4 fragments into complete Ethernet frames.
+/// Reassembles guest IP fragments into complete Ethernet frames.
 pub struct FragmentReassembler {
     entries: HashMap<Key, Entry>,
+    ipv6: ipv6::Ipv6Reassembler,
 }
 
 impl FragmentReassembler {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            ipv6: ipv6::Ipv6Reassembler::default(),
         }
     }
 
@@ -80,6 +84,9 @@ impl FragmentReassembler {
     /// arrives; `None` while the datagram is still incomplete or the fragment
     /// is malformed.
     pub fn push(&mut self, frame: &[u8], now: Instant) -> Option<Vec<u8>> {
+        if frame.get(ETH_HEADER_LEN).is_some_and(|byte| byte >> 4 == 6) {
+            return self.ipv6.push(frame, now);
+        }
         self.evict_expired(now);
 
         let ip_start = ETH_HEADER_LEN;

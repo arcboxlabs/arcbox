@@ -216,17 +216,9 @@ fn is_transient_connect_error(message: &str) -> bool {
 /// # File Descriptor
 ///
 /// The underlying file descriptor can be obtained with `as_raw_fd()`.
-/// This can be used with tokio's `AsyncFd` for async I/O:
-///
-/// ```rust,no_run
-/// use tokio::io::unix::AsyncFd;
-/// use std::os::unix::io::AsRawFd;
-///
-/// # fn example(conn: arcbox_vz::VirtioSocketConnection) {
-/// // For async I/O, wrap the fd
-/// // let async_fd = AsyncFd::new(conn.as_raw_fd()).unwrap();
-/// # }
-/// ```
+/// For async I/O, register the descriptor with tokio's `AsyncFd` inside a
+/// tokio runtime. Keep this connection alive until the registration is dropped.
+/// Do not close or replace the descriptor while the registration exists.
 ///
 /// # Ownership
 ///

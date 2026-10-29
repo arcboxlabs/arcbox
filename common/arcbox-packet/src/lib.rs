@@ -3,6 +3,7 @@
 //! Pure, transport-agnostic building blocks with no VM, VirtIO, or I/O
 //! dependencies:
 //!
+//! - [`ip`] — validated borrowed IPv4/IPv6 and TCP views.
 //! - [`packet`] — zero-copy packet representation and header parsing.
 //! - [`ethernet`] — Ethernet/ARP framing and TCP/UDP frame construction.
 //! - [`checksum`] — Internet checksum routines (RFC 1071/1624), incremental
@@ -14,4 +15,5 @@
 
 pub mod checksum;
 pub mod ethernet;
+pub mod ip;
 pub mod packet;

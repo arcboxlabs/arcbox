@@ -16,8 +16,8 @@ pub use checksum::{ipv4_header_checksum, tcp_checksum};
 pub use tcp::{
     SynAckParams, SynParams, TcpFrameParams, TcpSynOptions, build_tcp_ack_frame,
     build_tcp_data_frame, build_tcp_data_frame_partial_csum, build_tcp_fin_frame,
-    build_tcp_rst_frame, build_tcp_syn_ack_frame, build_tcp_syn_frame, parse_tcp_syn_options,
-    tcp_pseudo_header_checksum,
+    build_tcp_rst_frame, build_tcp_rst_only_frame, build_tcp_syn_ack_frame, build_tcp_syn_frame,
+    parse_tcp_syn_options, tcp_pseudo_header_checksum,
 };
 pub use udp::{MAX_UDP_PAYLOAD, build_udp_ip_ethernet};
 

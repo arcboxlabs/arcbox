@@ -11,12 +11,13 @@ impl TcpBridge {
     pub fn promote_to_fast_path(
         &mut self,
         key: SynFlowKey,
-        stream: std::net::TcpStream,
+        stream: impl Into<crate::NativeTcp<std::net::TcpStream>>,
         our_seq: u32,
         last_ack: u32,
         peer_mss: u16,
         peer_wscale: Option<u8>,
     ) {
+        let stream = stream.into();
         // Set non-blocking for polling in the event loop.
         stream.set_nonblocking(true).ok();
         stream.set_nodelay(true).ok();
@@ -53,6 +54,7 @@ impl TcpBridge {
         // time, so hand the cloned stream to the inject thread
         // immediately for zero-copy host→guest reads.
         let mut inline_owned = false;
+        let mut reader_guard = None;
 
         // Only hand a flow to the inline/GSO inject path when its peer can accept
         // the fixed 1460-byte GSO segments that path emits. A smaller-MSS peer
@@ -61,7 +63,10 @@ impl TcpBridge {
         let inline_eligible = peer_mss >= GSO_SEGMENT_MSS;
         let mut dead: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         let mut retx: Option<crate::direct_rx::RetxRing> = None;
-        if let Some(sink) = self.conn_sink.as_ref().filter(|_| inline_eligible) {
+        if let (std::net::IpAddr::V4(guest_ip), std::net::IpAddr::V4(remote_ip)) =
+            (key.src_ip, key.dst_ip)
+            && let Some(sink) = self.conn_sink.as_ref().filter(|_| inline_eligible)
+        {
             match stream.try_clone() {
                 Ok(cloned) => {
                     let gw_mac = self.fast_path_gateway_mac;
@@ -73,10 +78,16 @@ impl TcpBridge {
                     let retx_ring: crate::direct_rx::RetxRing = std::sync::Arc::new(
                         std::sync::Mutex::new((our_seq, std::collections::VecDeque::new(), None)),
                     );
+                    let reader_cancel = stream
+                        .cancellation()
+                        .map_or_else(tokio_util::sync::CancellationToken::new, |cancelled| {
+                            cancelled.child_token()
+                        });
                     let promoted = crate::direct_rx::PromotedConn {
                         stream: cloned,
-                        remote_ip: key.dst_ip,
-                        guest_ip: key.src_ip,
+                        reader_cancel: reader_cancel.clone(),
+                        remote_ip,
+                        guest_ip,
                         remote_port: key.dst_port,
                         guest_port: key.src_port,
                         peer_mss,
@@ -92,6 +103,7 @@ impl TcpBridge {
                     };
                     if sink.send_conn(promoted) {
                         inline_owned = true;
+                        reader_guard = Some(reader_cancel.drop_guard());
                         dead = Some(dead_flag);
                         retx = Some(retx_ring);
                         tracing::info!(
@@ -128,6 +140,7 @@ impl TcpBridge {
             key,
             FastPathConn {
                 stream,
+                _reader_guard: reader_guard,
                 our_seq: our_seq_atomic,
                 last_ack,
                 last_ack_shared: Some(std::sync::Arc::clone(&last_ack_atomic)),

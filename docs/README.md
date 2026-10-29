@@ -94,6 +94,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-19 — Published UDP ports preserve client associations](logs/2026-10-19-inbound-udp-associations.md)
 - [2026-10-19 — Align Clippy configuration with Rust 1.96](logs/2026-10-19-pinned-clippy.md)
 - [2026-10-12 — Passive-open completion preserves payload and receive window](logs/2026-10-12-passive-open-payload.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)
