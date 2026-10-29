@@ -98,9 +98,10 @@ Out-of-order payload receives duplicate ACKs and requires retransmission.
 The bridge removes discard state on client RST, after 120 seconds without a
 client packet, or when admitting a new entry would exceed 4096 entries. Capacity
 eviction removes the least recently active entry. Cleanup emits no packet.
-These are bounded ArcTap retention rules; they do not claim exact Surge lifetime
-parity. `fast_path_count()` counts host transports only. Idle cleanup runs in
-`poll_fast_path` even when that count is zero.
+These limits only bound retained state; they do not reproduce the connection
+lifetime of any other TCP implementation. `fast_path_count()` counts host
+transports only. Idle cleanup runs in `poll_fast_path` even when that count is
+zero.
 
 ## Fast path and Tokio integration
 
