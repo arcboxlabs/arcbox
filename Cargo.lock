@@ -1426,6 +1426,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-vz-driver"
+version = "0.10.5"
+dependencies = [
+ "arcbox-net",
+ "arcbox-vm-driver",
+ "arcbox-vmnet",
+ "arcbox-vz",
+ "async-trait",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-xnu-net"
 version = "0.10.5"
 dependencies = [

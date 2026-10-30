@@ -234,6 +234,11 @@ steady state), the vsock RPC latency probe, and `xtask idle`.
   longer re-exports it (R3 PR-G5), so a consumer wanting this crate's own
   vocabulary — `invariant::GUEST_IP`, `ExposeTarget` — depends on it
   directly. Not part of the HV/VZ VirtIO datapath above.
+- `virt/arcbox-vz-driver/README.md` — the VZ adapter of `arcbox-vm-driver`
+  (R4a). Until R4c switches the engine to it, the daemon still boots VZ
+  through `arcbox-vmm/src/vmm/darwin.rs`; a VZ fix that the engine must
+  see lands there too. Both build the userspace NAT through
+  `arcbox_net::darwin::guest_nat`.
 
 - `docs/benchmarks/virtiofs.md` — the settled VirtioFS story: the per-op
   cross-vCPU IPI mechanism, the kernel `fuse-spin-wait` fix (+58%
