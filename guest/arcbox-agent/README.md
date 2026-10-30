@@ -15,8 +15,11 @@ Current request surface includes:
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
 - Read-only storage health observations and explicit storage verification
+- Machine and container resource statistics (`WatchStats`)
 
 Every host interface requires agent protocol version 7 or newer. The host completes protocol admission before sending any business request, including observation, sandbox, and machine session requests. A successful Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available to report incompatible versions during negotiation.
+
+Machine CPU statistics exclude idle and iowait from busy time. The total counts the first eight `/proc/stat` fields; `guest` and `guest_nice` are already included in `user` and `nice`.
 
 When running as PID 1, the agent also performs basic system initialisation
 (mount filesystems, set hostname, spawn a child reaper).

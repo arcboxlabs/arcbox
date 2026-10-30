@@ -1,0 +1,197 @@
+--- a/daemon/containerfs_linux.go
++++ b/daemon/containerfs_linux.go
+@@ -47,18 +47,19 @@
+ 	d    *Daemon
+ 	ctr  *container.Container
+ 	todo chan future
+-	done chan error
++	wait func() error
+ }
+ 
+ // openContainerFS opens a new view of the container's filesystem.
+ func (daemon *Daemon) openContainerFS(ctr *container.Container) (_ *containerFSView, retErr error) {
+ 	ctx := context.TODO()
++	cleanupSafe := true
+ 
+ 	if err := daemon.Mount(ctr); err != nil {
+ 		return nil, err
+ 	}
+ 	defer func() {
+-		if retErr != nil {
++		if retErr != nil && cleanupSafe {
+ 			if err := daemon.Unmount(ctr); err != nil {
+ 				log.G(ctx).WithError(err).Debug("Failed to unmount container after failure")
+ 			}
+@@ -74,7 +75,7 @@
+ 		if err := cleanup(ctx); err != nil {
+ 			log.G(ctx).WithError(err).Debug("Failed to cleanup container mounts")
+ 		}
+-		if retErr != nil {
++		if retErr != nil && cleanupSafe {
+ 			if err := ctr.UnmountVolumes(ctx, daemon.LogVolumeEvent); err != nil {
+ 				log.G(ctx).WithError(err).Debug("Failed to unmount container volumes after failure")
+ 			}
+@@ -85,8 +86,7 @@
+ 	// mount namespace and bind the volume mounts into that private view of
+ 	// the container FS.
+ 	todo := make(chan future)
+-	done := make(chan error)
+-	err = unshare.Go(unix.CLONE_NEWNS,
++	wait, err := unshare.GoInMountNS(
+ 		func() error {
+ 			if err := mount.MakeRSlave("/"); err != nil {
+ 				return err
+@@ -203,8 +203,6 @@
+ 			return mounttree.SwitchRoot(ctr.BaseFS)
+ 		},
+ 		func() {
+-			defer close(done)
+-
+ 			for it := range todo {
+ 				err := it.fn()
+ 				if it.res != nil {
+@@ -217,13 +215,20 @@
+ 		},
+ 	)
+ 	if err != nil {
++		if wait != nil {
++			if waitErr := wait(); waitErr != nil {
++				cleanupSafe = false
++				log.G(ctx).WithError(waitErr).Error("Failed to join container filesystem thread; retaining shared mounts")
++				err = errors.Join(err, waitErr)
++			}
++		}
+ 		return nil, err
+ 	}
+ 	vw := &containerFSView{
+ 		d:    daemon,
+ 		ctr:  ctr,
+ 		todo: todo,
+-		done: done,
++		wait: wait,
+ 	}
+ 	runtime.SetFinalizer(vw, (*containerFSView).Close)
+ 	return vw, nil
+@@ -264,13 +269,14 @@
+ func (vw *containerFSView) Close() error {
+ 	runtime.SetFinalizer(vw, nil)
+ 	close(vw.todo)
+-	var errs []error
+-	errs = append(errs,
+-		<-vw.done,
++	if err := vw.wait(); err != nil {
++		log.G(context.TODO()).WithError(err).Error("Failed to join container filesystem thread; retaining shared mounts")
++		return err
++	}
++	return errors.Join(
+ 		vw.ctr.UnmountVolumes(context.TODO(), vw.d.LogVolumeEvent),
+ 		vw.d.Unmount(vw.ctr),
+ 	)
+-	return errors.Join(errs...)
+ }
+ 
+ // Stat returns the metadata for path, relative to the current working directory
+--- a/daemon/containerfs_linux_test.go
++++ b/daemon/containerfs_linux_test.go
+@@ -1,6 +1,7 @@
+ package daemon
+ 
+ import (
++	"errors"
+ 	"net"
+ 	"os"
+ 	"path/filepath"
+@@ -10,6 +11,18 @@
+ 	"golang.org/x/sys/unix"
+ 	"gotest.tools/v3/assert"
+ )
++
++func TestContainerFSViewCloseRetainsMountsOnJoinFailure(t *testing.T) {
++	joinErr := errors.New("thread exit was not confirmed")
++	view := &containerFSView{
++		todo: make(chan future),
++		wait: func() error { return joinErr },
++	}
++	// Nil mount owners make an unsafe cleanup after a failed join fail this test.
++	assert.ErrorIs(t, view.Close(), joinErr)
++	_, open := <-view.todo
++	assert.Assert(t, !open)
++}
+ 
+ func TestCreateIfNotExists(t *testing.T) {
+ 	t.Run("directory", func(t *testing.T) {
+--- a/daemon/archive_unix.go
++++ b/daemon/archive_unix.go
+@@ -4,6 +4,7 @@
+ 
+ import (
+ 	"context"
++	stderrors "errors"
+ 	"io"
+ 	"os"
+ 	"path/filepath"
+@@ -21,7 +22,7 @@
+ 
+ // containerStatPath stats the filesystem resource at the specified path in this
+ // container. Returns stat info about the resource.
+-func (daemon *Daemon) containerStatPath(container *container.Container, path string) (*containertypes.PathStat, error) {
++func (daemon *Daemon) containerStatPath(container *container.Container, path string) (_ *containertypes.PathStat, retErr error) {
+ 	container.Lock()
+ 	defer container.Unlock()
+ 
+@@ -29,7 +30,11 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	defer cfs.Close()
++	defer func() {
++		if err := cfs.Close(); err != nil {
++			retErr = stderrors.Join(retErr, err)
++		}
++	}()
+ 
+ 	return cfs.Stat(context.TODO(), path)
+ }
+@@ -56,7 +61,9 @@
+ 
+ 	defer func() {
+ 		if retErr != nil {
+-			_ = cfs.Close()
++			if err := cfs.Close(); err != nil {
++				retErr = stderrors.Join(retErr, err)
++			}
+ 		}
+ 	}()
+ 
+@@ -81,8 +88,7 @@
+ 	cfs.GoInFS(context.TODO(), tb.Do)
+ 	data := tb.Reader()
+ 	content = ioutils.NewReadCloserWrapper(data, func() error {
+-		err := data.Close()
+-		_ = cfs.Close()
++		err := stderrors.Join(data.Close(), cfs.Close())
+ 		container.Unlock()
+ 		return err
+ 	})
+@@ -98,7 +104,7 @@
+ // noOverwriteDirNonDir is true then it will be an error if unpacking the
+ // given content would cause an existing directory to be replaced with a non-
+ // directory and vice versa.
+-func (daemon *Daemon) containerExtractToDir(container *container.Container, path string, copyUIDGID, allowOverwriteDirWithFile bool, content io.Reader) error {
++func (daemon *Daemon) containerExtractToDir(container *container.Container, path string, copyUIDGID, allowOverwriteDirWithFile bool, content io.Reader) (retErr error) {
+ 	container.Lock()
+ 	defer container.Unlock()
+ 
+@@ -122,7 +128,11 @@
+ 	if err != nil {
+ 		return err
+ 	}
+-	defer cfs.Close()
++	defer func() {
++		if err := cfs.Close(); err != nil {
++			retErr = stderrors.Join(retErr, err)
++		}
++	}()
+ 
+ 	err = cfs.RunInFS(context.TODO(), func() error {
+ 		// The destination path needs to be resolved with all symbolic links
