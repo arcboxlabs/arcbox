@@ -1,6 +1,7 @@
 # VM Stack Redesign — the P4b execution design
 
-Status: **locked** (2026-08-16; moved back from the company repo 2026-09-30). This is the execution design the charter
+Status: **locked** (2026-08-16; moved back from the company repo 2026-09-30; R4 seam map
+and R4 acceptance amended 2026-10-30). This is the execution design the charter
 requires before P4b starts (`virt/arcbox-fc-driver` and the
 `SandboxManager` redistribution), extended to the `arcbox-vmm`/engine
 side so both VM orchestrators end up on one seam. Every restructure PR in
@@ -51,6 +52,16 @@ Two smaller facts matter for naming: `arcbox_vm::VmmConfig` and
 `arcbox_vmm::VmmConfig` are different types with the same name; and
 `arcbox_vmm::snapshot::SnapshotManager` and
 `arcbox_snapshot::SnapshotCatalog` are two snapshot stores.
+
+Delta at `master`, 2026-10-30, before R4: R0–R3 have landed
+(`virt/arcbox-vm-driver`, `virt/arcbox-fc-driver`, `virt/arcbox-tap-net`,
+`computer/arcbox-computer-runtime`). `virt/arcbox-vmm` is 17.2k lines with
+121 `cfg(target_os)` lines. `engine/arcbox-engine/src/vm.rs` is 1167 lines,
+and the engine still names `arcbox_vmm` through `VmBackend`, `SerialReaders`,
+`VmDebugSnapshot`, `VmmError` and `SnapshotError`. The two `check-layers`
+exceptions that let `engine/` depend on `arcbox-vmm` are the ones R4
+removes. The engine uses `Vmm` surface that the 2026-08-16 port does not
+carry; the R4 seam map below assigns each item.
 
 ## Patterns as rules
 
@@ -624,6 +635,53 @@ pipeline stay its own until `arcbox-image` grows an OCI→ext4 story.
   `arcbox-net`, vsock framing, and `arcbox.sandbox.v1` are not touched by
   this work.
 
+## R4 seam map (2026-10-30)
+
+The engine uses `Vmm` surface that the 2026-08-16 port does not name.
+Each row assigns one item to the port, to a driver, or to the engine. No
+row adds a lifecycle method to `VmHandle`; the port grows by three
+`VmSpec` fields, one `Console` change, and one `PortForward` capability.
+
+| Engine use today | Where it goes | Port change |
+|---|---|---|
+| `set_shared_dns`, `set_proxy_env`, `take_inbound_listener_manager`: both macOS paths build the socketpair datapath inside `Vmm` (`vmm/darwin.rs`, `vmm/darwin_hv/network.rs`). | Each macOS driver builds the datapath through one shared `arcbox-net` helper (socketpair, DHCP, DNS forwarder, proxy, `InboundListenerManager`). The HV driver also attaches its `FrameSink` and `ConnSink` to `DeviceManager`, as today. `HostNetwork` (shared DNS and proxy policy, resolved once per daemon start) moves to `arcbox-net` and is given to `VzDriver` and `HvDriver` at construction in the composition root, so the engine stops carrying it. The handle exposes the listener manager through a `PortForward` capability. The datapath code does not change (D-VM10). | `PortForward` capability. |
+| `dup_serial_readers` and `read_agent_log_output`: the agent-log second console. | `Console` becomes multi-channel: `read_output(channel, max)` and `dup_reader(channel)`, with `ConsoleChannel::{Primary, AgentLog}`. A driver without the agent-log channel answers `Unsupported` for that channel. | `Console` signature and `ConsoleChannel`. |
+| Rosetta share, nested virtualization, HV debug-console socket. | `VmSpec` fields: `rosetta: bool`, `nested_virt: bool`, `debug_console: Option<PathBuf>`. A driver refuses a field it cannot honor at `boot` with `Unsupported`. The existing `DriverCapabilities::nested_virt` reports support, so `supports_nested_virt` leaves `VmBackend`. | Three `VmSpec` fields. |
+| `set_skip_hypervisor_stop` and `force_stop_without_hypervisor`: VZ only; HV ignores the skip (ABX-415). | Inside `VzDriver`'s `shutdown`. After an ACPI power-off, the VZ handle skips the hypervisor stop; the HV handle always runs the full stop. The engine calls `shutdown` and does not know the difference. | None. |
+| `vmnet_interface_mac`, `bridge_mac`. | The engine chooses the bridge MAC and puts it in `NicSpec::mac` with `NicAttachment::Bridge`. The driver reports the vmnet interface info through `DebugSnapshot` until a consumer needs a typed field. | None. |
+| `reset_requested` and `reboot`: HV PSCI `SYSTEM_RESET`. | The HV handle emits `VmEvent::ResetRequested`. The lifecycle actor answers with `shutdown` and a fresh `boot` from the same spec. `Vmm::reboot` is already teardown plus boot, so the boot sequence does not change. | None. `ResetRequested` exists. |
+| `pause`, `resume`, `capture_snapshot_context`, `restore_from_snapshot_data`: the engine VM-snapshot API. | Deleted in R4d (see "The engine over the same port"). | None. |
+| `VmDebugSnapshot`, `VmmError`, `SnapshotError` in engine types. | `DebugSnapshot` JSON and `DriverError`. `EngineError::Snapshot` goes with R4d. | None. |
+| `host_memory_size`, `default_vm_*` sizing helpers. | Move to the engine; they size an engine config, not a VMM. | None. |
+
+The datapath stays inside the drivers. An engine-owned datapath that
+hands the driver only `NicAttachment::FileHandle` was rejected: the HV
+datapath also feeds `DeviceManager` through `FrameSink` (direct RX
+injection into guest memory) and `ConnSink` (inline TCP promotion), and
+the port cannot carry those channels. The engine would either lose the
+HV fast paths or need a VMM-typed back channel. The shared helper also
+removes the copy of the datapath setup that `vmm/darwin.rs` and
+`vmm/darwin_hv/network.rs` each hold today. The helper extraction is its
+own commit with no other change.
+
+`PortForward` is port-typed, because the port depends on nothing of ours
+(D-VM1) and cannot name `arcbox_proxy::InboundListenerManager`:
+
+```rust
+#[async_trait] pub trait PortForward: Send {          // taken once per boot; the taker owns it
+    async fn add(&mut self, rule: ForwardRule) -> Result<u16>;   // the bound host port
+    async fn remove(&mut self, rule: ForwardRule) -> Result<()>;
+    async fn clear(&mut self);
+}
+// VmHandle: fn take_port_forward(&self) -> Option<Box<dyn PortForward>>  // None: taken, or no such datapath
+// ForwardRule { protocol: Tcp | Udp, host_ip: Ipv4Addr, host_port: u16, guest_port: u16 }
+```
+
+Both macOS drivers implement it over `InboundListenerManager`.
+`arcbox-core`'s inbound-listener table stores `Box<dyn PortForward>` and
+keeps its incarnation fencing unchanged. `FcDriver` answers `None`; its
+forwarding stays in `GuestNetwork::host_ingress`.
+
 ## Migration plan
 
 Each phase is independently shippable and leaves every consumer
@@ -698,17 +756,36 @@ engine `VmRegistry` over `dyn VmHandle`, `DriverRegistry` in `Runtime`,
 `VmBackend` moved to engine, `connect_agent` via `VsockConn::mode`,
 nested-virt via capabilities; (d) snapshots to `arcbox_snapshot`; (e)
 delete `arcbox-hypervisor/src/darwin`. Each letter is its own PR series.
+The R4 seam map above assigns the engine surface the port did not name.
+Each letter lands on `master` only after the e2e gate below passes on the
+reference host.
 
-*Accept:* `boot_assets` and `virtio_debug` e2e green on both backends;
-`backend_matrix` green; per-boot broadcast counters unchanged (~2301
-unpark / ~71 kick); `cargo xtask idle` and daemon-ready timing within
-same-day noise on both backends; `engine/` and `computer/` compile
+*Accept:* `boot_assets` and `backend_matrix` e2e green on both backends,
+and `virtio_debug` green on HV; per-vCPU `kicks_received` deltas across
+boot, idle and 500 vsock Ping RPCs unchanged on HV (the
+`kick_broadcasts`/`unpark_broadcasts` counters were retired 2026-09-30
+and read 0, so they are not a gate); vsock Ping p50/p99, `cargo xtask idle`
+CPU, and the e2e phase timings within same-day noise of the baseline on
+both backends; `engine/` and `computer/` compile
 without `arcbox-vz`/`arcbox-hv` in their graphs (`check-layers`);
 `rg "VmBackend::" engine computer` finds only the registry lookup and the
 enum's own `impl` in `engine/arcbox-engine/src/vm/backend.rs` — the boot
 profile (`earlycon`, the HV debug-console token) is persisted kernel
 cmdline the engine owns, so it stays a backend match there and nowhere
 else.
+
+*Baseline* (`master` cf6c37dc, 2026-10-30, M5 Pro 15 cores / 48 GB,
+15 vCPUs, warm assets, 1-minute load 1.2–1.8). Each R4 letter is compared
+against a fresh same-day run of this baseline, not against these numbers:
+
+| Measure | HV | VZ |
+|---|---|---|
+| e2e `daemon_ready` | 3.7–4.8 s | 4.3–5.3 s |
+| e2e `nfs_export` | ≈10.0 s | ≈12.0 s |
+| e2e `image_pull` / `container_run` / `exec` / `stop_rm` | 5.4–6.6 / 0.5–0.6 / 2.4 / 12.5 s | 5.7–6.1 / 0.6 / 2.4 / 12.5 s |
+| vsock Ping, 500 RPCs, p50 / p99 | 0.308 / 0.373 ms | 0.284 / 0.374 ms |
+| `cargo xtask idle`, 40 s CPU | ≈4.85 % | ≈0.15 % |
+| per-vCPU `kicks_received` delta | 0 | not reported |
 
 ### R5 — node composition
 
