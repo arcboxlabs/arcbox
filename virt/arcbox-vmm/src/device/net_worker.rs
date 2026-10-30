@@ -9,6 +9,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::device::IoCompletion;
 use crate::device::mmio_state::VirtioMmioState;
 use crate::irq::Irq;
 
@@ -165,6 +166,7 @@ impl NetRxWorkerSlot {
         let event_idx_enabled =
             (mmio.driver_features & arcbox_virtio::queue::VIRTIO_F_EVENT_IDX) != 0;
         drop(mmio);
+        let completion = IoCompletion::new(Arc::clone(mmio_arc), irq, irq_callback);
 
         // SAFETY: `guest_ram_base` is the host mapping returned by
         // the hypervisor, valid for `guest_ram_size` bytes for the
@@ -185,20 +187,7 @@ impl NetRxWorkerSlot {
             .take();
 
         if let Some(rx_channel) = rx_channel {
-            // Wrap the VMM IRQ callback to match the inject crate's type.
-            let vmm_callback = irq_callback;
-            let inject_callback: Arc<arcbox_net_inject::irq::IrqCallback> =
-                Arc::new(move |gsi, level| {
-                    vmm_callback(gsi, level)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                });
-
-            let mmio_arc_clone = mmio_arc.clone();
-            let set_interrupt_status: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                if let Ok(mut s) = mmio_arc_clone.write() {
-                    s.trigger_interrupt(1); // INT_VRING
-                }
-            });
+            let complete_io: Arc<dyn Fn() + Send + Sync> = Arc::new(move || completion.complete());
 
             // Take the inline connection channel if available; otherwise
             // create an unbounded channel with a dummy sender that is
@@ -218,11 +207,7 @@ impl NetRxWorkerSlot {
                 conn_rx,
                 guest_mem,
                 queue,
-                irq: arcbox_net_inject::irq::IrqHandle {
-                    callback: inject_callback,
-                    irq,
-                },
-                set_interrupt_status,
+                complete_io,
                 running,
                 event_idx_enabled,
             };
@@ -262,9 +247,7 @@ impl NetRxWorkerSlot {
                 guest_mem,
                 rx_queue: queue,
                 event_idx: event_idx_enabled,
-                mmio_state: mmio_arc.clone(),
-                irq_callback,
-                irq,
+                completion,
                 running,
             };
 

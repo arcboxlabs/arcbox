@@ -360,16 +360,17 @@ changes, datapath does not:
 - The neutral core stays as the library the machines are built from:
   `MemoryManager`, `DeviceManager`, `IrqChip`, `EventLoop`, `boot`/`fdt`,
   workers, `vcpu_stats`.
-- The async-worker completion contract (trigger_interrupt → irq_callback
-  → exit_vcpus) becomes one method, `DeviceManager::complete_io(device)`,
-  that every worker calls. The three steps cannot be reordered or dropped
-  by a new worker. `complete_io` covers the async workers only — the
-  vCPU-thread sites (`sync_irq_level`, `raise_interrupt_for_device`) stay
-  two-step because the vCPU is already out of WFI — and it *calls* the
-  `exit_vcpus` closure rather than counting: `hv_kick_broadcasts` keeps
-  being incremented inside `make_exit_vcpus_fn`, after its empty-registry
-  early return, so the R2/R3 counters stay byte-identical (R4 seam map,
-  2026-08-17).
+- The async-worker completion contract (set `interrupt_status`, then
+  assert the SPI) becomes one type, `device::IoCompletion`, built per
+  device from its MMIO state, IRQ and the VM's IRQ callback. Every async
+  worker (blk, net-rx, rx-inject, and the virtio devices that complete
+  through `DeviceCtx`) holds one and calls `complete()`, so a new worker
+  cannot reorder or drop a step. A per-device handle replaces the planned
+  `DeviceManager::complete_io(device)` method because the workers run on
+  their own threads and do not hold the `DeviceManager`. The vCPU-thread
+  sites (`sync_irq_level`, `raise_interrupt_for_device`) stay as they are.
+  There is no `exit_vcpus` step: c3004580 removed the post-SPI kick
+  (crate `AGENTS.md`), so the contract is two steps, not three.
 - `HvDriver: VmDriver` renders `VmSpec` into today's `VmmConfig` (a pure
   `render`, tested), boots an `HvMachine`, and returns it as a `VmHandle`:
   `Vsock::dial` is the socketpair injection (`IoMode::Blocking`), `Balloon`
@@ -581,7 +582,7 @@ pipeline stay its own until `arcbox-image` grows an OCI→ext4 story.
 | `VmSpec`/`RuntimeConfig`/`DriverConfig` vs `NodeEnvironment` | Data vs behavior | Config strings naming implementations; environment objects full of paths |
 | `FakeDriver`, `FakeNetwork`, `driver_contract!`, `testkit` feature | Role interfaces + fakes + contract tests | `cfg(test)` seams that vanish on extraction; adapters that drift from the contract |
 | `ProcessGuard`, `NetworkLease`, `LoopDevice`, `Mount`, `HvMachine` field order | RAII / scope guards | Leaked processes/TAPs/loops on early return; teardown-order regressions (ABX-415 class) |
-| `DeviceManager::complete_io` | Template method for the completion contract | A worker that forgets `exit_vcpus()` (intermittent WFI hangs) |
+| `device::IoCompletion` | One operation for the completion contract | A worker that sets `interrupt_status` without the SPI, or the reverse (lost or spurious interrupts) |
 | `VsockConn::mode` | Platform difference stops at the adapter | `VmBackend` matches in transport code |
 | `SandboxHost` (unchanged), platform's narrow node interface | Consumer-defined role interface | A giant exported trait mirroring the manager |
 
@@ -761,7 +762,7 @@ passes with the runtime in `computer/`.
 ### R4 — engine and `arcbox-vmm` over the port
 
 (a) `arcbox-vz-driver` from `vmm/darwin.rs`; (b) `HvDriver` + `HvMachine`
-split of `Vmm`, `DeviceManager::complete_io`, `render::vmm_config`; (c)
+split of `Vmm`, `device::IoCompletion`, `render::vmm_config`; (c)
 engine `VmRegistry` over `dyn VmHandle`, `DriverRegistry` in `Runtime`,
 `VmBackend` moved to engine, `connect_agent` via `VsockConn::mode`,
 nested-virt via capabilities; (d) snapshots to `arcbox_snapshot`; (e)

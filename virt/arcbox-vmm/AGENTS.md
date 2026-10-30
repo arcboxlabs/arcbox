@@ -13,6 +13,9 @@ future device) does exactly two things, in this order:
 1. `VirtioMmioState::trigger_interrupt(1)` — set interrupt_status (INT_VRING).
 2. Fire the `DeviceIrqCallback` (`irq_callback(irq, true)`) — assert the SPI.
 
+`device::IoCompletion::complete` does both. A worker must hold an
+`IoCompletion` for its device and call it; do not write the two steps by hand.
+
 Asserting the SPI is the whole wake. With the in-kernel GIC (`hv_gic`, the
 only configuration this VMM boots with) the framework handles WFI inside
 `hv_vcpu_run`: an idle vCPU's thread blocks in
@@ -31,7 +34,7 @@ idle daemon CPU 9.3 → 6.7%. The same goes for unparking vCPU threads from
 the IRQ callback: nothing is parked there. `hv_vcpus_exit` remains the right
 tool for `stop`/`pause`, where the point is to leave `hv_vcpu_run`.
 
-Reference: `blk_worker.rs::trigger_irq`; the GIC callback in `setup.rs`
+Reference: `device/completion.rs`; the GIC callback in `setup.rs`
 (step 5) is `set_spi` and nothing else. The vCPU loop's WFI branch
 (`vcpu_loop.rs`) is unreachable in this configuration and kept only for a
 framework that does trap WFI — its 1 ms `park_timeout` bounds latency there,

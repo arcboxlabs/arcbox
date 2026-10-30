@@ -138,8 +138,11 @@ impl Vmm {
                         read_only,
                         device_id: dev_id_str.clone(),
                         mmio_state: mmio_state.clone(),
-                        irq_callback: irq_cb.clone(),
-                        irq,
+                        completion: crate::device::IoCompletion::new(
+                            mmio_state.clone(),
+                            irq,
+                            irq_cb.clone(),
+                        ),
                         running: self.running.clone(),
                         flush_barrier: flush_barrier.clone(),
                     };
