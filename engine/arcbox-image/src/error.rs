@@ -9,6 +9,10 @@ pub type Result<T> = std::result::Result<T, ImageError>;
 /// Errors that can occur in boot-asset and machine-image operations.
 #[derive(Debug, Error)]
 pub enum ImageError {
+    /// The caller canceled an image operation.
+    #[error("image operation canceled")]
+    Cancelled,
+
     /// Common errors (I/O, config, not found, etc.).
     #[error(transparent)]
     Common(#[from] CommonError),

@@ -1,12 +1,10 @@
 [package]
 name = "arcbox-helper"
 description = "Privileged helper daemon for host mutations (routes, DNS, sockets)"
-# Independent of workspace.package.version. Bump only when the on-disk
-# privileged binary must be replaced (RPC wire break, security fix in the
-# root helper, or behavior the current daemon hard-requires). Ordinary runtime
-# bumps must NOT change this, or every Desktop user gets an admin-password
-# reinstall prompt.
-version = "1.1.0"
+# Independent of workspace.package.version. Keep 1.2.0 for paired helper/client
+# updates. Installation readiness requires current JSON RPC and selected-resolver
+# checks as well as the version floor; semver alone cannot skip installation.
+version = "1.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -32,14 +30,17 @@ arcbox-constants.workspace = true
 arcbox-logging.workspace = true
 arcbox-route = { workspace = true }
 tracing = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 ipnetwork = "0.21.1"
-# Code-signing peer auth (release). default-features off: we only need
-# os::macos::code_signing, not Secure Transport / ALPN.
+# Native code-signing peer authentication and CA trust need no ALPN feature.
 security-framework = { version = "3.7", default-features = false }
 core-foundation = "0.10"
+arcbox-local-ca.workspace = true
+security-framework-sys = "2.17.0"
+arcbox-atomic-file.workspace = true
 
 [dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 

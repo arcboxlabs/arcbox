@@ -103,15 +103,17 @@ impl Runtime {
         let runtime = Arc::clone(self);
         let initial = progress.clone();
         tasks.worker = Some(tokio::spawn(async move {
-            let _operation = operation;
-            let _migration = migration;
-            let _active = ActiveRecovery(Arc::clone(&runtime));
             let mut progress = progress;
             let mut cleanup = Ok(());
-            if let Err(error) = runtime
-                .run_storage_recovery(action, reservation, &mut progress, &mut cleanup)
-                .await
-            {
+            let outcome = {
+                let _operation = operation;
+                let _migration = migration;
+                let _active = ActiveRecovery(Arc::clone(&runtime));
+                runtime
+                    .run_storage_recovery(action, reservation, &mut progress, &mut cleanup)
+                    .await
+            };
+            if let Err(error) = outcome {
                 progress.phase = Phase::Failed.into();
                 progress.storage_protected = true;
                 progress.message = error.to_string();
@@ -122,6 +124,9 @@ impl Runtime {
                     );
                     runtime.storage_recovery.publish_observation(progress);
                 }
+            } else {
+                // Completion observers may immediately admit System VM operations.
+                runtime.storage_recovery.publish_observation(progress);
             }
             cleanup
         }));
@@ -258,11 +263,11 @@ impl Runtime {
                 fs::remove_file(self.machine_manager.storage_hold_path())?;
                 fs::File::open(&self.storage_recovery.directory)?.sync_all()?;
                 progress.storage_protected = false;
-                self.recovery_phase(
-                    progress,
-                    Phase::Complete,
-                    "Storage checks, durable writes, and the Docker container lifecycle passed",
-                )
+                progress.phase = Phase::Complete.into();
+                progress.message =
+                    "Storage checks, durable writes, and the Docker container lifecycle passed"
+                        .into();
+                self.storage_recovery.persist(progress)
             })
         }
         .await;
@@ -518,5 +523,6 @@ mod tests {
         assert_eq!(finished.operation_id, started.operation_id);
         assert!(finished.message.contains("System VM storage configuration"));
         assert!(runtime.machine_manager.storage_hold_path().is_file());
+        assert!(!runtime.storage_recovery_active());
     }
 }

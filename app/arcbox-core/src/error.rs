@@ -81,6 +81,10 @@ pub enum CoreError {
     #[error("local CA error: {0}")]
     LocalCa(#[from] arcbox_local_ca::Error),
 
+    /// A required privileged helper inspection or operation failed.
+    #[error(transparent)]
+    Helper(#[from] arcbox_helper::client::ClientError),
+
     /// Published-image registry error (index/manifest fetch, reference
     /// parsing, name validation) shared by the macOS base-image and Linux
     /// machine-image flows.
@@ -178,6 +182,7 @@ impl From<arcbox_engine::EngineError> for CoreError {
 impl From<arcbox_image::ImageError> for CoreError {
     fn from(err: arcbox_image::ImageError) -> Self {
         match err {
+            cancelled @ arcbox_image::ImageError::Cancelled => Self::Image(cancelled.to_string()),
             arcbox_image::ImageError::Common(c) => Self::Common(c),
             arcbox_image::ImageError::Image(msg) => Self::Image(msg),
         }

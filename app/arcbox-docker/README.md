@@ -31,6 +31,26 @@ docker run alpine echo hello
 docker images
 ```
 
+Start, restart, stop, kill, remove, and rename resolve a canonical container ID before acquiring Runtime's per-container lock. ArcBox keeps that lock and an activity lease through the guest operation and host networking update. Names and short IDs use the same lock; the forwarded URI retains the original query.
+
+Network connect and disconnect use the same lock and preserve all request fields except the canonicalized `Container` value. A forced disconnect can remove an orphan endpoint after its container disappears; that request preserves Docker's behavior and leaves host container ownership unchanged.
+
+### Container trust for local HTTPS
+
+On macOS, ArcBox adds its current public root CA after container creation and before a stopped container starts. ArcBox updates existing regular PEM system bundles through Docker's archive API. ArcBox preserves the image's original roots, file owner, permissions, and entrypoint. A later start replaces only the validated ArcBox section when the root certificate changes.
+
+Disable injection for a container with:
+
+```bash
+docker run --label dev.arcbox.add-ca-certificates=false alpine
+```
+
+Supported bundle locations are `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/var/lib/ca-certificates/ca-bundle.pem`, `/etc/ca-certificates/extracted/tls-ca-bundle.pem`, and `/etc/ssl/cert.pem`. The bundle and its parent directories must not be symbolic links. Archive responses are limited to 4 MiB.
+
+ArcBox skips read-only root filesystems, caller-mounted certificate paths, unresolved or symbolic mount paths, and containers that configure certificate environment variables. Injection does not update Java or Node built-in stores, hash-based certificate directories, running containers, guest-internal container creation, or image build stages. A restart refreshes the CA only when the container is already stopped; restarting a running container reports a skip and preserves Docker’s atomic restart operation. An image entrypoint or a package update can regenerate the system bundle after injection.
+
+The creation response reports skipped injection in `Warnings`. Start and restart responses report skipped injection in the HTTP `Warning` header and daemon logs. Missing, expired, or stale public CA publication permits ordinary startup and does not inject an old root. Existing injected roots remain until a valid replacement is published and the container next starts. An archive read or write failure returns an explicit start error; creation preserves the new container ID and reports a warning so the caller can retry or remove the container.
+
 ## Architecture
 
 ```mermaid

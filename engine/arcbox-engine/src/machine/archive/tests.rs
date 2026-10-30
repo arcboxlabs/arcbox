@@ -39,6 +39,7 @@ fn manifest() -> ArchiveManifest {
             distro: "alpine".to_owned(),
             distro_version: Some("3.24".to_owned()),
             mounts: Vec::new(),
+            web_ports: crate::machine::MachineWebPorts::default(),
         },
         image,
     }

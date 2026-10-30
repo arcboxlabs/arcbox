@@ -15,6 +15,7 @@
 //! or the VM goes away.
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,8 @@ use arcbox_connect::v1::{
 
 use super::Runtime;
 use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm::VmIncarnation;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 mod tests;
@@ -35,6 +38,7 @@ const OWNER_PREFIX: &str = "k8s:";
 /// How long a port whose listener failed to bind waits before another try.
 /// Each try logs a warning, so this also paces the log while a conflict lasts.
 const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+type Binding = (String, u16, u16, String);
 
 /// Whether `key` names a Kubernetes LoadBalancer listener.
 pub(super) fn is_owner_key(key: &str) -> bool {
@@ -96,7 +100,10 @@ impl Outcome {
 
 /// The last reconcile's outcome for every LoadBalancer port the guest listed.
 #[derive(Default)]
-pub(super) struct LoadBalancerPorts(BTreeMap<PortKey, Outcome>);
+pub(super) struct LoadBalancerPorts {
+    incarnation: Option<VmIncarnation>,
+    outcomes: BTreeMap<PortKey, Outcome>,
+}
 
 /// A Kubernetes object name as the API server validates it (RFC 1123 label).
 /// The guest is the source, so names are checked before they become keys.
@@ -172,55 +179,112 @@ fn relay_protocol(protocol: &str) -> Option<&'static str> {
 }
 
 impl Runtime {
-    /// Opens and closes host listeners so that exactly the published ports
-    /// of `listing` are forwarded, and records each port's outcome.
+    /// Applies a listing only to the physical VM captured before the guest request.
+    /// The caller must cancel through the token and await publication and cleanup.
     ///
-    /// Does nothing once the Kubernetes hold is released: a stop or delete
-    /// that raced the listing has closed the listeners and must stay closed.
-    pub async fn apply_kubernetes_load_balancers(&self, listing: &KubernetesLoadBalancersResponse) {
+    /// # Errors
+    /// Returns an error if the VM changes, the hold is released, or the operation is cancelled.
+    pub async fn apply_kubernetes_load_balancers(
+        &self,
+        expected: &VmIncarnation,
+        listing: &KubernetesLoadBalancersResponse,
+        cancelled: &CancellationToken,
+    ) -> crate::Result<()> {
+        self.apply_load_balancers_with(expected, listing, cancelled, |owner, binding| async move {
+            self.update_container_ports(expected, &owner, &[binding])
+                .await
+        })
+        .await
+    }
+
+    fn with_kubernetes_listing<T>(
+        &self,
+        expected: &VmIncarnation,
+        cancelled: &CancellationToken,
+        publish: impl FnOnce() -> T,
+    ) -> crate::Result<T> {
+        self.with_host_network_incarnation(DEFAULT_MACHINE_NAME, expected, || {
+            if cancelled.is_cancelled() || !self.vm_lifecycle.kubernetes_hold() {
+                return Err(crate::CoreError::invalid_state(
+                    "Kubernetes listing is no longer active",
+                ));
+            }
+            Ok(publish())
+        })?
+    }
+
+    async fn apply_load_balancers_with<F: Future<Output = crate::Result<()>> + Send>(
+        &self,
+        expected: &VmIncarnation,
+        listing: &KubernetesLoadBalancersResponse,
+        cancelled: &CancellationToken,
+        forward: impl Fn(String, Binding) -> F + Send + Sync,
+    ) -> crate::Result<()> {
         let mut ports = self.kubernetes_lb_ports.lock().await;
-        if !self.vm_lifecycle.kubernetes_hold() {
-            return;
+        let mut commit = self.host_network.commit.lock().await;
+        self.with_kubernetes_listing(expected, cancelled, || ())?;
+        self.prepare_container_incarnation(&mut commit, expected)
+            .await?;
+        if ports.incarnation.as_ref() != Some(expected) {
+            ports.outcomes.clear();
         }
-        let requested = requested_ports(listing);
-
-        let wanted: HashSet<String> = requested
-            .iter()
-            .filter(|(_, published)| **published)
-            .map(|(key, _)| key.owner())
-            .collect();
-        for owner in self.listener_owner_keys(is_owner_key).await {
-            if !wanted.contains(&owner) {
-                self.stop_port_forwarding_by_id(&owner).await;
+        let mut previous = std::mem::take(&mut ports.outcomes);
+        ports.incarnation = None;
+        let result = async {
+            let requested = requested_ports(listing);
+            let wanted: HashSet<String> = requested.iter()
+                .filter(|(_, published)| **published)
+                .map(|(key, _)| key.owner()).collect();
+            for owner in self.listener_owner_keys(is_owner_key).await {
+                if !wanted.contains(&owner) {
+                    self.clear_container_ports(expected, &owner).await?;
+                }
             }
-        }
-
-        let bind_ip = self.config.docker.default_publish_address();
-        let mut next = BTreeMap::new();
-        for (key, published) in requested {
-            let previous = ports.0.remove(&key);
-            let outcome = if published {
-                self.forward_port(&key, bind_ip, previous.as_ref()).await
-            } else {
-                Outcome::Pending
-            };
-            log_transition(&key, bind_ip, previous.as_ref(), &outcome);
-            next.insert(key, outcome);
-        }
-        for (key, previous) in &ports.0 {
-            if previous == &Outcome::Forwarded {
-                tracing::info!(namespace = %key.namespace, name = %key.name, port = key.port, protocol = %key.protocol, "Kubernetes LoadBalancer port closed");
+            let bind_ip = self.config.docker.default_publish_address();
+            let mut next = BTreeMap::new();
+            for (key, published) in requested {
+                self.with_kubernetes_listing(expected, cancelled, || ())?;
+                let before = previous.remove(&key);
+                let outcome = if published {
+                    self.forward_port(&key, bind_ip, before.as_ref(), &forward).await
+                } else {
+                    Outcome::Pending
+                };
+                log_transition(&key, bind_ip, before.as_ref(), &outcome);
+                next.insert(key, outcome);
             }
+            for (key, before) in previous {
+                if before == Outcome::Forwarded {
+                    tracing::info!(namespace = %key.namespace, name = %key.name, port = key.port, protocol = %key.protocol, "Kubernetes LoadBalancer port closed");
+                }
+            }
+            self.with_kubernetes_listing(expected, cancelled, || {
+                ports.incarnation = Some(expected.clone());
+                ports.outcomes = next;
+            })
+        }.await;
+        if let Err(error) = result {
+            for owner in self.listener_owner_keys(is_owner_key).await {
+                self.clear_container_ports(expected, &owner)
+                    .await
+                    .map_err(|cleanup| {
+                        crate::CoreError::invalid_state(format!(
+                            "{error}; LoadBalancer cleanup failed: {cleanup}"
+                        ))
+                    })?;
+            }
+            return Err(error);
         }
-        ports.0 = next;
+        Ok(())
     }
 
     /// Keeps, retries, or opens the listener of one published port.
-    async fn forward_port(
+    async fn forward_port<F: Future<Output = crate::Result<()>> + Send>(
         &self,
         key: &PortKey,
         bind_ip: Ipv4Addr,
         previous: Option<&Outcome>,
+        forward: &(impl Fn(String, Binding) -> F + Sync),
     ) -> Outcome {
         let owner = key.owner();
         match previous {
@@ -243,10 +307,7 @@ impl Runtime {
             return Outcome::Skipped(reason);
         }
         let binding = (bind_ip.to_string(), key.port, key.port, protocol.to_owned());
-        match self
-            .start_port_forwarding_for(DEFAULT_MACHINE_NAME, &owner, &[binding])
-            .await
-        {
+        match forward(owner, binding).await {
             Ok(()) => Outcome::Forwarded,
             Err(e) => Outcome::Failed {
                 error: e.to_string(),
@@ -258,9 +319,10 @@ impl Runtime {
     /// Closes every Kubernetes LoadBalancer listener and forgets the ports.
     pub async fn close_kubernetes_load_balancers(&self) {
         let mut ports = self.kubernetes_lb_ports.lock().await;
+        let _commit = self.host_network.commit.lock().await;
         let owners = self.listener_owner_keys(is_owner_key).await;
         for owner in &owners {
-            self.stop_port_forwarding_by_id(owner).await;
+            self.stop_port_forwarding_raw(owner).await;
         }
         if !owners.is_empty() {
             tracing::info!(
@@ -268,27 +330,32 @@ impl Runtime {
                 "closed Kubernetes LoadBalancer listeners"
             );
         }
-        ports.0.clear();
+        *ports = LoadBalancerPorts::default();
     }
 
     /// How each LoadBalancer port fared on the last reconcile.
-    pub(super) async fn kubernetes_host_ports(&self) -> Vec<KubernetesHostPort> {
+    pub(super) async fn kubernetes_host_ports(&self) -> crate::Result<Vec<KubernetesHostPort>> {
         let host_ip = self.config.docker.default_publish_address().to_string();
         let ports = self.kubernetes_lb_ports.lock().await;
-        ports
-            .0
-            .iter()
-            .map(|(key, outcome)| KubernetesHostPort {
-                namespace: key.namespace.clone(),
-                name: key.name.clone(),
-                protocol: key.protocol.clone(),
-                port: u32::from(key.port),
-                host_ip: host_ip.clone(),
-                state: outcome.state().into(),
-                detail: outcome.detail().to_owned(),
-                ..Default::default()
-            })
-            .collect()
+        let Some(expected) = &ports.incarnation else {
+            return Ok(Vec::new());
+        };
+        self.with_host_network_incarnation(DEFAULT_MACHINE_NAME, expected, || {
+            ports
+                .outcomes
+                .iter()
+                .map(|(key, outcome)| KubernetesHostPort {
+                    namespace: key.namespace.clone(),
+                    name: key.name.clone(),
+                    protocol: key.protocol.clone(),
+                    port: u32::from(key.port),
+                    host_ip: host_ip.clone(),
+                    state: outcome.state().into(),
+                    detail: outcome.detail().to_owned(),
+                    ..Default::default()
+                })
+                .collect()
+        })
     }
 }
 

@@ -6,19 +6,25 @@ mod launchd;
 mod mutations;
 mod peer_auth;
 
+#[cfg(test)]
+mod lease_tests;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
-use tarpc::tokio_serde::formats::Bincode;
+use tarpc::tokio_serde::formats::Json;
 use tokio::task::JoinSet;
 
 use arcbox_helper::HelperService as _;
 use handler::HelperServer;
+
+pub use mutations::dns::maintenance::{check_resolvers, prepare_install};
 
 /// Exit after this many seconds with zero active connections.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -78,8 +84,11 @@ async fn accept_loop(
     listener: tokio::net::UnixListener,
     tracker: Arc<ConnectionTracker>,
     shutdown: CancellationToken,
-) {
-    let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
+) -> Result<(), arcbox_helper::HelperError> {
+    let resolvers = Arc::new(mutations::dns::ResolverStore::new(fs_root::resolve(
+        mutations::dns::RESOLVER_DIR,
+    )));
+    resolvers.recover()?;
 
     loop {
         let conn = tokio::select! {
@@ -93,37 +102,82 @@ async fn accept_loop(
                 }
             }
             () = shutdown.cancelled() => {
-                return;
+                return Ok(());
             }
         };
 
-        if !peer_auth::verify(&conn) {
+        let Some(peer) = peer_auth::verify(&conn) else {
             continue;
-        }
+        };
 
         tracker.connect();
         let tracker_clone = Arc::clone(&tracker);
-
-        let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
+        let server = HelperServer::new(peer, Arc::clone(&resolvers));
 
         tokio::spawn(async move {
-            let mut in_flight = JoinSet::new();
-
-            BaseChannel::with_defaults(transport)
-                .execute(HelperServer.serve())
-                .for_each(|resp| {
-                    in_flight.spawn(resp);
-                    futures::future::ready(())
-                })
-                .await;
-
-            // Wait for all in-flight responses to complete before marking
-            // the connection as idle, so idle_watchdog never kills the
-            // process while work is still running.
-            while in_flight.join_next().await.is_some() {}
-
+            if let Err(error) = serve_connection(conn, server).await {
+                tracing::error!(%error, "helper connection cleanup failed");
+            }
             tracker_clone.disconnect();
         });
+    }
+}
+
+async fn serve_connection(
+    conn: tokio::net::UnixStream,
+    server: HelperServer,
+) -> Result<(), arcbox_helper::HelperError> {
+    let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
+    let transport = tarpc::serde_transport::new(codec.new_framed(conn), Json::default());
+    let mut in_flight = JoinSet::new();
+    {
+        let mut requests = Box::pin(BaseChannel::with_defaults(transport.fuse()).requests());
+        loop {
+            let request = futures::future::poll_fn(|cx| {
+                let next = requests.as_mut().poll_next(cx);
+                // tarpc can remain pending after EOF while an unchanged watch is in flight.
+                if requests.channel().get_ref().is_done()
+                    || matches!(&next, Poll::Ready(Some(Err(_))))
+                {
+                    server.retire();
+                }
+                next
+            })
+            .await;
+            match request {
+                Some(Ok(request)) => {
+                    in_flight.spawn(request.execute(server.clone().serve()));
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "helper request stream failed");
+                    break;
+                }
+                None => break,
+            }
+        }
+    }
+    finish_connection(server, in_flight).await
+}
+
+async fn finish_connection(
+    server: HelperServer,
+    mut in_flight: JoinSet<()>,
+) -> Result<(), arcbox_helper::HelperError> {
+    server.retire();
+    // Drain accepted mutations before lease release and the idle-watchdog decrement.
+    let mut errors = Vec::new();
+    while let Some(result) = in_flight.join_next().await {
+        if let Err(error) = result {
+            errors.push(format!("request task failed: {error}"));
+        }
+    }
+    if let Err(error) = server.release() {
+        errors.push(format!("resolver lease cleanup failed: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(arcbox_helper::HelperError::other(errors.join("; ")))
     }
 }
 
@@ -163,7 +217,7 @@ pub async fn run(idle_exit: bool) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("idle-exit enabled ({}s timeout)", IDLE_TIMEOUT.as_secs());
         tokio::spawn(idle_watchdog(Arc::clone(&tracker), shutdown.clone()));
     }
-    accept_loop(listener, tracker, shutdown).await;
+    accept_loop(listener, tracker, shutdown).await?;
 
     Ok(())
 }

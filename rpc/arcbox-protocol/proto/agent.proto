@@ -40,6 +40,12 @@ service AgentService {
     // Lists the guest cluster's Services of type LoadBalancer.
     rpc ListKubernetesLoadBalancers(KubernetesLoadBalancersRequest) returns (KubernetesLoadBalancersResponse);
 
+    // Lists installed container and builtin web routes selected by the guest.
+    rpc ListGuestWebServices(ListGuestWebServicesRequest) returns (ListGuestWebServicesResponse);
+
+    // Renews host HTTPS observation and returns the first managed access in that observation.
+    rpc ReconcileHttpsAccess(ReconcileHttpsAccessRequest) returns (ReconcileHttpsAccessResponse);
+
     // Requests graceful guest shutdown. The agent responds immediately,
     // then performs orderly process teardown and powers off the VM.
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
@@ -82,6 +88,153 @@ message AgentPingResponse {
     uint32 protocol_version = 3;
 }
 
+message ListGuestWebServicesRequest {
+    // Empty lists exact aliases. A concrete name resolves its current installed route.
+    string hostname = 1;
+}
+
+message ListGuestWebServicesResponse {
+    repeated GuestWebService services = 1;
+}
+
+// A ready guest endpoint, selected by its resource kind.
+message GuestWebService {
+    oneof route {
+        ContainerWebService container = 1;
+        IndexWebService index = 2;
+        MachineWebService machine = 3;
+    }
+}
+
+// An installed endpoint owned by the responding distro machine.
+message MachineWebService {
+    // The host's machine name, before hostname normalization.
+    string machine_name = 1;
+    // The one exact canonical machine DNS name assigned by the host.
+    string hostname = 2;
+    string ipv4_address = 3;
+    // Zero means no managed HTTP route.
+    uint32 http_port = 4;
+    oneof https_backend {
+        // Preserve the application's TLS handshake and certificate.
+        uint32 native_https_port = 5;
+        // Terminate TLS in the guest, then relay HTTP to this port.
+        uint32 terminated_http_port = 6;
+    }
+}
+
+// The builtin index owns the configured apex at the guest bridge gateway.
+message IndexWebService {
+    string hostname = 1;
+    string ipv4_address = 2;
+    // HTTP is always available while this endpoint is present.
+    bool managed_https = 3;
+}
+
+// The guest releases waiting handshakes after three seconds without renewal.
+message ReconcileHttpsAccessRequest {
+    // A new identifier clears the previous access. Reuse it for polls and cancellation.
+    string observation_id = 1;
+    // Exact Mac source addresses. Other clients never wait or produce an access.
+    repeated string host_addresses = 2;
+    // False releases every waiting handshake without changing certificate validation.
+    bool enabled = 3;
+}
+
+message ReconcileHttpsAccessResponse {
+    // Empty until a managed ClientHello passes the guest's DNS ownership check.
+    string hostname = 1;
+    string destination_ip = 2;
+    // Zero means no access. Concurrent accesses retain the first event's sequence.
+    uint64 sequence = 3;
+}
+
+// Host-only replacement of this guest's ArcBox client trust anchor.
+// The host sends the active Keychain certificate. CA unavailability sends no request.
+message ReconcileGuestTrustRequest {
+    // An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    oneof desired {
+        bytes certificate_pem = 1;
+        Empty remove = 2;
+    }
+}
+
+// Acknowledges completed installation or removal, never a queued operation.
+message ReconcileGuestTrustResponse {
+    oneof applied {
+        // SHA-256 of installed DER, in uppercase colon-separated hex.
+        string installed_sha256 = 1;
+        Empty removed = 2;
+    }
+}
+
+// Owns this connection until EOF; only the host may open one on the System VM.
+message OpenInstanceAuthorityRequest {}
+message OpenInstanceAuthorityResponse {}
+
+// Replaces every instance root after the exclusive connection has opened.
+message ReplaceInstanceAuthorityRequest {
+    // Source authority lifetime; strictly increases within one connection.
+    uint64 authority_revision = 1;
+    repeated InstanceAuthorityRoot roots = 2;
+}
+
+message InstanceAuthorityRoot {
+    string root = 1;
+    enum Target {
+        UNSPECIFIED = 0;
+        CURRENT = 1;
+        OTHER = 2;
+        UNAVAILABLE = 3;
+    }
+    Target target = 2;
+    // OTHER requires a nonzero host loopback u16 port; every other target uses zero.
+    uint32 dns_port = 3;
+}
+
+// Confirms the complete snapshot was installed before the response was sent.
+message InstanceAuthorityAck {
+    uint64 authority_revision = 1;
+}
+
+// Fixes identity for one host-owned distro-machine configuration connection.
+message OpenMachineWebRequest {
+    // Raw machine name before hostname normalization.
+    string machine_name = 1;
+    // Exact canonical DNS name assigned by the host.
+    string hostname = 2;
+    string ipv4_address = 3;
+}
+message OpenMachineWebResponse {}
+
+// Replaces the complete policy and public root. Revisions are positive and strictly increase.
+message ReplaceMachineWebRequest {
+    uint64 source_revision = 1;
+    MachineWebPorts ports = 2;
+    // Absence disables managed certificate issuance without changing guest client trust.
+    optional bytes ca_certificate_pem = 3;
+}
+
+// Confirms validated session configuration, not installed routing.
+message MachineWebAck {
+    uint64 source_revision = 1;
+}
+
+// An installed route selected through protocol discovery or an explicit port label.
+message ContainerWebService {
+    string container_id = 1;
+    repeated string hostnames = 2;
+    string ipv4_address = 3;
+    // Zero means no managed HTTP route.
+    uint32 http_port = 4;
+    oneof https_backend {
+        // Preserve the application's TLS handshake and certificate.
+        uint32 native_https_port = 5;
+        // Terminate TLS in the guest, then relay HTTP to this port.
+        uint32 terminated_http_port = 6;
+    }
+}
+
 // System information from the guest.
 message SystemInfo {
     // Kernel version.
@@ -122,9 +275,8 @@ message SystemInfo {
     bool distro_init_pending = 12;
     // IPv4 address of the guest's bridge NIC (the vmnet interface the Mac
     // reaches directly), or empty when the guest has none or it has no
-    // address yet. The host registers `<machine>.arcbox.local` at this
-    // address; `ip_addresses` keeps listing every interface, so an older
-    // host that ignores this field sees exactly what it saw before.
+    // address yet. The host registers `<machine>.machine.<local domain>`
+    // at this address; `ip_addresses` lists every interface.
     string bridge_ip_address = 13;
 }
 

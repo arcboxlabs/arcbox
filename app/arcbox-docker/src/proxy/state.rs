@@ -7,9 +7,8 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 /// Opaque RAII lease holding the System VM out of idle while a proxied

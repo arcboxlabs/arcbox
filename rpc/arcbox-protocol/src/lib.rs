@@ -50,8 +50,8 @@ pub use pbjson_types;
 /// Re-exports all types for backward compatibility.
 pub mod common {
     pub use super::v1::{
-        Empty, KeyValue, Mount, PortBinding, ResourceLimits, StorageHealth, StorageVolumeHealth,
-        Timestamp, storage_volume_health,
+        Empty, KeyValue, MachineWebPorts, Mount, PortBinding, ResourceLimits, StorageHealth,
+        StorageVolumeHealth, Timestamp, WebPortPolicy, storage_volume_health, web_port_policy,
     };
 }
 
@@ -66,8 +66,8 @@ pub mod machine {
         MachineEvent, MachineEventsRequest, MachineExecOutput, MachineExecRequest, MachineHardware,
         MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary,
         RemoveMachineRequest, SetDefaultMachineRequest, SetMachineResourcesRequest,
-        SetMachineResourcesResponse, SshInfoRequest, SshInfoResponse, StartMachineRequest,
-        StopMachineRequest,
+        SetMachineResourcesResponse, SetMachineWebPortsRequest, SshInfoRequest, SshInfoResponse,
+        StartMachineRequest, StopMachineRequest,
     };
 }
 
@@ -105,20 +105,26 @@ pub mod image {
 pub mod agent {
     pub use super::v1::{
         AgentPingRequest, AgentPingResponse, ContainerFsPathsRequest, ContainerFsPathsResponse,
-        ContainerStats, DiskTrimRequest, DiskTrimResponse, EnsureMachineExportRequest,
-        EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
-        ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
-        KubernetesDeleteResponse, KubernetesHostPort, KubernetesKubeconfigRequest,
-        KubernetesKubeconfigResponse, KubernetesLoadBalancer, KubernetesLoadBalancersRequest,
-        KubernetesLoadBalancersResponse, KubernetesServicePort, KubernetesStartRequest,
-        KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-        KubernetesStopRequest, KubernetesStopResponse, MachineStats, MemoryPressureEvent,
-        MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved,
-        ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-        RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
-        StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
-        WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest, kubernetes_host_port,
+        ContainerStats, ContainerWebService, DiskTrimRequest, DiskTrimResponse,
+        EnsureMachineExportRequest, EnsureMachineExportResponse, EnsureNfsExportRequest,
+        EnsureNfsExportResponse, GuestWebService, ImageFsPathsRequest, ImageFsPathsResponse,
+        IndexWebService, KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+        KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+        KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+        KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+        KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
+        ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineStats, MachineWebService,
+        MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
+        PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
+        ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
+        ShutdownResponse, StorageCheckRequest, StorageCheckResponse, StorageCheckResult,
+        SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+        container_web_service, guest_web_service, kubernetes_host_port, machine_web_service,
         memory_pressure_event, readiness_event, storage_check_request,
+    };
+    pub use super::v1::{
+        MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -151,10 +157,13 @@ pub mod api {
 
     // System service types
     pub use super::v1::{
-        Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-        GetVersionResponse, PruneRequest, PruneResponse, ResolveContainerFsRequest,
-        ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse,
-        SystemPingRequest, SystemPingResponse,
+        AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor,
+        EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
+        ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess,
+        LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest, PruneResponse,
+        ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
+        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, SystemRuntimeStatus,
+        WebService, system_runtime_status,
     };
 
     // Volume service types
@@ -188,8 +197,9 @@ pub use v1::{
     CreateMachineRequest, CreateMachineResponse, DirectoryMount, InspectMachineRequest,
     ListMachinesRequest, ListMachinesResponse, MachineEvent, MachineEventsRequest,
     MachineExecOutput, MachineExecRequest, MachineHardware, MachineInfo, MachineNetwork, MachineOs,
-    MachineStorage, MachineSummary, RemoveMachineRequest, SshInfoRequest, SshInfoResponse,
-    StartMachineRequest, StopMachineRequest,
+    MachineStorage, MachineSummary, MachineWebPorts, RemoveMachineRequest,
+    SetMachineWebPortsRequest, SshInfoRequest, SshInfoResponse, StartMachineRequest,
+    StopMachineRequest, WebPortPolicy, web_port_policy,
 };
 
 // Container types
@@ -214,15 +224,21 @@ pub use v1::{
 
 // Agent types
 pub use v1::{
-    AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
-    KubernetesHostPort, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesLoadBalancer, KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse,
-    KubernetesServicePort, KubernetesStartRequest, KubernetesStartResponse,
-    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
-    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
-    StorageCheckResult, SystemInfo, storage_check_request,
+    AgentPingRequest, AgentPingResponse, ContainerWebService, GuestWebService, IndexWebService,
+    KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+    KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+    KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
+    ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineWebService,
+    PortBindingsChanged, PortBindingsRemoved, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
+    StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
+    container_web_service, guest_web_service, machine_web_service, storage_check_request,
+};
+pub use v1::{
+    MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
 };
 
 // API types - Network
@@ -234,10 +250,12 @@ pub use v1::{
 
 // API types - System
 pub use v1::{
-    Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-    GetVersionResponse, PruneRequest, PruneResponse, ResolveContainerFsRequest,
+    AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor, EventsRequest,
+    GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesRequest,
+    ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
+    PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
     ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
-    SystemPingResponse,
+    SystemPingResponse, SystemRuntimeStatus, WebService, system_runtime_status,
 };
 
 // API types - Volume

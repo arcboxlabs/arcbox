@@ -15,7 +15,7 @@ re-exported through:
 
 | Module | Source proto | Description |
 |--------|--------------|-------------|
-| `common` | `common.proto` | Shared types (`Empty`, `Mount`, `PortBinding`, ...) |
+| `common` | `common.proto` | Shared types (`Empty`, `Mount`, `PortBinding`, `WebPortPolicy`, `MachineWebPorts`, ...) |
 | `machine` | `machine.proto` | Machine lifecycle + agent passthrough requests |
 | `container` | `container.proto` | Container lifecycle and exec messages |
 | `image` | `image.proto` | Image pull/list/inspect/remove messages |
@@ -32,9 +32,7 @@ files in the same change. A new `.proto` file must be registered in both
 
 ## Protocol evolution
 
-The daemon and the in-VM `arcbox-agent` are distributed separately, so a
-running guest may speak an older schema than the host. Two mechanisms keep
-skew safe:
+The daemon and the in-VM `arcbox-agent` ship together. Update paired callers and decoders in the same source change. Current feature work keeps both protocol versions at 7 and adds no compatibility branches.
 
 - **Additive-only schemas.** CI runs `buf breaking` against `master`
   (`.github/workflows/ci.yml`): never remove or renumber fields; use
@@ -42,10 +40,17 @@ skew safe:
 - **Connection handshake.** The agent reports
   `AgentPingResponse.protocol_version`
   (`arcbox_constants::wire::AGENT_PROTOCOL_VERSION`). Before sending any business request, the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`. Unary RPCs, observation watches, sandbox streams, and machine exec/debug/TCP sessions share this admission rule. A compatible Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available for protocol negotiation and reports incompatible versions to boot probes.
-  Bump the protocol version when a change alters the *meaning* of
-  existing messages; purely additive, ignorable fields don't need one.
+  Message changes do not automatically require a protocol version bump. Rebuild and stage the paired binaries together.
 
 ## Usage
+
+`SetupStatus.phase` reports host preparation and daemon failure. `SetupStatus.system_runtime` reports System VM service admission independently: `DISABLED`, `STARTING`, `VM_STARTING`, `VM_READY`, `READY`, or `FAILED` with a reason. `STARTING` covers binary preparation, `VM_STARTING` marks the start of guest boot, and `VM_READY` marks the guest agent answering before Docker becomes ready. `STATE_UNSPECIFIED` means the daemon has not established System state. Host `READY` admits machine operations; only System `READY` admits Docker, Kubernetes, sandbox, migration, and System filesystem requests. System VM configuration and storage recovery remain available through host admission when System startup fails. Local HTTPS and storage observations remain independent of both lifecycles.
+
+`ListGuestWebServices` uses typed container, index, and machine endpoints. A machine endpoint names one canonical host-assigned DNS name and its bridge IPv4 address. The System VM consumer rejects machine routes; the schema addition does not enable machine routing.
+
+`MachineService.SetWebPorts` saves per-machine HTTP and HTTPS backend policies. The shared `common.proto` defines `WebPortPolicy` and `MachineWebPorts` for host and guest consumers. Each policy selects automatic discovery, disabled routing, or a port from 1 through 65535. An explicit HTTPS port selects native TLS. Omitted update fields preserve their values. `MachineInfo.web_ports` and the setter response report saved configuration; neither reports installed routes.
+
+Machine web configuration uses an exclusive agent connection. `OpenMachineWebRequest` fixes the raw machine name, canonical hostname, and bridge IPv4 address. `ReplaceMachineWebRequest` supplies both policies, optional `ca_certificate_pem`, and a positive, increasing session revision; `MachineWebAck` confirms that revision. Root-only changes use the same connection. An absent root withdraws proxy authority without changing guest client trust. The guest rejects invalid PEM before changing the accepted configuration and clears the parsed root on disconnect. The host captures the physical VM, exact DNS claim revision, and saved policies together. A changed identity requires a new session. Configuration acknowledgement does not establish installed routes.
 
 `SetupStatus.storage_health` reports persistent storage independently of startup
 phase and daemon liveness. Each observation names the Btrfs data volume and the

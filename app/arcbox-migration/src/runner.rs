@@ -1,5 +1,7 @@
 //! Docker CLI transport used by migration planning and execution.
 
+mod output;
+
 use crate::docker_types::{
     ContainerInspect, DockerInfo, ImageInspect, NetworkInspect, VolumeInspect,
 };
@@ -10,6 +12,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
+use tokio_util::sync::CancellationToken;
 
 use crate::helper_image::helper_image_reference;
 
@@ -21,6 +24,7 @@ pub struct DockerCliRunner {
     binary: PathBuf,
     socket_path: PathBuf,
     isolated_config: Arc<TempDir>,
+    command_cancellation: CancellationToken,
 }
 
 impl std::fmt::Debug for DockerCliRunner {
@@ -89,7 +93,14 @@ impl DockerCliRunner {
             })?,
             socket_path: socket_path.into(),
             isolated_config: Arc::new(tempfile::tempdir()?),
+            command_cancellation: CancellationToken::new(),
         })
+    }
+
+    /// Cancels commands that collect output. Streaming transfers retain their existing lifecycle.
+    pub(crate) fn with_command_cancellation(mut self, cancelled: CancellationToken) -> Self {
+        self.command_cancellation = cancelled;
+        self
     }
 
     /// Returns the socket path used by this runner.
@@ -590,12 +601,9 @@ impl DockerCliRunner {
     }
 
     async fn output_owned(&self, args: Vec<String>) -> Result<std::process::Output> {
-        let output = self
-            .command()
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| MigrationError::Docker(format!("failed to run docker: {e}")))?;
+        let mut command = self.command();
+        command.args(args);
+        let output = output::run(command, &self.command_cancellation).await?;
         if output.status.success() {
             return Ok(output);
         }

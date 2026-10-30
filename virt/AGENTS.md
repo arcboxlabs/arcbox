@@ -96,6 +96,15 @@ files above.
   any `unsafe` guest-memory access. Debug builds panic on overflow while
   release wraps past bounds checks — both are bugs; tests must cover
   near-`u64::MAX` inputs.
+- DNS uses the shared `arcbox_dns::DnsRecordType`, including unknown wire values.
+  Local name checks must run for every query type before forwarding or cache lookup.
+- `NetworkManager::replace_dns_projection` derives granted concrete Exact `.local` records from the Registry, including custom roots and apexes. Hold the Registry mutation lock through projection publication. Wildcards remain in the Registry.
+- Subscribe to `NetworkManager::subscribe_dns_registry` for complete ownership changes, including wildcards and unavailable resources. Read the full Registry snapshot after subscribing. Drop watch borrows before acquiring the Registry lock.
+- Use the same Registry watch to refresh the complete mDNS projection. Do not add a second record-delta stream.
+- Pass `NetworkManager::shared_dns()` through `HostNetwork` to both VMM datapaths. Resolve every query from that shared Registry and use its configured relative-name suffix. Concrete projections must never override conflicts or delegated names.
+- Configure DNS through `NetConfig::dns` before constructing NetworkManager. The forwarder configuration is immutable; do not add an outer forwarder lock.
+- Resolve instance ownership before local records or upstream cache lookup. Current empty roots receive a local negative answer. Unavailable roots terminate with SERVFAIL.
+- Forward Other instance roots only to their explicit loopback endpoint. Bypass the upstream cache and reject replies after authority revisions change.
 
 ## vmnet relay (bridge NIC, `arcbox-vmnet`)
 

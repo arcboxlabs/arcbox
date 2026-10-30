@@ -11,6 +11,7 @@ use connectrpc::{
 };
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 use super::SharedRuntime;
 use crate::error::ApiError;
@@ -39,16 +40,31 @@ impl MigrationServiceImpl {
 impl pb::MigrationService for MigrationServiceImpl {
     async fn prepare_migration(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::PrepareMigrationRequest>,
     ) -> ServiceResult<pb::PrepareMigrationResponse> {
+        let cancelled = ctx
+            .extensions()
+            .get::<CancellationToken>()
+            .cloned()
+            .unwrap_or_default();
         let response = self
             .runtime
             .ready()?
             .migration_manager()
-            .prepare_migration(request.to_owned_message())
+            .prepare_migration(request.to_owned_message(), cancelled)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(|error| {
+                if matches!(
+                    &error,
+                    arcbox_core::CoreError::Common(arcbox_error::CommonError::Io(io))
+                        if io.kind() == std::io::ErrorKind::Interrupted
+                ) {
+                    ConnectError::unavailable(error.to_string())
+                } else {
+                    ConnectError::from(ApiError::from(error))
+                }
+            })?;
 
         Response::ok(response)
     }

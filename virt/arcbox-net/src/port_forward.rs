@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use crate::error::{NetError, Result};
 
 /// Port forwarding rule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortForwardRule {
     /// Host address to listen on.
     pub host_addr: SocketAddr,
@@ -48,7 +48,7 @@ impl PortForwardRule {
 }
 
 /// Network protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
     /// TCP protocol.
     Tcp,
@@ -72,8 +72,8 @@ struct ActiveForwarder {
 pub struct PortForwarder {
     /// Configured rules.
     rules: Vec<PortForwardRule>,
-    /// Active forwarders (keyed by host address string).
-    active: Arc<RwLock<HashMap<String, ActiveForwarder>>>,
+    /// Active forwarders, keyed by the complete host binding.
+    active: Arc<RwLock<HashMap<(SocketAddr, Protocol), ActiveForwarder>>>,
     /// Whether the forwarder is running.
     running: bool,
 }
@@ -91,12 +91,16 @@ impl PortForwarder {
 
     /// Adds a forwarding rule.
     pub fn add_rule(&mut self, rule: PortForwardRule) {
-        self.rules.push(rule);
+        if !self.rules.contains(&rule) {
+            self.rules.push(rule);
+            self.running = false;
+        }
     }
 
     /// Removes a forwarding rule by host address.
     pub fn remove_rule(&mut self, host_addr: SocketAddr) {
         self.rules.retain(|r| r.host_addr != host_addr);
+        self.running = false;
     }
 
     /// Returns all configured rules.
@@ -112,9 +116,18 @@ impl PortForwarder {
     /// Returns an error if any listener cannot be started.
     pub async fn start(&mut self) -> Result<()> {
         if self.running {
-            return Ok(());
+            let active = self.active.read().await;
+            if active.len() == self.rules.len()
+                && active
+                    .values()
+                    .all(|listener| !listener.handle.is_finished())
+            {
+                return Ok(());
+            }
         }
 
+        // A cancelled start or stop can leave only some listeners alive.
+        self.stop().await;
         for rule in &self.rules {
             self.start_forwarder(rule.clone()).await?;
         }
@@ -126,8 +139,9 @@ impl PortForwarder {
 
     /// Stops all port forwarding.
     pub async fn stop(&mut self) {
+        self.running = false;
         let mut active = self.active.write().await;
-        let addresses: Vec<_> = active.keys().cloned().collect();
+        let addresses: Vec<_> = active.keys().copied().collect();
         for addr in addresses {
             let Some(forwarder) = active.get_mut(&addr) else {
                 continue;
@@ -138,23 +152,25 @@ impl PortForwarder {
             // dropped its bound socket. Cancellation leaves it retryable.
             let _ = (&mut forwarder.handle).await;
             active.remove(&addr);
-            tracing::debug!("Stopped forwarder for {}", addr);
+            tracing::debug!("Stopped forwarder for {:?}", addr);
         }
 
-        self.running = false;
         tracing::info!("Port forwarder stopped");
     }
 
     /// Starts a single forwarder for a rule.
     async fn start_forwarder(&self, rule: PortForwardRule) -> Result<()> {
-        let key = rule.host_addr.to_string();
+        let key = (rule.host_addr, rule.protocol);
 
         // Hold the authority lock through bind. Cancellation before bind
         // completion drops the local socket; after spawn there is no await
         // before the handle is recorded.
         let mut active_guard = self.active.write().await;
         if active_guard.contains_key(&key) {
-            return Ok(());
+            return Err(NetError::PortForward(format!(
+                "listener already exists on {}/{:?}",
+                rule.host_addr, rule.protocol
+            )));
         }
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -203,36 +219,6 @@ impl PortForwarder {
         );
 
         Ok(())
-    }
-
-    /// Dynamically adds and starts a new rule.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the forwarder cannot be started.
-    pub async fn add_and_start(&mut self, rule: PortForwardRule) -> Result<()> {
-        if self.running {
-            self.start_forwarder(rule.clone()).await?;
-        }
-        self.rules.push(rule);
-        Ok(())
-    }
-
-    /// Dynamically removes and stops a rule.
-    pub async fn remove_and_stop(&mut self, host_addr: SocketAddr) {
-        let key = host_addr.to_string();
-
-        // Stop the forwarder.
-        let mut active = self.active.write().await;
-        if let Some(forwarder) = active.get_mut(&key) {
-            let _ = forwarder.shutdown_tx.try_send(());
-            forwarder.handle.abort();
-            let _ = (&mut forwarder.handle).await;
-            active.remove(&key);
-        }
-
-        // Remove the rule.
-        self.rules.retain(|r| r.host_addr != host_addr);
     }
 
     /// Returns the number of active forwarders.
@@ -421,7 +407,7 @@ mod tests {
         assert_eq!(forwarder.rules().len(), 1);
 
         forwarder.remove_rule(host);
-        assert!(forwarder.rules().is_empty());
+        assert_eq!(forwarder.rules(), []);
     }
 
     #[tokio::test]
@@ -448,6 +434,94 @@ mod tests {
         assert_eq!(forwarder.active_count().await, 1);
         forwarder.stop().await;
         assert_eq!(forwarder.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn tcp_and_udp_share_a_host_address_without_sharing_a_listener() {
+        let mut forwarder = PortForwarder::new();
+        let host = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let guest = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80));
+        forwarder.add_rule(PortForwardRule::tcp(host, guest));
+        forwarder.add_rule(PortForwardRule::udp(host, guest));
+        forwarder.add_rule(PortForwardRule::tcp(host, guest));
+        forwarder.start().await.unwrap();
+        assert_eq!(forwarder.active_count().await, 2);
+
+        forwarder.stop().await;
+        assert_eq!(forwarder.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_requires_a_complete_restart() {
+        let mut forwarder = PortForwarder::new();
+        let host = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let guest = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80));
+        forwarder.add_rule(PortForwardRule::tcp(host, guest));
+        forwarder.start().await.unwrap();
+
+        let active = Arc::clone(&forwarder.active);
+        let lock = active.write().await;
+        tokio::select! {
+            biased;
+            () = forwarder.stop() => panic!("the active lock must block cleanup"),
+            () = std::future::ready(()) => {}
+        }
+        assert!(!forwarder.is_running());
+        for listener in lock.values() {
+            listener.handle.abort();
+        }
+        drop(lock);
+
+        forwarder.start().await.unwrap();
+        assert!(forwarder.is_running());
+        assert!(
+            active
+                .read()
+                .await
+                .values()
+                .all(|listener| !listener.handle.is_finished())
+        );
+        assert_eq!(forwarder.active_count().await, 1);
+        forwarder.stop().await;
+    }
+
+    #[tokio::test]
+    async fn restart_replaces_an_exited_listener() {
+        let mut forwarder = PortForwarder::new();
+        let host = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let guest = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80));
+        forwarder.add_rule(PortForwardRule::tcp(host, guest));
+        forwarder.start().await.unwrap();
+        {
+            let mut active = forwarder.active.write().await;
+            let listener = active.values_mut().next().unwrap();
+            listener.handle.abort();
+            listener.shutdown_tx.closed().await;
+        }
+
+        forwarder.start().await.unwrap();
+        assert!(
+            forwarder
+                .active
+                .read()
+                .await
+                .values()
+                .all(|listener| !listener.handle.is_finished())
+        );
+        forwarder.stop().await;
+    }
+
+    #[tokio::test]
+    async fn conflicting_destinations_cannot_share_one_listener() {
+        let mut forwarder = PortForwarder::new();
+        let host = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        for port in [80, 81] {
+            let guest = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
+            forwarder.add_rule(PortForwardRule::tcp(host, guest));
+        }
+        assert!(forwarder.start().await.is_err());
+        assert!(!forwarder.is_running());
+        forwarder.stop().await;
     }
 
     #[tokio::test]

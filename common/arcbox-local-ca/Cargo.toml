@@ -11,14 +11,24 @@ authors.workspace = true
 [dependencies]
 arcbox-atomic-file.workspace = true
 arcbox-constants.workspace = true
+pem = "4.0.0"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time = "0.3.53"
 tracing.workspace = true
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10.1"
+security-framework = "3.7.0"
+security-framework-sys = "2.17.0"

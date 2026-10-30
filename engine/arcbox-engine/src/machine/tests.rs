@@ -1,6 +1,8 @@
 use super::*;
 use tempfile::tempdir;
 
+mod cancellation;
+
 fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
     test_machine_manager_with_bus(data_dir, crate::event::EventBus::new())
 }
@@ -222,8 +224,8 @@ fn test_register_mock_machine_idempotent() {
 /// A force stop publishes `MachineStopping`, then waits for the host to
 /// release what it holds of the machine before it touches the VM: the hold
 /// here is dropped by another thread after a delay, and `stop` returns no
-/// earlier. The mock machine has no VM, so the stop itself then fails —
-/// that failure is the VM's, after the wait, and not what is under test.
+/// earlier. An unstarted VM record rejects teardown after the wait.
+/// This test checks host release ordering without starting or stopping a VM.
 #[test]
 fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     use crate::event::{Event, EventBus};
@@ -233,8 +235,16 @@ fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     let mut events = bus.subscribe();
     let manager = Arc::new(test_machine_manager_with_bus(temp_dir.path(), bus));
     manager.register_mock_machine("held", 7).unwrap();
+    let vm_id = manager.vm_manager.create(VmConfig::default()).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("held")
+        .unwrap()
+        .vm_id = vm_id;
 
-    let hold = manager.host_hold("held");
+    let hold = manager.host_holds.hold("held");
     let release_after = Duration::from_millis(300);
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(release_after);
@@ -242,7 +252,7 @@ fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     });
 
     let started = std::time::Instant::now();
-    let _ = manager.stop("held");
+    let _ = manager.stop("held", None);
     let waited = started.elapsed();
     assert!(waited >= release_after, "stop returned after {waited:?}");
     assert!(
@@ -824,11 +834,19 @@ async fn a_clone_gets_its_own_identity_and_the_sources_data() {
     let temp_dir = tempdir().unwrap();
     let manager = test_machine_manager(temp_dir.path());
     let source = create_shimmed(&manager, temp_dir.path(), "src_box").await;
+    let web_ports = manager
+        .set_web_ports(
+            "src_box",
+            Some("8080".parse().unwrap()),
+            Some(WebPortPolicy::Off),
+        )
+        .unwrap();
 
     assert_eq!(manager.clone_machine("src_box", "copy").unwrap(), "copy");
     let clone = manager.get("copy").unwrap();
 
     assert_eq!(clone.state, MachineState::Created);
+    assert_eq!(clone.web_ports, web_ports);
     assert_ne!(clone.vm_id, source.vm_id, "a clone is its own VM");
     assert_eq!((clone.cpus, clone.memory_mb, clone.disk_gb), (2, 1536, 1));
     assert_eq!(clone.distro.as_deref(), Some("alpine"));
@@ -861,6 +879,7 @@ async fn a_clone_gets_its_own_identity_and_the_sources_data() {
         Some(&*disk.to_string_lossy())
     );
     assert_eq!(persisted.cmdline.as_deref(), Some(cmdline));
+    assert_eq!(persisted.web_ports, web_ports);
 }
 
 #[tokio::test]
@@ -964,6 +983,13 @@ async fn export_then_import_restores_the_machine_and_its_data() {
     let temp_dir = tempdir().unwrap();
     let manager = test_machine_manager(temp_dir.path());
     let source = create_shimmed(&manager, temp_dir.path(), "dev").await;
+    let web_ports = manager
+        .set_web_ports(
+            "dev",
+            Some(WebPortPolicy::Off),
+            Some("8443".parse().unwrap()),
+        )
+        .unwrap();
     let source_disk = std::fs::read(source.disk_path.as_ref().unwrap()).unwrap();
     let archive_path = temp_dir.path().join("dev.tar.zst");
 
@@ -980,6 +1006,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
 
     let manifest = archive::read_manifest(&archive_path).unwrap();
     assert_eq!(manifest.machine.name, "dev");
+    assert_eq!(manifest.machine.web_ports, web_ports);
     assert_eq!(
         (manifest.machine.cpus, manifest.machine.memory_mb),
         (2, 1536)
@@ -1009,6 +1036,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
             }),
         }),
         mounts: manifest.machine.mounts,
+        web_ports: manifest.machine.web_ports,
         ..Default::default()
     };
     assert_eq!(
@@ -1018,6 +1046,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
 
     let imported = manager.get("dev2").unwrap();
     assert_eq!(imported.state, MachineState::Created);
+    assert_eq!(imported.web_ports, web_ports);
     assert_eq!(
         (imported.cpus, imported.memory_mb, imported.disk_gb),
         (2, 1536, 1)
@@ -1128,4 +1157,778 @@ async fn resize_applies_to_the_next_start_and_says_when_a_restart_is_needed() {
         .state = MachineState::Stopping;
     let err = manager.set_resources("dev", Some(1), None).unwrap_err();
     assert!(err.to_string().contains("Stopping"), "{err}");
+}
+
+#[test]
+fn a_force_fallback_cannot_stop_a_replacement_with_the_same_name() {
+    use crate::event::EventBus;
+    let dir = tempdir().unwrap();
+    let bus = EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    manager.register_mock_machine("replaced", 7).unwrap();
+    let old = manager.vm_manager.create(VmConfig::default()).unwrap();
+    let expected = manager.vm_manager.run_incarnation(&old).unwrap();
+    let replacement = manager.vm_manager.create(VmConfig::default()).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("replaced")
+        .unwrap()
+        .vm_id = replacement.clone();
+    let error = manager
+        .admit_stop("replaced", &expected, false)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("incarnation changed"));
+    assert!(
+        events.try_recv().is_err(),
+        "stale fallback must not withdraw replacement resources"
+    );
+    let machine = manager.get("replaced").unwrap();
+    assert_eq!(machine.vm_id, replacement);
+    assert_eq!(machine.state, MachineState::Running);
+}
+
+#[test]
+fn expected_host_holds_reject_stopping_replaced_and_unstarted_runs() {
+    let dir = tempdir().unwrap();
+    let manager = test_machine_manager(dir.path());
+    let expected = model_running_machine(&manager, "trust");
+
+    let hold = manager.host_hold_expected("trust", &expected).unwrap();
+    assert!(!manager.host_holds.wait_released("trust", Duration::ZERO));
+    drop(hold);
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("trust")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert!(manager.host_hold_expected("trust", &expected).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+
+    let (replacement, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("trust").unwrap();
+        machine.state = MachineState::Running;
+        machine.vm_id = replacement;
+    }
+    assert!(manager.host_hold_expected("trust", &expected).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+    drop(manager.host_hold_expected("trust", &current).unwrap());
+
+    let unstarted = manager.vm_manager.create(VmConfig::default()).unwrap();
+    let unstarted_run = manager.vm_manager.run_incarnation(&unstarted).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("trust")
+        .unwrap()
+        .vm_id = unstarted;
+    assert!(manager.host_hold_expected("trust", &unstarted_run).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+}
+
+#[test]
+fn removal_requires_force_for_a_machine_with_an_active_stop() {
+    let dir = tempdir().unwrap();
+    let manager = test_machine_manager(dir.path());
+    let expected = model_running_machine(&manager, "stopping");
+    let graceful = manager.admit_stop("stopping", &expected, true).unwrap();
+    let error = manager.remove("stopping", false).unwrap_err();
+    assert!(error.to_string().contains("use --force"));
+    assert_eq!(
+        manager.get("stopping").unwrap().state,
+        MachineState::Stopping
+    );
+    let result = manager.finish_stop(
+        "stopping",
+        &graceful,
+        stop_owner::Completion::Graceful(Ok(false)),
+    );
+    assert!(!result.unwrap());
+}
+
+fn model_running_machine(manager: &MachineManager, name: &str) -> VmIncarnation {
+    manager.register_mock_machine(name, 7).unwrap();
+    let (id, expected) = manager.vm_manager.modeled_running_vm();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut(name)
+        .unwrap()
+        .vm_id = id;
+    expected
+}
+
+#[test]
+fn failed_teardown_cannot_restore_a_non_live_machine() {
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "uncertain");
+    let id = manager.get("uncertain").unwrap().vm_id;
+    manager.vm_manager.model_teardown_failure(&id);
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("uncertain")
+        .unwrap()
+        .state = MachineState::Stopping;
+    let run = manager.admit_stop("uncertain", &expected, false).unwrap();
+    assert!(events.try_recv().is_ok());
+    let failure = Err(EngineError::invalid_state("modeled teardown failed"));
+    let result = manager.finish_stop("uncertain", &run, stop_owner::Completion::Forced(failure));
+    assert!(result.is_err());
+    assert_eq!(
+        manager.get("uncertain").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn failed_force_preserves_graceful_completion_in_either_order() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    for force_first in [false, true] {
+        for stopped in [false, true] {
+            let dir = tempdir().unwrap();
+            let bus = crate::event::EventBus::new();
+            let mut events = bus.subscribe();
+            let manager = test_machine_manager_with_bus(dir.path(), bus);
+            let expected = model_running_machine(&manager, "owned");
+            let graceful = manager.admit_stop("owned", &expected, true).unwrap();
+            assert_eq!(manager.get("owned").unwrap().state, MachineState::Stopping);
+            assert!(manager.host_hold_expected("owned", &expected).is_err());
+            let force = manager.admit_stop("owned", &expected, false).unwrap();
+            assert!(manager.admit_stop("owned", &expected, false).is_err());
+            while events.try_recv().is_ok() {}
+            let fail = || EngineError::invalid_state("modeled stop failed");
+            let grace_result = if stopped { Ok(true) } else { Err(fail()) };
+            let mut completions = [
+                (Forced(Err(fail())), &force),
+                (Graceful(grace_result), &graceful),
+            ];
+            if !force_first {
+                completions.swap(0, 1);
+            }
+            for (step, (completion, run)) in completions.into_iter().enumerate() {
+                let result = manager.finish_stop("owned", run, completion);
+                assert_eq!(result.is_ok(), stopped && (!force_first || step == 1));
+                if step == 0 {
+                    assert_eq!(manager.get("owned").unwrap().state, MachineState::Stopping);
+                    assert!(events.try_recv().is_err());
+                }
+            }
+            let expected_state = if stopped {
+                MachineState::Stopped
+            } else {
+                MachineState::Running
+            };
+            assert_eq!(manager.get("owned").unwrap().state, expected_state);
+            assert!(matches!(
+                (stopped, events.try_recv().unwrap()),
+                (true, Event::MachineStopped { .. }) | (false, Event::MachineStopCancelled { .. })
+            ));
+            assert!(events.try_recv().is_err());
+            assert!(manager.stop_operations.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn forced_removal_withdraws_holds_and_cannot_stop_a_replacement() {
+    use crate::event::Event;
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = Arc::new(test_machine_manager_with_bus(dir.path(), bus));
+    let expected = model_running_machine(&manager, "removing");
+    let hold = manager.host_hold_expected("removing", &expected).unwrap();
+    let worker = Arc::clone(&manager);
+    let removal = std::thread::spawn(move || worker.remove("removing", true));
+    assert!(matches!(
+        events.blocking_recv().unwrap(),
+        Event::MachineStopping { .. }
+    ));
+    assert_eq!(
+        manager.get("removing").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(manager.host_hold_expected("removing", &expected).is_err());
+    let (id, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("removing").unwrap();
+        machine.vm_id = id;
+        machine.state = MachineState::Running;
+    }
+    drop(hold);
+    assert!(removal.join().unwrap().is_err());
+    assert_eq!(
+        manager.get("removing").unwrap().state,
+        MachineState::Running
+    );
+    drop(manager.host_hold_expected("removing", &current).unwrap());
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn graceful_timeout_keeps_stop_admission_closed_until_force_finishes() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "timeout");
+    let run = manager.admit_stop("timeout", &expected, true).unwrap();
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopping { .. }
+    ));
+    assert!(
+        !manager
+            .finish_stop("timeout", &run, Graceful(Ok(false)))
+            .unwrap()
+    );
+    assert_eq!(
+        manager.get("timeout").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(manager.host_hold_expected("timeout", &expected).is_err());
+    assert!(manager.admit_stop("timeout", &expected, false).is_err());
+    assert!(events.try_recv().is_err());
+    manager.require_force_owner("timeout", &run).unwrap();
+    let result = manager.finish_stop(
+        "timeout",
+        &run,
+        Forced(Err(EngineError::invalid_state("failed"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("timeout").unwrap().state, MachineState::Running);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+}
+
+#[test]
+fn successful_takeover_rejects_late_graceful_failure() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "late");
+    let graceful = manager.admit_stop("late", &expected, true).unwrap();
+    let force = manager.admit_stop("late", &expected, false).unwrap();
+    while events.try_recv().is_ok() {}
+    assert!(manager.finish_stop("late", &force, Forced(Ok(()))).unwrap());
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopped { .. }
+    ));
+    let result = manager.finish_stop(
+        "late",
+        &graceful,
+        Graceful(Err(EngineError::invalid_state("late"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("late").unwrap().state, MachineState::Stopped);
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn old_completion_cannot_claim_a_replacement_stop() {
+    use crate::event::Event;
+    use stop_owner::Completion::Forced;
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "replace");
+    let old = manager.admit_stop("replace", &expected, false).unwrap();
+    let (id, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("replace").unwrap();
+        machine.vm_id = id;
+        machine.state = MachineState::Running;
+    }
+    let replacement = manager.admit_stop("replace", &current, false).unwrap();
+    while events.try_recv().is_ok() {}
+    assert!(
+        manager
+            .finish_stop("replace", &old, Forced(Ok(())))
+            .is_err()
+    );
+    assert_eq!(
+        manager.get("replace").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+    manager
+        .require_force_owner("replace", &replacement)
+        .unwrap();
+    let result = manager.finish_stop(
+        "replace",
+        &replacement,
+        Forced(Err(EngineError::invalid_state("failed"))),
+    );
+    assert!(result.is_err());
+    assert_eq!(manager.get("replace").unwrap().state, MachineState::Running);
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+}
+
+#[test]
+fn failed_takeover_after_graceful_timeout_reopens_admission() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "timed-out");
+    let graceful = manager.admit_stop("timed-out", &expected, true).unwrap();
+    let force = manager.admit_stop("timed-out", &expected, false).unwrap();
+    while events.try_recv().is_ok() {}
+    let result = manager.finish_stop("timed-out", &graceful, Graceful(Ok(false)));
+    assert!(result.is_err());
+    assert_eq!(
+        manager.get("timed-out").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+    let failure = Forced(Err(EngineError::invalid_state("force failed")));
+    assert!(manager.finish_stop("timed-out", &force, failure).is_err());
+    assert_eq!(
+        manager.get("timed-out").unwrap().state,
+        MachineState::Running
+    );
+    drop(manager.host_hold_expected("timed-out", &expected).unwrap());
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        Event::MachineStopCancelled { .. }
+    ));
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn held_resources_abort_stop_and_removal_before_vm_teardown() {
+    use crate::event::Event;
+    for graceful in [false, true] {
+        let dir = tempdir().unwrap();
+        let bus = crate::event::EventBus::new();
+        let mut events = bus.subscribe();
+        let mut manager = test_machine_manager_with_bus(dir.path(), bus);
+        manager.host_release_timeout = Duration::from_millis(1);
+        let expected = model_running_machine(&manager, "drain");
+        let hold = manager.host_hold_expected("drain", &expected).unwrap();
+        let error = manager
+            .stop("drain", graceful.then_some(Duration::ZERO))
+            .unwrap_err();
+        assert!(error.to_string().contains("did not drain"));
+        assert_eq!(manager.get("drain").unwrap().state, MachineState::Running);
+        assert_eq!(manager.network_incarnation("drain").unwrap(), expected);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopCancelled { .. }
+        ));
+        assert!(events.try_recv().is_err());
+        let error = manager.remove("drain", true).unwrap_err();
+        assert!(error.to_string().contains("did not drain"));
+        assert_eq!(manager.network_incarnation("drain").unwrap(), expected);
+        assert_eq!(manager.get("drain").unwrap().state, MachineState::Running);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopCancelled { .. }
+        ));
+        assert!(events.try_recv().is_err());
+        drop(hold);
+        // The fixture has no initialized hypervisor or vCPU; teardown only updates modeled state.
+        if !graceful {
+            manager.stop("drain", None).unwrap();
+            assert_eq!(manager.get("drain").unwrap().state, MachineState::Stopped);
+        }
+        manager.remove("drain", true).unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopped { .. }
+        ));
+        assert!(!manager.exists("drain"));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineRemoved { .. }
+        ));
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[test]
+fn drain_timeout_retains_the_pending_graceful_owner() {
+    use stop_owner::Completion::Graceful;
+    let dir = tempdir().unwrap();
+    let mut manager = test_machine_manager(dir.path());
+    manager.host_release_timeout = Duration::ZERO;
+    let expected = model_running_machine(&manager, "pending");
+    let hold = manager.host_hold_expected("pending", &expected).unwrap();
+    let graceful = manager.admit_stop("pending", &expected, true).unwrap();
+    let force = manager.admit_stop("pending", &expected, false).unwrap();
+    assert!(
+        manager
+            .await_host_release("pending", Some((&force, false)))
+            .is_err()
+    );
+    assert_eq!(
+        manager.get("pending").unwrap().state,
+        MachineState::Stopping
+    );
+    drop(hold);
+    manager
+        .await_host_release("pending", Some((&graceful, true)))
+        .unwrap();
+    assert!(
+        !manager
+            .finish_stop("pending", &graceful, Graceful(Ok(false)))
+            .unwrap()
+    );
+    manager.require_force_owner("pending", &graceful).unwrap();
+}
+
+#[test]
+fn completed_predecessor_does_not_hide_a_host_drain_timeout() {
+    use stop_owner::Completion::Graceful;
+    let dir = tempdir().unwrap();
+    let mut manager = test_machine_manager(dir.path());
+    manager.host_release_timeout = Duration::ZERO;
+    let expected = model_running_machine(&manager, "completed");
+    let hold = manager.host_hold_expected("completed", &expected).unwrap();
+    let graceful = manager.admit_stop("completed", &expected, true).unwrap();
+    let force = manager.admit_stop("completed", &expected, false).unwrap();
+    let id = manager.get("completed").unwrap().vm_id;
+    manager.force_stop_vm(&id, &expected).unwrap();
+    assert_eq!(
+        manager.vm_manager.get(&id).unwrap().state,
+        MachineState::Stopped
+    );
+    assert!(
+        manager
+            .finish_stop("completed", &graceful, Graceful(Ok(true)))
+            .unwrap()
+    );
+    let error = manager
+        .await_host_release("completed", Some((&force, false)))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        EngineError::Common(arcbox_error::CommonError::Timeout(_))
+    ));
+    assert_eq!(
+        manager.get("completed").unwrap().state,
+        MachineState::Stopped
+    );
+    let error = manager.remove("completed", true).unwrap_err();
+    assert!(matches!(
+        error,
+        EngineError::Common(arcbox_error::CommonError::Timeout(_))
+    ));
+    assert!(manager.vm_manager.get(&id).is_some());
+    assert!(manager.exists("completed"));
+    drop(hold);
+    manager.remove("completed", true).unwrap();
+    assert!(!manager.exists("completed"));
+    assert!(manager.vm_manager.get(&id).is_none());
+}
+
+#[test]
+fn network_publication_reads_the_guarded_record_and_rejects_replacement() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "web");
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("web")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert_eq!(
+        manager
+            .with_network_incarnation("web", &expected, |machine| machine.state)
+            .unwrap(),
+        MachineState::Stopping
+    );
+    let (replacement, _) = manager.vm_manager.modeled_running_vm();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("web")
+        .unwrap()
+        .vm_id = replacement;
+    assert!(
+        manager
+            .with_network_incarnation("web", &expected, |_| panic!("retired run must not publish"))
+            .is_err()
+    );
+}
+
+#[test]
+fn bridge_publication_rejects_stopping_and_replaced_runs_in_memory_and_storage() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "bridge");
+    manager
+        .persistence
+        .save(&manager.get("bridge").unwrap())
+        .unwrap();
+    let original = Some("192.168.64.2".to_owned());
+    let changed = Some("192.168.64.3".to_owned());
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    manager
+        .publish_addresses("bridge", &expected, None, original.as_deref(), &cancelled)
+        .unwrap();
+    let addresses = || {
+        (
+            manager.get("bridge").unwrap().bridge_ip_address,
+            manager
+                .persistence
+                .load("bridge")
+                .unwrap()
+                .bridge_ip_address,
+        )
+    };
+    for state in [MachineState::Stopping, MachineState::Stopped] {
+        manager
+            .machines
+            .write()
+            .unwrap()
+            .get_mut("bridge")
+            .unwrap()
+            .state = state;
+        assert!(
+            manager
+                .publish_addresses("bridge", &expected, None, changed.as_deref(), &cancelled)
+                .is_err()
+        );
+        assert_eq!(addresses(), (original.clone(), original.clone()));
+    }
+    let (replacement, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("bridge").unwrap();
+        machine.state = MachineState::Running;
+        machine.vm_id = replacement;
+    }
+    assert!(
+        manager
+            .publish_addresses("bridge", &expected, None, changed.as_deref(), &cancelled)
+            .is_err()
+    );
+    assert_eq!(addresses(), (original.clone(), original));
+    manager
+        .publish_addresses("bridge", &current, None, changed.as_deref(), &cancelled)
+        .unwrap();
+    assert_eq!(addresses(), (changed.clone(), changed.clone()));
+    cancelled.cancel();
+    assert!(
+        manager
+            .publish_addresses("bridge", &current, None, None, &cancelled)
+            .is_err()
+    );
+    assert_eq!(addresses(), (changed.clone(), changed));
+}
+
+#[tokio::test]
+async fn aborted_bridge_query_retains_hold_until_native_connect_drains() {
+    use std::{io::Read as _, os::fd::IntoRawFd as _, os::unix::net::UnixStream};
+
+    let directory = tempdir().unwrap();
+    let manager = Arc::new(test_machine_manager(directory.path()));
+    let expected = model_running_machine(&manager, "bridge");
+    manager
+        .persistence
+        .save(&manager.get("bridge").unwrap())
+        .unwrap();
+    let hold = manager.host_hold_expected("bridge", &expected).unwrap();
+    let (host, mut guest) = UnixStream::pair().unwrap();
+    guest
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, finish) = std::sync::mpsc::channel();
+    let caller = tokio::spawn(async move {
+        query_bridge_info(
+            hold,
+            &tokio_util::sync::CancellationToken::new(),
+            move || {
+                started.send(()).unwrap();
+                finish.recv().unwrap();
+                crate::agent_client::AgentClient::from_fd_blocking(7, host.into_raw_fd())
+            },
+        )
+        .await
+    });
+    ready.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(!manager.host_holds.wait_released("bridge", Duration::ZERO));
+    release.send(()).unwrap();
+    let drained_manager = Arc::clone(&manager);
+    tokio::task::spawn_blocking(move || {
+        assert!(
+            drained_manager
+                .host_holds
+                .wait_released("bridge", Duration::from_secs(2))
+        );
+        assert_eq!(guest.read(&mut [0; 1]).unwrap(), 0);
+    })
+    .await
+    .unwrap();
+    assert!(manager.get("bridge").unwrap().bridge_ip_address.is_none());
+    assert!(
+        manager
+            .persistence
+            .load("bridge")
+            .unwrap()
+            .bridge_ip_address
+            .is_none()
+    );
+}
+
+#[test]
+fn late_start_cannot_overwrite_restarted_or_stopping_machine() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "start");
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("start").unwrap();
+        machine.state = MachineState::Stopped;
+        machine.ip_address = Some("10.0.0.2".into());
+        machine.bridge_ip_address = Some("192.168.64.2".into());
+    }
+    let original = manager.get("start").unwrap();
+    manager.persistence.save(&original).unwrap();
+    let saved = serde_json::to_value(manager.persistence.load("start").unwrap()).unwrap();
+    let current = manager.vm_manager.model_restarted_vm(&original.vm_id);
+    assert!(manager.publish_running("start", &expected, 99).is_err());
+    let unchanged = manager.get("start").unwrap();
+    assert_eq!(unchanged.state, MachineState::Stopped);
+    assert_eq!(unchanged.cid, original.cid);
+    assert_eq!(unchanged.ip_address, original.ip_address);
+    assert_eq!(unchanged.bridge_ip_address, original.bridge_ip_address);
+    assert_eq!(unchanged.started_at, original.started_at);
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("start")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert!(manager.publish_running("start", &current, 99).is_err());
+    assert_eq!(manager.get("start").unwrap().state, MachineState::Stopping);
+    assert_eq!(
+        serde_json::to_value(manager.persistence.load("start").unwrap()).unwrap(),
+        saved
+    );
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("start")
+        .unwrap()
+        .state = MachineState::Stopped;
+    manager.publish_running("start", &current, 99).unwrap();
+    let running = manager.get("start").unwrap();
+    assert_eq!(running.state, MachineState::Running);
+    assert_eq!(running.cid, Some(99));
+    assert!(running.ip_address.is_none());
+    assert!(running.bridge_ip_address.is_none());
+    let saved = manager.persistence.load("start").unwrap();
+    assert!(saved.state.needs_recovery());
+    assert_eq!(saved.started_at, running.started_at);
+    assert!(saved.ip_address.is_none());
+    assert!(saved.bridge_ip_address.is_none());
+}
+
+#[tokio::test]
+async fn readiness_cannot_probe_or_publish_a_restarted_run() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "ready");
+    manager
+        .persistence
+        .save(&manager.get("ready").unwrap())
+        .unwrap();
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    manager
+        .publish_addresses(
+            "ready",
+            &expected,
+            Some("10.0.0.2"),
+            Some("192.168.64.2"),
+            &cancelled,
+        )
+        .unwrap();
+    let current = manager
+        .vm_manager
+        .model_restarted_vm(&manager.get("ready").unwrap().vm_id);
+    let error = manager
+        .wait_for_machine_ready("ready", &expected)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("incarnation changed"));
+    assert!(manager.host_holds.wait_released("ready", Duration::ZERO));
+    assert!(
+        manager
+            .publish_addresses("ready", &expected, Some("10.0.0.3"), None, &cancelled)
+            .is_err()
+    );
+    let unchanged = manager.get("ready").unwrap();
+    let saved = manager.persistence.load("ready").unwrap();
+    assert_eq!(unchanged.ip_address.as_deref(), Some("10.0.0.2"));
+    assert_eq!(unchanged.bridge_ip_address.as_deref(), Some("192.168.64.2"));
+    assert_eq!(saved.ip_address, unchanged.ip_address);
+    assert_eq!(saved.bridge_ip_address, unchanged.bridge_ip_address);
+    manager
+        .publish_addresses("ready", &current, Some("10.0.0.3"), None, &cancelled)
+        .unwrap();
+    manager
+        .publish_addresses("ready", &current, None, Some("192.168.64.3"), &cancelled)
+        .unwrap();
+    let ready = manager.get("ready").unwrap();
+    let saved = manager.persistence.load("ready").unwrap();
+    assert_eq!(ready.ip_address.as_deref(), Some("10.0.0.3"));
+    assert_eq!(ready.bridge_ip_address.as_deref(), Some("192.168.64.3"));
+    assert_eq!(saved.ip_address, ready.ip_address);
+    assert_eq!(saved.bridge_ip_address, ready.bridge_ip_address);
 }

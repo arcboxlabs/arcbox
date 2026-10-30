@@ -10,26 +10,40 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 
 ## Startup & readiness contract
 
+- `local_https::Status` in `arcbox-core` is the read-only CA inspection shared by CLI and daemon diagnostics. `abctl tls status --json` returns a hand-written DTO with public metadata. Do not infer network reachability from CA trust or invoke native authorization while reading status. `SetupStatus.local_https` is independent of the startup phase.
+- `abctl tls repair` restores only the current profile's public CA file. Repair must not create a key or change trust. Preserve recoverable different certificates and reject ambiguous identities.
+- Hold `tls/operation.lock` for each login-session TLS mutation until native authorization and publication finish. Concurrent commands must not reorder trust changes.
+- `abctl tls rotate` authorizes the pending candidate before revoking the exact previous root. Release the CLI profile lock before either daemon mutation RPC. The TLS worker serializes commands with refreshes, holds the lock through signer and status updates, and completes accepted work after a client disconnects.
+- `SystemService.ListWebServices` and `WatchWebServices` return URLs from the guest's installed routes and current DNS ownership. A nonempty List `hostname` resolves a concrete name, including wildcard claims, and returns at most one owner/address-validated service. Watch always returns the complete directory. Clients must use those URLs rather than derive URLs from exposed or published ports. Only managed HTTPS requires ArcBox CA trust. A failed snapshot ends the stream; clients must clear stale entries. The feature acceptance matrix lives in `docs/local-https.md`.
+- Reject machine routes from System VM snapshots, even when the global DNS Registry has a matching machine claim. Machine route authority must come from its captured guest connection.
+- Retain `arcbox-daemon/src/web_index.rs` through `BackgroundTask`. Refresh the exact guest apex while the System VM is ready. Withdraw on failure, VM change, or shutdown. Cancel and join each refresh before Runtime stops. Drain refresh and withdrawal concurrently because both can require the host commit lock.
+- Signing and browser observation must share Runtime DNS ownership checks. Captured web guests bind authority to the raw machine name and physical run. System guests accept container claims and the validated built-in index. Machine guests accept only their exact canonical claim at the current bridge address while Running. The built-in index requires one current `system:index` claim for the exact configured apex and gateway.
+- Capture machine web configuration under machine, VM, and DNS guards. Include the exact claim revision, canonical hostname, bridge IPv4 address, and complete saved policies. Reopen sessions when the captured identity or claim changes.
+- Retain the machine web producer in `BackgroundTask` through all shutdown paths. Keep machine sources active without the System VM. Hold each captured VM through native connection and coordinator cleanup. Observe identity changes while Open or Ack is pending. Observe the active CA independently of policy changes. Send complete policy and public-root replacements with increasing session revisions. Record the acknowledged snapshot, then resample both sources.
+- Use `arcbox_dns::web_services::WebServiceUrls` to project validated aliases into public URLs. Callers must check current ownership, addresses, and installed routes before projection. Managed HTTPS applies only to `.local` descendants.
+- `runtime/web_services/list.rs` owns List cancellation. Keep the expected host hold through native connection and awaited RPC cleanup. Cancel the query token at its deadline, then await cleanup before releasing the hold.
+- Pass the validated `Domain` into `Runtime` before initialization. Set `NetConfig::dns` at construction. Host DNS and VM boot parameters must use the same immutable default suffix. Validate service URLs against current Registry ownership; custom claims can use other suffixes. Separate managed `.local` aliases from aliases without managed HTTPS in directory entries.
+- Initialize Runtime's DNS Registry with exact host/index reservations and permanent machine/sandbox trees before registering resources. Address loss must not release these reservations. Reject a suffix that conflicts with a built-in host name or cannot fit the reserved names.
+- Validate the sandbox DNS name before Create or Restore dials the guest. Reject invalid IDs before provisioning; preserve the supplied identity without lossy replacement.
+- HTTPS authorization must not block VM or Docker startup. The daemon owns the Keychain identity and reports `SetupStatus.local_https` independently. The daemon disables Keychain UI for its lifetime. Desktop runs `abctl tls trust` only for a deliberate HTTPS action in the login session. The helper stores public certificates and verifies TLS-only Admin trust. Remove legacy User trust during explicit authorization. Revoke the previous root before replacing `tls/ca.pem`; background publication preserves a trusted previous root. CA preparation errors affect HTTPS status, but failure to remove an exposed private key still blocks sharing the data directory. Development profiles and isolated data directories must not change host trust automatically.
+- Register the CA worker independently of Linux VM startup, including in `--no-linux-vm` mode. CA preparation runs in the background and retries after failure. The signing service selects the current published identity when a CSR arrives. Preserve the same authority handle while the root DER is unchanged; reject signatures if that handle changes before delivery.
+- `Runtime::prepare_host` in `runtime/initialization.rs` removes the legacy shared CA key before Machine admission. `Runtime::init_system` handles optional System VM initialization after host preparation. `Runtime::init` runs both stages in order for direct callers. Distro machines share the data directory too. Keep removal failure fatal in VM-host-only mode; background CA preparation does not replace this barrier.
+- Use `guest_workers` for retained guest service joins and machine worker supervision. Keep cancelled machine names occupied until each worker joins. Subscribe before the initial scan and rescan after lagged events.
+- Start TLS signing independently of System VM autostart. Keep System and machine workers independent. Pin each connection to the captured physical VM. Cancel parked sessions on lifecycle changes or rescan. Hold each machine until native connection and signing work join. Recheck guest authority before signing and delivery. Retain the service in `BackgroundTask` through shutdown.
+- The guest trust service starts before System VM boot, including in `--no-linux-vm` mode, and retains its `BackgroundTask` through all shutdown paths. Keep System VM and machine delivery workers independent. Subscribe to the active CA watch. Reconcile by certificate fingerprint and physical VM identity. Unavailable CA state preserves guest trust. Acquire an expected machine host hold only while the machine is `Running`. Cancel and join each request before releasing the hold or replacing the worker. Drain every worker on service failure and shutdown.
+- `MachineStopping` and `MachineStopCancelled` remain internal events. DNS and mounts resync the canonical machine record after stop cancellation.
+- Start browser HTTPS observation before Runtime initialization, including with System VM autostart disabled. Keep System and machine workers independent. Supervise Running distro machines and rescan each second. Observe only while the captured guest is ready and a Desktop client watches an untrusted root. Match exact host source addresses and current DNS ownership. Capture the web guest before reading host addresses. Read the bridge under the canonical machine and physical VM guards. Pin enable and disable requests to that guest. Retain the expected VM hold through native connection and RPC cleanup. Use `with_web_guest_claim` for DNS validation and prompt publication; do not nest VM or DNS guards. Reject cancellation before opening a connection. Cancel on VM changes and join each started connection or observation RPC before disabling its lease or starting another request. Retain the observer in `BackgroundTask`; all three shutdown paths must join the observer before Runtime stops.
 - Startup is a phased, typed pipeline and the order is load-bearing — see
   root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`
-  before reordering. The current chain is 8 steps
+  before reordering. The host chain is 8 steps
   (`prepare_host → acquire_daemon_lease → start_control_plane →
   release_stale_resources → prepare_assets → boot_runtime →
   start_runtime_services → mark_ready`, `arcbox-daemon/src/main.rs`), each
   producing a richer context type so skipping a phase is a compile error
   (`context.rs`). gRPC (`start_control_plane`) must come before the slow
-  boot phases so clients can watch progress.
-- Two runtime handles, do not conflate them (`context.rs`): `shared_runtime`
-  is filled only after full init and gates normal RPCs with `UNAVAILABLE`
-  via `runtime.ready()`; `early_runtime` is filled the moment `Runtime` is
-  constructed, before the VM boots, and is diagnostics-only. WHY: a stuck
-  boot never fills `shared_runtime`, so any RPC needed to debug it must read
-  `early_runtime`. `GetVirtioDebug` is the one such RPC
-  (`arcbox-api/src/system.rs`, `self.early_runtime.ready()`). Never gate a
-  diagnostic on `shared_runtime`; gate on `early_runtime.ready()` instead —
-  `ready()` is the `SharedRuntimeExt` method (`grpc/mod.rs`) that returns
-  `UNAVAILABLE` only while the handle's `OnceLock` is empty, and
-  `early_runtime` fills the moment `Runtime` is constructed.
+  preparation phases so clients can watch progress. Seed bundle assets before host admission; download System assets in the retained System task.
+- Keep three Runtime handles distinct. `early_runtime` serves diagnostics and read-only directories after construction. `host_runtime` admits Machine and macOS guest operations after host preparation and listener startup. `shared_runtime` admits System services after System initialization and endpoint binding. System settings and recovery use host admission. Machine mutations must reject the reserved System name `default`.
+- `SetupStatus.phase` describes host startup. `system_runtime.state` independently reports disabled, preparing, VM boot, agent ready, Docker ready, or failed. Publish host admission and `READY` before starting the retained System task. System failure must preserve the Machine host. Retain System startup in `BackgroundTask` and join it before dependent services on every shutdown path. Await `Runtime::reserve_system_startup` with shutdown cancellation, then hold the reservation through initialization and System readiness publication. Configuration contention must delay System startup rather than fail it. Publish recovery completion only after releasing maintenance and operation guards. Capture the recovery operation ID under the startup reservation. Ignore delayed completion for that operation when waiting to retry startup.
 - `WatchSetupStatus` is the sole readiness/failure signal clients (desktop,
   e2e) may use — never log-grep or sleep. Fatal startup failures MUST call
   `SetupState::set_failed` before exit (200ms flush grace, `main.rs`) so
@@ -47,18 +61,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `docs/daemon-lifecycle.md`, and must be updated with any change. This
   was CORE-67: `VM_STARTING`/`VM_READY`/`NETWORK_READY` sat declared and
   unpublished, leaving the slowest stretch of startup silent.
-- **The VM phases are reported from inside `Runtime::init`, not derived
-  from pipeline order** (`InitProgress` → `SetupPhase` in
-  `startup/mod.rs::init_runtime`). WHY: `boot_runtime` is one stage that
-  stages guest binaries, boots the VM, waits for the agent, then waits for
-  dockerd. Publishing at the stage boundaries would bill the binary
-  download to `VM_STARTING` and make `VM_READY` mean "dockerd answered" —
-  the span ABX-309 budgets would measure the wrong thing. `init` reports
-  `SystemVmStarting` after the binaries are staged and `SystemVmReady` when
-  `vm_lifecycle.ensure_ready` returns (readiness level 2 below); the
-  dockerd wait lands in the `VM_READY → NETWORK_READY` window. `init`
-  reports nothing under `--no-linux-vm`, which is what keeps the VM pair
-  off the wire when no guest boots.
+- Report System VM milestones from `Runtime::init_system` through `SystemRuntimeStatus.State::VmStarting` and `VmReady`. Asset preparation uses `Starting`; host phase must not change during System startup. Preserve the structured guest boot interval in E2E timing checks.
 - **`SetupState` streams every update, not the newest snapshot**
   (`arcbox-api/src/system.rs`: a `watch` for `GetSetupStatus`, a `broadcast`
   for `WatchSetupStatus`). WHY: `NETWORK_READY` and `READY` are published
@@ -73,28 +76,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   into the snapshot, walking a client's phase backwards. Regressions:
   `back_to_back_phases_are_all_delivered`,
   `the_snapshot_is_not_replayed_as_an_update`.
-- **A listener the phase promises is bound before `start_services` returns,
-  never inside its spawned task** (`DnsService::bind_requested` in
-  `start_control_plane`, then `DockerApiServer::bind` + `serve` — CORE-71).
-  WHY: a task that binds and only logs its error cannot fail startup, so the
-  pipeline publishes `NETWORK_READY` and `READY` for a daemon whose primary
-  API no client can reach. `NETWORK_READY` therefore covers whichever
-  services this daemon runs — `--no-linux-vm` reaches it with DNS alone —
-  and the Kubernetes proxy is the deliberate exception: a taken 16443 is
-  tolerated, so it is started here but not promised. Adding a listener means
-  deciding which of those two it is. DNS is promised yet never fails on a
-  taken default: it binds the profile's port (`ArcboxProfile::dns_host_port`,
-  5553 production / 5554 development) and falls back to an OS-allocated one,
-  which self-setup publishes through `/etc/resolver/<domain>` and `abctl dns
-  status` reads back from that file; only an explicit `--dns-port` /
-  `ARCBOX_DNS_PORT` must bind. The DNS socket is bound in
-  `start_control_plane`, right after the lease is held, and served from
-  `start_services` once the runtime's `NetworkManager` exists (`ControlPlane`
-  in `context.rs` carries it across). WHY: both profiles' daemons run on one
-  machine, and a development build that shared 5553 with production
-  crash-looped under launchd for three days, a full VM boot per 5 s cycle,
-  because the bind then sat after `boot_runtime`; a bind failure now costs
-  no boot.
+- Bind promised listeners before publishing their admission. Host startup serves DNS and SSH before Machine admission. System startup binds Docker and Kubernetes endpoints before System admission. Explicit endpoint conflicts fail their owning stage; canonical Kubernetes and SSH ports remain best-effort. Bind DNS in `start_control_plane` before slow preparation and serve it from `start_host_services`.
 - **An unknown name under the local domain is answered NODATA, never
   NXDOMAIN** (`DnsForwarder::try_resolve_locally_or_nodata`). WHY: the
   domain ends in `.local`, which RFC 6762 gives to mDNS, so mDNSResponder
@@ -108,13 +90,14 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   "not ready" answer either. The guest agent's own DNS server
   (`guest/arcbox-agent/src/dns_server.rs`) keeps NXDOMAIN: its clients are
   Linux resolvers, which have no mDNS leg.
-- **The resolver-domain owner also registers its names with mDNSResponder**
-  (`arcbox-daemon/src/mdns/`, started from `recovery::run` under the same
-  `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and
-  only for a domain ending in `.local`). Unicast and Bonjour answer from
-  one table: `NetworkManager::subscribe_dns_changes` streams every
-  `register_dns`/`deregister_dns`/`set_dns_domain` as a `DnsChange`, and
-  `local_dns_entries` is the snapshot a lagging subscriber resyncs from. The
+- Retain resolver publication in `BackgroundTask`, shared through `StartupHandles` and `DaemonContext`. Use the same task owner for services that must finish cleanup before Runtime stops. Shutdown and startup cancellation must join the retained task before stopping Runtime. A cancelled join must leave the task in the shared slot. Recovery separates host resolver publication (`recovery::prepare_host`) from System VM networking and Docker integration (`recovery::run_system`). Container snapshot replay remains in `recovery/container_network.rs`; Docker CLI installation remains in `recovery/docker_tools.rs`.
+- `DnsService` owns its UDP listener. Retain upstream queries in a `JoinSet`; workers must not hold the listener. On shutdown, cancel queued work and join running queries without sending replies. Preserve task panics and listener errors after cleanup. Retain the service in a shared `BackgroundTask`. All three shutdown paths must join DNS before Runtime stops, outside the five-second server drain. Socket regressions live in `dns_service/tests/lifecycle.rs` and `shutdown/tests/dns.rs`.
+- `services/control_plane.rs` starts gRPC and binds DNS before slow runtime preparation. `services/mod.rs` separates host listeners from System listeners. Preserve gRPC-before-DNS ordering so setup watchers can receive a DNS bind failure.
+- Share `control_plane::Calls` through startup and daemon contexts. Close RPC admission before cleanup. Pass the shutdown token through `RequestContext` for cooperative preparation cancellation. Fail pending input with `Unavailable`, not successful EOF. Close operational agent sockets before joining services; normal exit must unmount NFS first. Retain admitted handlers through client disconnects and join handlers before Runtime stops. A handler count does not prove completion of detached native workers or response-stream producers.
+- `arcbox-daemon/src/resolver_service/publication.rs` owns the helper connection, complete resolver lease, authority watch, and mDNS mirror. Before closing the connection, mark DNS authority unavailable, clear setup readiness, then cancel and join the mirror. Reconnect with a fresh transport and the same service nonce.
+- `resolver_service/guest.rs` sends complete authority snapshots for the captured physical VM. Recheck that VM after Open and each acknowledgment. Send only changed authority revisions; retain the coordinator through cancellation and join before reconnecting. Run empty-authority delivery without activating the helper when the daemon does not own host DNS.
+- `arcbox-daemon/src/resolver_service/publication/tests/lifecycle.rs` verifies resolver shutdown, helper disconnection, and reconnects through temporary Unix sockets. Inject the mirror future to verify cleanup ordering without native registration.
+- **The resolver lease owner registers granted concrete `.local` names with mDNSResponder** (`arcbox-daemon/src/mdns/`). Unicast and Bonjour derive ownership from one Registry. Subscribe to `NetworkManager::subscribe_dns_registry` before reading `local_dns_entries`; resync the latest complete projection on each notification. Do not replay record deltas after reading a newer snapshot. Custom `.local` claims participate independently of the configured suffix. The
   records are `kDNSServiceFlagsUnique` on the **loopback interface**
   (`if_nametoindex("lo0")`): nothing leaves the host, and mDNSResponder
   answers a query for a type the name lacks (AAAA for an IPv4 name) at once,
@@ -227,6 +210,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 
 ## Machine root mounts
 
+- Acquire `host_hold_expected` before the first VM-dependent mount operation. Retain the hold through registration and the first unmount attempt. A host-hold timeout must abort machine teardown; see ADR 0009.
 - **A running distro machine's `/` is mounted read-write on the host**, at
   `~/ArcBox/machines/<name>`, under the one host mount root `~/ArcBox` that
   also holds the docker export at `docker/` (`ARCBOX_HOST_MOUNT_DIR` moves
@@ -241,8 +225,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `unmount_machine` are the only entry points and both are idempotent; the
   loop follows the event bus the way `machine_dns` does and re-derives the
   mount set from the machine records, so one pass repairs a lagged receiver.
-- `Event::MachineStopping { name }` is internal: `stop`, `graceful_stop`
-  and `remove` publish it before the VM goes down so the unmount still
+- `Event::MachineStopping { name }` is internal: `stop` and `remove`
+  publish it before the VM goes down so the unmount still
   reaches a live server, and it is not mapped onto the public event stream.
   Daemon shutdown unmounts everything before it stops the machines for the
   same reason. A release can fail (the client still has requests in flight,
@@ -419,10 +403,10 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   loop that found all of this: `ARCBOX_MACHINE_IMAGE_BASE=<dir>` pointing at
   a local `machine-images sync` output (the directory, not its `index.json`),
   and `abctl machine exec` into the machine while `start` is still waiting.
-- **A running machine is published as `<hostname>.arcbox.local` at its
+- **A running machine is published as `<hostname>.machine.arcbox.local` at its
   bridge NIC address** (`arcbox-daemon/src/machine_dns.rs`,
   `arcbox-core/src/runtime/machine_dns.rs`), the System VM as
-  `default.arcbox.local`. The hostname is `machine_hostname(name)` (`_` and
+  `default.machine.arcbox.local`. The hostname is `machine_hostname(name)` (`_` and
   `.` become `-`; `create` refuses a name that cannot become a DNS label),
   the same string the shim gets on the cmdline, so the guest and the Mac
   agree. The loop follows machine events and re-derives the answer from
@@ -436,11 +420,12 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   the Docker host reconciler tears every machine down as a vanished
   container within one interval. The entry goes through
   `Runtime::register_dns`, so the resolver owner's mDNS mirror (above)
-  announces `<hostname>.arcbox.local` on `lo0` like a container's name and
-  withdraws it when the machine stops: `dns-sd -G v4 <hostname>.arcbox.local`
-  shows the record on interface 1 while the machine runs (verified
-  2026-10-04 with a development daemon on an isolated `.local` domain).
-  Regression signature: `dig <name>.arcbox.local` at the daemon's DNS port
+  announces `<hostname>.machine.arcbox.local` on `lo0` like a container's name and
+  withdraws it when the machine stops: `dns-sd -G v4 <hostname>.machine.arcbox.local`
+  must show the record on interface 1 while the machine runs. Publication
+  with the former flat name was verified on 2026-10-04 with an isolated
+  development daemon. The scoped machine name still needs installed validation.
+  Regression signature: `dig <name>.machine.arcbox.local` at the daemon's DNS port
   answers NODATA (NOERROR, no answer) for a running machine whose `inspect`
   shows a bridge address.
 - **`restart_generation` reports departures, not arrivals.** It is bumped on
@@ -462,8 +447,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `DEFAULT_STARTUP_TIMEOUT_SECS = 90` (`mod.rs`) budgets VM boot → agent
   ready; `ContainerRuntimeConfig::startup_timeout_ms = 150_000`
   (`config.rs`) budgets agent ready → dockerd `/_ping`. Residual skew: the
-  guest watch loop (`guest/arcbox-agent/src/agent/linux/rpc.rs`
-  `handle_watch_readiness`) emits `RuntimeFailed` at exactly its own
+  guest watch loop (`guest/arcbox-agent/src/agent/linux/rpc/readiness.rs`
+  `watch`) emits `RuntimeFailed` at exactly its own
   deadline, which equals the host's recv deadline, so the host can drop the
   stream before the failure detail lands (ABX-414).
 - **Clone, export and import act on a stopped machine's `data.img` and
@@ -483,6 +468,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   pulls. A clone or an import gets its own `arcbox.machine_name=` on the
   cmdline, which the guest applies on every boot (`machine_identity`), so
   the source's name never leaks through the overlay's `/etc/hostname`.
+- `MachineService.SetWebPorts` and `Runtime::set_machine_web_ports` save typed machine web policies. Preserve absent request fields through the manager update. Inspect reports saved settings, not installed routes.
 - `MachineManager::set_resources` writes the new CPU/memory to the VM config
   and the persisted record at once; a stopped machine boots with it next, a
   running one keeps its size and the result says `restart_required`. It
@@ -514,9 +500,26 @@ above). When editing either side, keep in lockstep:
 - Both the request path (`ensure_endpoint_verified`) and the host-networking
   reconciler go through the same `reset_if_restarted` so they react to a
   restart through one pool.
+- A malformed `/containers/json` response must fail the query, including a missing or empty container ID.
+  Only a valid empty array permits reconciliation to remove every registered container.
+- Use `arcbox_dns::container::ContainerMetadata` for Docker inspect identity, default aliases, and IPv4 selection.
+- Container CA injection must use `arcbox-local-ca::reconcile_trust_bundle` for owned PEM sections. Keep archive validation and metadata preservation in the Docker adapter.
+- Register container DNS through `Runtime::register_container_dns`. Reject invalid inspect snapshots before changing host state. Preserve previous ownership if post-mutation inspect fails.
+  The primary address is the first valid IPv4 address in network-name order; ignore the deprecated top-level `NetworkSettings.IPAddress`.
+- Cold-start recovery must obtain `guest_query::running_container_snapshot` before publishing DNS or listeners. A failed inspect or mismatched full ID rejects the complete snapshot.
+- `runtime/web_services/index.rs` publishes the index only from an exact guest apex/gateway response for the captured physical VM. Cancel and await refreshes, then withdraw on failure or service exit. Index-only updates must not invalidate Docker snapshots.
+- `runtime/host_network/retirement.rs` retains the published physical VM identity under the host commit lock. Retire the previous VM and its index before publishing from its replacement. Preserve the identity through canceled cleanup and record the replacement before awaiting listener work.
+- The Docker reconciler checks physical identity on every lifecycle notification and timer tick, including while stopped. Bound a complete guest query by `RECONCILE_INTERVAL`; a pending query must not prevent later retirement checks. Retry retirement failures at `RETURN_RETRY`.
+- Runtime shutdown closes host-network admission before storage cleanup. Clear sandbox, Kubernetes, listener, alias, and DNS state under the existing lock order. Cleanup remains callable after admission closes.
+- Start, restart, stop, kill, remove, and rename must capture the ready physical VM before inspecting the requested token. After acquiring Runtime's full-ID lifecycle lock, validate the captured VM and admit the mutation. Hold the lifecycle lock and activity leases through the guest mutation and host publication; release the global commit lock before guest I/O. Preserve the query when rewriting the URI.
+- Network connect and disconnect must use the same canonical lifecycle lock. Replace only `Container` in the request body and preserve other fields. Only an explicit container 404 permits a forced disconnect to remove an orphan endpoint; preserve that request body and skip host publication.
 
 ## Host port forwarding & image pull (`arcbox-docker`)
 
+- Preserve equivalent healthy listeners during refresh. Compare the machine, effective host address, both ports, and protocol. Empty bindings withdraw previous listeners. Retain cancellation and join ownership until cleanup completes; configure `PortForwarder` rules before starting the complete set.
+- Acquire rules before listener slots. Finish retained retirement before taking the next manager from the VMM. Store both managers before awaiting cleanup; remove a slot only after cleanup completes.
+- Pin inbound forwarding to the captured Engine `VmIncarnation`. Reject a different Slot incarnation before reuse, binding, or cleanup. Socket fixtures use the internal forwarding seam; production capture must reject absent or stopped VMs.
+- Serialize shared port writers with the host commit lock. Recheck the captured physical VM after listener awaits. Cleanup must retain the original failure and target only the expected slot.
 - Published container ports are forwarded in userspace: container inspect →
   `parse_port_bindings` → `PortForwarder` binds a host `TcpListener`/`UdpSocket`
   per rule (`virt/arcbox-net/src/port_forward.rs`), reachable via loopback. No
@@ -544,6 +547,10 @@ above). When editing either side, keep in lockstep:
 
 ## Kubernetes LoadBalancer forwarding
 
+- The poller cancels on VM state, Kubernetes hold, or shutdown changes. Await the current connection, listing, and publication before starting another poll. Drain cancellation and listener cleanup together because publication holds the port lock. A listing failure disconnects the client and withdraws stale listeners. Retain the poller in `BackgroundTask`; normal shutdown, interrupted startup, and failed startup must join the poller before Runtime stops.
+
+- Capture the physical `VmIncarnation` before listing Services. Keep the cached client with that incarnation. Apply every listing and its port outcomes only to the captured VM. Cancel through the operation token and await pinned cleanup before retiring the VM.
+
 - k3s runs servicelb (traefik stays disabled), so a LoadBalancer Service gets
   a svclb pod and the node IP, 10.0.2.2, as its ingress. The daemon
   (`arcbox-daemon/src/kubernetes_lb.rs`) polls the agent's
@@ -559,7 +566,7 @@ above). When editing either side, keep in lockstep:
   `Runtime::is_container_owner` rejects; otherwise the Docker host-networking
   reconcile treats it as a vanished container's and closes it.
 - Stop and delete release the hold *before* closing the listeners, and
-  `apply` does nothing without the hold, so a listing that raced a stop cannot
+  `apply` rejects listings without the hold, so a listing that raced a stop cannot
   reopen them. `abctl kubernetes status` prints each port's outcome
   (forwarded, pending, skipped, failed).
 
@@ -583,6 +590,8 @@ above). When editing either side, keep in lockstep:
   handler instead deadlocked `cat big | ssh m cat | slow`.
 
 ## Boot-asset pin (`engine/arcbox-image`)
+
+- `abctl boot --data-dir PATH` selects one root for boot assets and runtime binaries. Apply the override before constructing the boot policy. Packaging must pass this argument when preparing a separate resource directory.
 
 - `assets.lock` is embedded at COMPILE TIME
   (`include_str!("../../../../assets.lock")`, `lockfile.rs`): the daemon

@@ -50,11 +50,14 @@ pub trait SandboxHost: Send + Sync {
     fn deregister_dns(&self, sandbox_id: &str) -> impl Future<Output = ()> + Send;
 
     /// Registers a sandbox's DNS records at `ip`.
+    ///
+    /// # Errors
+    /// Returns an error when the host rejects DNS publication.
     fn register_dns(
         &self,
         sandbox_id: &str,
         ip: std::net::IpAddr,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = arcbox_engine::Result<()>> + Send;
 
     /// Reads the host-state generation without locking it.
     fn host_state_generation(&self) -> impl Future<Output = u64> + Send;
@@ -125,8 +128,12 @@ impl<H: SandboxHost> SandboxHost for std::sync::Arc<H> {
         (**self).deregister_dns(sandbox_id).await;
     }
 
-    async fn register_dns(&self, sandbox_id: &str, ip: std::net::IpAddr) {
-        (**self).register_dns(sandbox_id, ip).await;
+    async fn register_dns(
+        &self,
+        sandbox_id: &str,
+        ip: std::net::IpAddr,
+    ) -> arcbox_engine::Result<()> {
+        (**self).register_dns(sandbox_id, ip).await
     }
 
     async fn host_state_generation(&self) -> u64 {

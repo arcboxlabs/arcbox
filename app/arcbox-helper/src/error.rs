@@ -1,8 +1,6 @@
 //! Structured helper errors on the tarpc wire.
 //!
-//! **Wire stability**: bincode encodes enum variants by index. Append new
-//! variants only at the end. Renaming fields is fine with serde rename; do
-//! not reorder or insert variants in the middle of a released helper major.
+//! JSON encodes variants by name. Unknown variants fail deserialization.
 
 use std::path::Path;
 
@@ -118,6 +116,26 @@ impl HelperError {
         Self::DockerSocketOccupied {
             path: path.as_ref().display().to_string(),
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<security_framework::base::Error> for HelperError {
+    fn from(error: security_framework::base::Error) -> Self {
+        Self::Other(format!("macOS security: {error}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<core_foundation::error::CFError> for HelperError {
+    fn from(error: core_foundation::error::CFError) -> Self {
+        Self::Other(format!("macOS security: {error}"))
+    }
+}
+
+impl From<arcbox_local_ca::Error> for HelperError {
+    fn from(error: arcbox_local_ca::Error) -> Self {
+        Self::Other(error.to_string())
     }
 }
 

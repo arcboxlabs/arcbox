@@ -85,7 +85,37 @@ The restructure plan and its locked decisions live in
     in one. `arcbox-computer-runtime` turns the feature on in its
     dev-dependencies.
 
+## Web service directory
+
+- Directory requests consume a dedicated client and accept a cancellation token on both transports. Cancel and await each request before retiring its owner.
+
+## Kubernetes listing
+
+- `AgentClient::list_kubernetes_load_balancers` consumes the connection and returns the client only after success. Cancel through the supplied token and await completion before retiring the VM. Reuse the returned client for the next poll.
+
+## Guest trust
+
+- `agent_client/guest_trust.rs` sends an explicit current public certificate or removal over a dedicated cancellable connection. Await cancellation before retiring the VM. Match the acknowledged fingerprint and expected VM incarnation before reporting client trust as ready.
+- Machine trust requests must acquire `host_hold_expected` before connecting. Retain the hold until native connection and request workers finish cancellation.
+- Stop and removal must fail before teardown when host holds remain after ten seconds. Drain holds outside the machine registry lock, including stopped-record removal retries. Revalidate the physical run after reacquiring the lock. See ADR 0009.
+
+## Machine settings
+
+- Use the physical run identity returned by `VmManager::start` for distro readiness. Guard Running state, serial drain, addresses, and start events against stopped or replaced runs. Release probe holds before retry sleep.
+- Pin bridge-address queries to one physical VM run. Retain the expected host hold through native connection and RPC cleanup. Reject stopped or replaced runs before updating memory or persistence.
+- Keep machine web backend selection in `machine::MachineWebPorts`. Preserve omitted updates and inherited clone/archive settings. Persist updates before changing the canonical record. Saved policy does not imply installed routes.
+
 ## Durable writes
+
+- `MachineImageManager::pull` accepts a cancellation token. Cancel HTTP reads and lock waits, then await pending file writes before removing staging. Await the pull before releasing its owner; do not cancel by dropping the pull future.
+- `MachineManager::close_agent_connections` permanently closes operational agent admission and interrupts registered sockets. Attach both normal and expected-run clients to the manager's socket scope. End readiness retries when the scope closes. Preserve the direct final-shutdown connection in `VmManager`. The caller must join native connectors and operation workers; scope closure alone does not establish worker completion.
+- Use `agent_client/retained_session.rs` to own dedicated session transport workers. Drop protocol channels before cancellation and worker joins. Keep protocol admission and acknowledgements in each session module.
+- Machine web sessions consume an expected machine connection and fix raw name, canonical hostname, and bridge IPv4 at Open. Replace the full policy with source revisions starting at one and strictly increasing. Validate the exact acknowledgement. Cancel and join before releasing the host hold; configuration acknowledgement does not imply installed routes.
+- Instance authority sessions consume one connected agent client. Retain their coordinator, observe idle failure, then drop the session and join before reconnecting. The coordinator owns admission, sequential acknowledgements, continuous reads, and shutdown of both transport workers.
+- VM listener transfer requires the expected `VmIncarnation`. Capture and validate the physical run under `VmManager.vms`; stopped or replaced runs must fail. The non-default `arcbox-engine/test-support` feature provides identity-only listener fixtures and never creates a live VM.
+- Expected agent and arbitrary-port connections share the VM-entry guard. Hold that guard through the native connection call. Do not acquire a second VM registry lock inside the guarded operation.
+- VM stop and removal require the captured `VmIncarnation`. Validate the expected run before shutdown connection, VMM transfer, and completion publication. An absent VMM during graceful shutdown does not mean the VM has stopped.
+- Use `MachineManager::stop` for graceful shutdown and its forced fallback. Keep one expected run throughout the operation; never recapture by name after graceful shutdown.
 
 New code that atomically replaces a **file** uses
 `common/arcbox-atomic-file` rather than hand-rolling temp-then-rename. It
@@ -109,6 +139,6 @@ deliberate rather than missed:
   the **grandparent** so the directory creation itself is durable — and,
   less obviously, `cleanup_stale_template_markers` reaps leftover temps
   by matching the `TEMPLATE_MARKER_TEMP_PREFIX` (`.tmp-`) *prefix*, which
-  the crate's `.{stem}.{uuid}.tmp` names do not have. Migrate the writer
+  the crate's `.arcbox-{uuid}.tmp` names do not have. Migrate the writer
   and that sweep together or crash recovery silently stops collecting
   its own orphans.

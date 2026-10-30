@@ -665,7 +665,7 @@ exit 0
     /// The udhcpc script only sets the IP address — no default route, no
     /// DNS. Outbound traffic therefore still goes through the uplink, while
     /// the bridge NIC is reachable from the host: for inbound container
-    /// traffic in the System VM, and as `<machine>.arcbox.local` in a distro
+    /// traffic in the System VM, and as `<machine>.machine.arcbox.local` in a distro
     /// machine.
     fn configure_bridge_nic_address(bridge_iface: &str) {
         // Bring up the interface.

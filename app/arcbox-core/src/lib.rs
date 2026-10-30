@@ -25,6 +25,8 @@ pub mod container_backend;
 pub mod error;
 pub mod host_mount;
 #[cfg(target_os = "macos")]
+pub mod local_https;
+#[cfg(target_os = "macos")]
 pub mod macos;
 pub mod migration;
 #[cfg(target_os = "macos")]

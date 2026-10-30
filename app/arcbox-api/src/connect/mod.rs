@@ -24,8 +24,10 @@
 
 mod control;
 mod filesystem;
+mod https_access;
 mod icon;
 mod kubernetes;
+mod local_ca;
 mod machine;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -38,7 +40,9 @@ mod stats;
 mod stream_input;
 mod system;
 mod template;
+mod web_services;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,11 +52,14 @@ use arcbox_core::Runtime;
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use connectrpc::{ConnectError, RequestContext};
 use tokio_stream::{Stream, StreamExt as _};
+use tokio_util::sync::CancellationToken;
 
 pub use control::SandboxServiceImpl;
 pub use filesystem::SandboxFilesystemServiceImpl;
+pub use https_access::HttpsAccess;
 pub use icon::IconServiceImpl;
 pub use kubernetes::KubernetesServiceImpl;
+pub use local_ca::{LocalCaCommand, LocalCaControl};
 pub use machine::MachineServiceImpl;
 #[cfg(target_os = "macos")]
 pub use macos::MacosServiceImpl;
@@ -65,9 +72,8 @@ pub use template::TemplateServiceImpl;
 
 /// Shared handle to a runtime that may not be initialized yet.
 ///
-/// Services are registered before the runtime exists, so each RPC calls
-/// `runtime.ready()`, which answers `Unavailable` while the daemon is still
-/// downloading assets or starting the VM.
+/// Services are registered before Runtime exists. Each RPC calls `ready()` on
+/// its early, host, or System handle and returns `Unavailable` until that handle is filled.
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
 /// Idle interval after which a server stream emits a keepalive frame, so
@@ -145,13 +151,24 @@ impl ConnectRuntimeExt for SharedRuntime {
     }
 }
 
-/// Extension trait for extracting routing metadata from a Connect request.
+/// Routing metadata and daemon shutdown control for a Connect request.
 pub(crate) trait ContextExt {
     /// Returns the target machine name, defaulting to the System VM.
     fn machine_id(&self) -> Result<String, ConnectError>;
 
     /// Returns the System VM for Sandbox V1, rejecting every other machine.
     fn sandbox_machine_id(&self) -> Result<String, ConnectError>;
+
+    /// Reject new work after daemon shutdown begins.
+    fn check_shutdown(&self) -> Result<(), ConnectError>;
+
+    /// Cancel a read or preparation future when daemon shutdown begins.
+    ///
+    /// The future must tolerate cancellation. Native workers must remain awaited.
+    fn until_shutdown<T: Send>(
+        &self,
+        future: impl Future<Output = Result<T, ConnectError>> + Send,
+    ) -> impl Future<Output = Result<T, ConnectError>> + Send;
 }
 
 impl ContextExt for RequestContext {
@@ -181,6 +198,32 @@ impl ContextExt for RequestContext {
             ));
         }
         Ok(machine)
+    }
+
+    fn check_shutdown(&self) -> Result<(), ConnectError> {
+        if self
+            .extensions()
+            .get::<CancellationToken>()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ConnectError::unavailable("daemon is shutting down"));
+        }
+        Ok(())
+    }
+
+    async fn until_shutdown<T: Send>(
+        &self,
+        future: impl Future<Output = Result<T, ConnectError>> + Send,
+    ) -> Result<T, ConnectError> {
+        let Some(shutdown) = self.extensions().get::<CancellationToken>() else {
+            // Direct library calls have no daemon lifecycle signal.
+            return future.await;
+        };
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => Err(ConnectError::unavailable("daemon is shutting down")),
+            result = future => result,
+        }
     }
 }
 
@@ -220,8 +263,12 @@ fn exposed_port(
 /// registration is what decides whether a path is served at all: the router
 /// answers exactly what it was given, and an omission 404s at runtime.
 #[must_use]
-pub fn router(runtime: SharedRuntime) -> connectrpc::Router {
-    let clone = || Arc::clone(&runtime);
+pub fn router(
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
+) -> connectrpc::Router {
+    let clone = || Arc::clone(&system_runtime);
     let sandbox_operations = Arc::new(arcbox_computer::locks::SandboxOperationLocks::default());
     let router = connectrpc::Router::new()
         .add_service(Arc::new(SandboxServiceImpl::new(
@@ -246,26 +293,56 @@ pub fn router(runtime: SharedRuntime) -> connectrpc::Router {
         .add_service(Arc::new(StatsServiceImpl::new(clone())))
         .add_service(Arc::new(KubernetesServiceImpl::new(clone())))
         .add_service(Arc::new(MigrationServiceImpl::new(clone())))
-        .add_service(Arc::new(MachineServiceImpl::new(clone())));
+        .add_service(Arc::new(MachineServiceImpl::new(
+            Arc::clone(&host_runtime),
+            early_runtime,
+        )));
     #[cfg(target_os = "macos")]
-    let router = router.add_service(Arc::new(MacosServiceImpl::new(clone())));
+    let router = router.add_service(Arc::new(MacosServiceImpl::new(host_runtime)));
     router
 }
 
-/// Registers the services plus the ones needing extra state the router
-/// helper above cannot reach.
-///
-/// `SystemService` is separate because it also observes the setup state and
-/// the early runtime handle — it must answer while `shared_runtime` is still
-/// empty, which is the whole point of a diagnostics RPC.
+/// Registers every service, including SystemService with its setup state.
 #[must_use]
-pub fn router_with_system(runtime: SharedRuntime, system: SystemServiceImpl) -> connectrpc::Router {
-    router(runtime).add_service(Arc::new(system))
+pub fn router_with_system(
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
+    system: SystemServiceImpl,
+) -> connectrpc::Router {
+    router(system_runtime, host_runtime, early_runtime).add_service(Arc::new(system))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_rejects_work_before_polling_and_preserves_direct_calls() {
+        let mut context = RequestContext::new(Default::default());
+        context.check_shutdown().unwrap();
+        let error = context
+            .until_shutdown(async { Err::<(), _>(ConnectError::not_found("missing image")) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::NotFound);
+
+        let shutdown = CancellationToken::new();
+        context.extensions_mut().insert(shutdown.clone());
+        context.check_shutdown().unwrap();
+        shutdown.cancel();
+        assert_eq!(
+            context.check_shutdown().unwrap_err().code,
+            connectrpc::ErrorCode::Unavailable
+        );
+        let error = context
+            .until_shutdown::<()>(std::future::poll_fn(|_| {
+                panic!("shutdown must reject the operation before its first poll")
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+    }
 
     pub(super) fn storage_runtime() -> (std::path::PathBuf, SharedRuntime) {
         let directory = std::env::temp_dir().join(format!(
@@ -281,6 +358,62 @@ mod tests {
             .unwrap(),
         );
         (directory, Arc::new(OnceLock::from(runtime)))
+    }
+
+    #[tokio::test]
+    async fn sandbox_creation_and_restore_reject_invalid_dns_ids_before_guest_access() {
+        use arcbox_connect::sandbox_v1::{
+            CreateSandboxRequest, RestoreRequest, SandboxService as _, SandboxSnapshotService as _,
+        };
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+
+        let (directory, shared) = storage_runtime();
+        let create = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
+        let restore = snapshot::SandboxSnapshotServiceImpl::new(shared, Arc::default());
+        for id in [
+            "under_score",
+            "-leading",
+            "trailing-",
+            "two.labels",
+            &"x".repeat(64),
+        ] {
+            let bytes = bytes::Bytes::from(
+                CreateSandboxRequest {
+                    id: id.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            let view = CreateSandboxRequest::decode_view(&bytes).unwrap();
+            let error = create
+                .create(
+                    RequestContext::new(Default::default()),
+                    connectrpc::ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument, "{id}");
+            let bytes = bytes::Bytes::from(
+                RestoreRequest {
+                    id: id.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            let view = RestoreRequest::decode_view(&bytes).unwrap();
+            let error = restore
+                .restore(
+                    RequestContext::new(Default::default()),
+                    connectrpc::ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument, "{id}");
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

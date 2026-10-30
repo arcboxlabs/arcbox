@@ -12,6 +12,12 @@ use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
 mod exec_error;
+#[cfg(target_os = "linux")]
+mod guest_trust;
+mod instance_authority;
+mod machine_web;
+#[cfg(all(test, target_os = "linux"))]
+pub use linux::rpc::instance_authority_tests::AuthorityPeer;
 #[cfg(any(target_os = "linux", test))]
 mod login_session;
 #[cfg(any(target_os = "linux", test))]
@@ -75,10 +81,53 @@ impl Guest {
     }
 }
 
+/// Runtime services shared across agent connections; only the System VM owns DNS authority.
+#[derive(Clone, Default)]
+pub struct Services {
+    web: crate::domains::WebServices,
+    authority: Option<instance_authority::Receiver>,
+    machine_web: Option<machine_web::Receiver>,
+    #[cfg(target_os = "linux")]
+    trust: Option<guest_trust::Store>,
+    dns: Option<std::sync::Arc<crate::dns_server::GuestDnsServer>>,
+}
+
+impl Services {
+    /// Creates machine RPC services without System VM DNS or Docker watchers.
+    pub fn machine() -> Self {
+        let registry = crate::dns_server::DnsRegistry::default();
+        let web = crate::domains::WebServices::new(registry.clone());
+        Self {
+            machine_web: Some(machine_web::Receiver::new(registry, web.clone())),
+            web,
+            #[cfg(target_os = "linux")]
+            trust: Some(guest_trust::Store::machine("/".into())),
+            ..Self::default()
+        }
+    }
+
+    /// Connects System VM services to the DNS registry used by container routing.
+    pub fn system(
+        web: crate::domains::WebServices,
+        dns: std::sync::Arc<crate::dns_server::GuestDnsServer>,
+    ) -> Self {
+        Self {
+            web,
+            authority: Some(instance_authority::Receiver::new(dns.registry())),
+            dns: Some(dns),
+            machine_web: None,
+            #[cfg(target_os = "linux")]
+            trust: Some(guest_trust::Store::new(
+                "/etc/ssl/certs/ca-certificates.crt".into(),
+            )),
+        }
+    }
+}
+
 /// Runs the agent for `guest`.
-pub async fn run(guest: Guest) -> Result<()> {
+pub async fn run(guest: Guest, services: Services) -> Result<()> {
     let agent = Agent::new();
-    agent.run(guest).await
+    agent.run(guest, services).await
 }
 
 #[cfg(test)]

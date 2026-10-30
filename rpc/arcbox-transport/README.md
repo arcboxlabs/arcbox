@@ -37,6 +37,8 @@ Use `VsockTransport` for framed ArcBox RPC traffic. Use `VsockStream` when a
 caller already owns a connected fd and needs a transparent `AsyncRead +
 AsyncWrite` byte stream, such as HTTP proxying or bidirectional tunnels.
 
+Use `vsock::read_framed` when an RPC decoder owns an async stream. The shared reader returns the length prefix and payload, rejects frames above 16 MiB before allocation, and never reads beyond the declared frame.
+
 ```rust
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
 use std::os::fd::OwnedFd;
@@ -77,9 +79,17 @@ fn wrap_attach_channel(fd: OwnedFd) -> std::io::Result<HalfCloseStream<VsockStre
 Both peers must agree on the framing; the guest agent's Docker API proxy speaks
 it from agent protocol v5 (v4 had the half-close without the window).
 
-## Blocking Transport Cancellation
+## Transport Cancellation
+
+Use `vsock::SocketScope` to interrupt a group of dedicated guest connections. Register either transport with `with_scope(&scope)`. `SocketScope::close()` rejects new registrations and shuts down every live socket, including split transports. An unconnected async transport retains the scope and checks it before connecting and when registering the connected socket. Closing the scope does not join workers; callers must still await their cleanup.
+
+The scope holds weak references to socket leases. Dropping or closing a transport releases its lease, so retaining an open scope does not delay EOF. Both blocking halves share the lease; asynchronous halves retain the lease through their shared stream.
 
 `BlockingVsockTransport::shutdown_handle()` returns an owned `BlockingVsockShutdown` handle. Dropping the handle shuts down the connected socket and interrupts pending blocking I/O. Retain the handle for the full lifetime of a cancellable operation; aborting a `spawn_blocking` task alone does not interrupt the task's I/O.
+
+Use `BlockingVsockTransport::into_split()` for full-duplex blocking RPCs. Move the returned sender and receiver to separate workers. The sender uses a deadline per write; the receiver waits without an idle deadline and continues reading while the sender is idle. Obtain the shutdown handle before splitting, then drop the handle and join both workers when the connection ends. Both halves share the existing framing and 16 MiB receive bound.
+
+After the blocking worker completes, call `BlockingVsockShutdown::disarm()` to reuse the original connection. The method releases the duplicate descriptor without shutting down the socket.
 
 ## Port Notes
 

@@ -60,6 +60,8 @@ curl http://localhost:8080
 
 Run `abctl doctor` to check the runtime, and `abctl --help` to see every command.
 
+Desktop stops the selected daemon before a helper update. For CLI-only updates, keep that daemon stopped during installation; see the [helper installation requirements](docs/helper.md).
+
 ## Containers
 
 ArcBox is a drop-in Docker engine. It exposes a Docker-compatible socket and
@@ -253,11 +255,12 @@ when it is missing. Clone and export refuse a running machine: its data disk
 is a btrfs volume mounted read-write in the guest, so stop it first.
 
 A machine is its name: the guest's hostname is the machine name, and while it
-runs the Mac reaches it as `<name>.arcbox.local` (`ssh user@dev.arcbox.local`,
-`curl http://dev.arcbox.local:3000`). `_` and `.` in a name become `-` in the
+runs the Mac reaches it as `<name>.machine.arcbox.local` (`ssh user@dev.machine.arcbox.local`,
+`curl http://dev.machine.arcbox.local:3000`). `_` and `.` in a name become `-` in the
 hostname (`my_box.v2` answers as `my-box-v2`); what is left must be a DNS label
 of up to 63 letters, digits and hyphens. The System VM behind `docker` is
-`default.arcbox.local`.
+`default.machine.arcbox.local`. Sandboxes use `<id>.sandbox.arcbox.local`.
+The `machine` and `sandbox` trees stay reserved when a resource stops; container aliases cannot claim these names.
 
 ## macOS guests
 
@@ -303,15 +306,33 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
 - **A userspace network datapath on macOS**: DHCP, DNS forwarding, NAT and
   connection tracking, batched socket I/O, and userspace TCP termination that
   splices guest flows onto real host sockets — no `pf` NAT and no `utun` device.
-  Containers are reachable by IP, and `abctl dns install` adds
-  `*.arcbox.local` name resolution: `http://<container>.arcbox.local` reaches
+  Containers are reachable by IP, and the daemon leases
+  `*.arcbox.local` name resolution through the helper: `http://<container>.arcbox.local` reaches
   whatever port the container serves (or its `dev.arcbox.http-port` label),
-  and `https://` works too once `abctl tls trust` has trusted the local,
-  name-constrained CA. Guest DNS follows the Mac's resolvers as
+  and `https://` works on port 443 after macOS authorizes the local CA.
+  Native HTTPS on 443 or 8443 keeps the application's certificate; discovery supports HTTP/1.1 and HTTP/2.
+  Managed HTTPS forwards HTTP/1.1 with `X-Forwarded-Proto: https`, including streaming responses and WebSocket upgrades.
+  Containers start without HTTPS trust. Enable local HTTPS in Desktop settings
+  or run `abctl tls trust` from your login session. ArcBox reuses the trusted
+  CA on later launches. The helper stores the name-constrained public CA in
+  the System Keychain. The private key stays in the user's Keychain;
+  the host signs guest-generated certificate requests. Helper installation
+  and certificate trust require separate administrator authorization.
+  The host verifies container DNS ownership before and after each signature.
+  Run `abctl tls status --json` to inspect trust, certificate lifetime, and the public CA fingerprint without changing trust. The certificate state distinguishes expiry, renewal within 30 days, and a Mac clock before the certificate's validity period.
+  `abctl doctor` includes the daemon's CA status and repair guidance. Optional HTTPS warnings do not fail the runtime health report or request authorization.
+  Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
+  Run `abctl tls repair` to restore a missing or damaged public CA file from the current Keychain identity without changing trust. Repair preserves different certificates and rejects ambiguous identities.
+  Run `abctl tls rotate` to replace the root through native authorization. New roots cover `.local` DNS names; existing roots retain their narrower scope until rotation. See [local HTTPS](docs/local-https.md) for domain support and security boundaries.
+  Run `abctl tls untrust` to revoke every root retained for this profile, including an interrupted rotation.
+  The System VM receives the current public root automatically after startup and root replacement. CA preparation failures preserve its installed root.
+  Open `http://arcbox.local` for the browser index of current service URLs. The index also supports managed HTTPS after CA authorization. See the [acceptance matrix](docs/local-https.md#completion-requirements) for validation status.
+  Guest DNS follows the Mac's resolvers as
   they change (Wi-Fi switch, VPN up or down), and guest egress follows the
   Mac's proxy settings by default; `proxy = "none"` or a proxy URL under
   `[network]` in `~/.config/arcbox/config.toml` overrides that, with
   `proxy_exclude` for hosts that stay direct.
+  Host DNS forwarding workers do not retain the listening port after the DNS service ends.
 - **VirtioFS/FUSE filesystem sharing**, an NFSv4 export for `~/ArcBox/docker`, and a
   vsock guest agent that speaks protobuf.
 - **x86 translation through FEX**, so `linux/amd64` images run on Apple Silicon.

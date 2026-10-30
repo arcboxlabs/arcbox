@@ -132,7 +132,7 @@ Key fields:
 
 | Field | Semantics |
 |---|---|
-| `id` | caller-supplied for durable retry idempotency; empty → a fresh UUID on every attempt |
+| `id` | caller-supplied for durable retry idempotency; 1–63 ASCII letters, digits, or hyphens, with no leading/trailing hyphen; empty → a fresh UUID on every attempt |
 | `limits.vcpus` / `limits.memory_mib` | 0 → daemon defaults (1 vCPU, 512 MiB) |
 | `template` | opaque reference to what boots — see **Templates** below |
 | `cmd`, `env`, `working_dir`, `user` | initial workload launched automatically once ready; exit returns the sandbox to `READY` with an `IDLE` event |
@@ -315,7 +315,7 @@ configuration.
   resumed after the snapshot, so the checkpoint and disk can never
   diverge. Port exposures are dropped with the released network.
 - `Resume{id}`: restores the checkpoint against the retained overlay in a
-  fresh microVM with a **fresh IP** (the `sandbox-id.arcbox.local` DNS
+  fresh microVM with a **fresh IP** (the `sandbox-id.sandbox.arcbox.local` DNS
   name follows it), then returns once `READY`. `Resume` on a
   `READY`/`RUNNING` sandbox is a no-op; re-expose ports as needed. The
   internal pause checkpoint is deleted on a successful resume.

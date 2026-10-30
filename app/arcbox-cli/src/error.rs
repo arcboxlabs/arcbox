@@ -1,6 +1,7 @@
 //! User-facing CLI error context.
 
 use std::fmt;
+use std::process::ExitCode;
 
 use anyhow::Error;
 use connectrpc::{ConnectError, ErrorCode};
@@ -210,6 +211,9 @@ fn connection_lost(error: &ConnectError) -> bool {
 pub fn render(error: &Error, debug: bool) -> String {
     if debug {
         format!("Error: {error:?}")
+    } else if ca_authorization_canceled(error) {
+        "Error: macOS CA authorization was canceled. Retry the command and approve the macOS prompt."
+            .to_owned()
     } else if let Some(actionable) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ActionableError>())
@@ -220,9 +224,55 @@ pub fn render(error: &Error, debug: bool) -> String {
     }
 }
 
+/// Returns 130 for canceled native CA authorization and 1 for other failures.
+pub fn exit_code(error: &Error) -> ExitCode {
+    if ca_authorization_canceled(error) {
+        ExitCode::from(130)
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ca_authorization_canceled(error: &Error) -> bool {
+    error.chain().any(
+        |cause| match cause.downcast_ref::<arcbox_local_ca::Error>() {
+            Some(arcbox_local_ca::Error::Keychain(source)) => {
+                // Security.framework: errSecUserCanceled and errAuthorizationCanceled.
+                matches!(source.code(), -128 | -60006)
+            }
+            _ => false,
+        },
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ca_authorization_canceled(_error: &Error) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_ca_cancellation_has_a_stable_exit_code_and_keeps_its_source() {
+        for code in [-128, -60006] {
+            let error = Error::new(arcbox_local_ca::Error::Keychain(code.into()))
+                .context("authorizing system HTTPS trust");
+            assert_eq!(exit_code(&error), ExitCode::from(130));
+            assert!(render(&error, false).contains("Retry the command"));
+            assert!(render(&error, true).contains("authorizing system HTTPS trust"));
+            assert!(matches!(
+                error.downcast_ref::<arcbox_local_ca::Error>(),
+                Some(arcbox_local_ca::Error::Keychain(source)) if source.code() == code
+            ));
+        }
+        let denied = Error::new(arcbox_local_ca::Error::Keychain((-60007).into()));
+        assert_eq!(exit_code(&denied), ExitCode::FAILURE);
+        assert_eq!(exit_code(&Error::msg("canceled (-128)")), ExitCode::FAILURE);
+    }
 
     #[test]
     fn resource_errors_are_actionable_and_keep_debug_context() {

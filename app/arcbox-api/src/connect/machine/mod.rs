@@ -1,7 +1,11 @@
 //! Machine service gRPC implementation.
 
+#[cfg(test)]
+mod directory_tests;
 mod rootfs;
 mod transfer;
+#[cfg(test)]
+mod web_ports_tests;
 
 use arcbox_connect::v1 as pb;
 use arcbox_connect::v1::machine_exec_input;
@@ -15,7 +19,7 @@ use crate::error::ApiError;
 
 use super::{SharedRuntime, stream_input};
 
-use super::ConnectRuntimeExt as _;
+use super::{ConnectRuntimeExt as _, ContextExt as _, DEFAULT_MACHINE_NAME};
 
 /// The NAT gateway every machine's primary interface routes through; it also
 /// serves DNS (same literal the guest agent's DHCP path documents).
@@ -41,16 +45,29 @@ fn refusal<E: std::fmt::Display + Into<ApiError>>(error: E) -> ConnectError {
     connect
 }
 
+fn require_user_machine(name: &str) -> Result<(), ConnectError> {
+    if name == DEFAULT_MACHINE_NAME {
+        return Err(ConnectError::invalid_argument(
+            "default is reserved for the System VM; use SystemService controls",
+        ));
+    }
+    Ok(())
+}
+
 /// Machine service implementation.
 pub struct MachineServiceImpl {
     runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
 }
 
 impl MachineServiceImpl {
-    /// Creates a new machine service with a deferred runtime.
+    /// Uses the early handle for directory reads and the prepared host handle for operations.
     #[must_use]
-    pub fn new(runtime: SharedRuntime) -> Self {
-        Self { runtime }
+    pub fn new(runtime: SharedRuntime, early_runtime: SharedRuntime) -> Self {
+        Self {
+            runtime,
+            early_runtime,
+        }
     }
 }
 
@@ -63,11 +80,12 @@ impl MachineServiceImpl {
 impl pb::MachineService for MachineServiceImpl {
     async fn create(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::CreateMachineRequest>,
     ) -> ServiceResult<pb::CreateMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready_for_write(&req.name)?;
+        require_user_machine(&req.name)?;
 
         // Convert bytes to MB for internal config.
         let memory_mb = req.memory / (1024 * 1024);
@@ -78,11 +96,12 @@ impl pb::MachineService for MachineServiceImpl {
         let rootfs = if req.distro.is_empty() {
             None
         } else {
-            let image =
-                rootfs::pull_image(runtime, &req.name, &req.distro, &req.version, &req.arch)
-                    .await?;
+            ctx.check_shutdown()?;
+            let image = rootfs::pull_image(runtime, &ctx, &req).await?;
+            ctx.check_shutdown()?;
             Some(rootfs::rootfs_for(runtime, &image).await?)
         };
+        ctx.check_shutdown()?;
 
         let config = arcbox_core::machine::MachineConfig {
             name: req.name.clone(),
@@ -128,6 +147,7 @@ impl pb::MachineService for MachineServiceImpl {
             backend: arcbox_core::VmBackend::default(),
             enable_rosetta: false,
             nested_virt: false,
+            web_ports: Default::default(),
         };
 
         runtime
@@ -149,6 +169,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let id = request.to_owned_message().id;
         let runtime = self.runtime.ready_for_write(&id)?;
+        require_user_machine(&id)?;
 
         runtime
             .machine_manager()
@@ -166,6 +187,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
+        require_user_machine(&req.id)?;
         let manager = std::sync::Arc::clone(runtime.machine_manager());
 
         // Graceful stop (guest ACPI) with a force fallback, unless the caller
@@ -175,22 +197,14 @@ impl pb::MachineService for MachineServiceImpl {
         let force = req.force;
         let id = req.id;
         tokio::task::spawn_blocking(move || {
-            if force {
-                return manager.stop(&id);
-            }
-            match manager.graceful_stop(
+            manager.stop(
                 &id,
-                std::time::Duration::from_secs(
-                    arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
-                ),
-            ) {
-                Ok(true) => Ok(()),
-                Ok(false) => {
-                    tracing::warn!(machine = %id, "graceful stop timed out; force stopping");
-                    manager.stop(&id)
-                }
-                Err(e) => Err(e),
-            }
+                (!force).then(|| {
+                    std::time::Duration::from_secs(
+                        arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                    )
+                }),
+            )
         })
         .await
         .map_err(|e| ConnectError::internal(format!("stop task panicked: {e}")))?
@@ -206,6 +220,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready_for_write(&req.id)?;
+        require_user_machine(&req.id)?;
         let manager = std::sync::Arc::clone(runtime.machine_manager());
 
         // A forced removal stops a running machine first: a synchronous VM
@@ -226,6 +241,7 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::CloneMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
+        require_user_machine(&req.name)?;
         let id = runtime
             .machine_manager()
             .clone_machine(&req.id, &req.name)
@@ -246,14 +262,14 @@ impl pb::MachineService for MachineServiceImpl {
         Response::ok(transfer::export(runtime, req.id, req.path).await?)
     }
 
-    async fn import(
+    async fn import_machine(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, pb::ImportMachineRequest>,
     ) -> ServiceResult<pb::ImportMachineResponse> {
         let req = request.to_owned_message();
         let runtime = self.runtime.ready()?;
-        Response::ok(transfer::import(runtime, req).await?)
+        Response::ok(transfer::import(runtime, &ctx, req).await?)
     }
 
     async fn set_resources(
@@ -276,6 +292,34 @@ impl pb::MachineService for MachineServiceImpl {
         })
     }
 
+    async fn set_web_ports(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::SetMachineWebPortsRequest>,
+    ) -> ServiceResult<pb::MachineWebPorts> {
+        use arcbox_core::machine::WebPortPolicy;
+
+        let req = request.to_owned_message();
+        let http_port = req
+            .http_port
+            .as_option()
+            .map(WebPortPolicy::try_from)
+            .transpose()
+            .map_err(refusal)?;
+        let https_port = req
+            .https_port
+            .as_option()
+            .map(WebPortPolicy::try_from)
+            .transpose()
+            .map_err(refusal)?;
+        let saved = self
+            .runtime
+            .ready_for_write(&req.id)?
+            .set_machine_web_ports(&req.id, http_port, https_port)
+            .map_err(refusal)?;
+        Response::ok(saved.into())
+    }
+
     async fn set_default(
         &self,
         _ctx: RequestContext,
@@ -294,7 +338,7 @@ impl pb::MachineService for MachineServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::ListMachinesRequest>,
     ) -> ServiceResult<pb::ListMachinesResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.early_runtime.ready()?;
 
         let summaries: Vec<pb::MachineSummary> = runtime
             .machine_manager()
@@ -328,7 +372,7 @@ impl pb::MachineService for MachineServiceImpl {
         request: ServiceRequest<'_, pb::InspectMachineRequest>,
     ) -> ServiceResult<pb::MachineInfo> {
         let id = request.to_owned_message().id;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.early_runtime.ready()?;
 
         let machine = runtime
             .machine_manager()
@@ -396,6 +440,7 @@ impl pb::MachineService for MachineServiceImpl {
                 ..Default::default()
             }
             .into(),
+            web_ports: pb::MachineWebPorts::from(machine.web_ports).into(),
             created: timestamp(machine.created_at).into(),
             started_at: machine.started_at.map(timestamp).into(),
             mounts: machine
@@ -609,7 +654,7 @@ impl pb::MachineService for MachineServiceImpl {
         use tokio::sync::broadcast::error::RecvError;
 
         let req = request.to_owned_message();
-        let mut rx = self.runtime.ready()?.event_bus().subscribe();
+        let mut rx = self.early_runtime.ready()?.event_bus().subscribe();
 
         let stream = async_stream::stream! {
             loop {
@@ -700,6 +745,12 @@ mod tests {
             assert_eq!(mapped.name, "m");
             assert_eq!(mapped.action, action);
         }
+    }
+
+    #[test]
+    fn stop_admission_and_cancellation_remain_internal() {
+        assert!(to_machine_event(&Event::MachineStopping { name: "m".into() }).is_none());
+        assert!(to_machine_event(&Event::MachineStopCancelled { name: "m".into() }).is_none());
     }
 
     #[test]

@@ -25,7 +25,6 @@ uuid = { workspace = true }
 tokio-util = "0.7"
 lz4_flex = "0.11"
 libc.workspace = true
-arcbox-dns = { workspace = true }
 arcbox-hv = { workspace = true }
 vm-memory = { version = "0.17", features = ["backend-mmap"] }
 linux-loader = { version = "0.13", features = ["elf", "pe"] }

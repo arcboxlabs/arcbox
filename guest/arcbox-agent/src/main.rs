@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod agent;
@@ -98,9 +98,6 @@ mod config;
 mod sandbox;
 #[cfg(target_os = "linux")]
 mod sandbox_cleanup_watch;
-
-// DNS: legacy /etc/hosts management (being replaced by dns_server).
-mod dns;
 
 // Guest-side DNS server and Docker event-driven container registration.
 mod dns_server;
@@ -253,7 +250,7 @@ async fn main() -> Result<()> {
         init::verify_critical_mounts().map_err(anyhow::Error::msg)?;
         // Tokio owns every recovery child. A waitpid(-1) reaper can consume
         // a checker's exit status before its Child::wait observes the result.
-        return agent::run(guest).await;
+        return agent::run(guest, agent::Services::default()).await;
     }
 
     // `arcbox-agent init` is the one-shot system-init entry that busybox init's
@@ -295,13 +292,26 @@ async fn main() -> Result<()> {
 
     tracing::info!(?guest, "ArcBox agent starting...");
     if guest != agent::Guest::SystemVm {
-        return agent::run(guest).await;
+        let services = if guest == agent::Guest::DistroMachine {
+            agent::Services::machine()
+        } else {
+            agent::Services::default()
+        };
+        return agent::run(guest, services).await;
     }
 
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .context("reading the System VM kernel command line")?;
+    let domain = arcbox_constants::dns::Domain::from_kernel_cmdline(&cmdline)
+        .map_err(anyhow::Error::msg)
+        .context("parsing the System VM DNS domain")?;
+    let network =
+        arcbox_constants::container_network::ContainerNetwork::from_kernel_cmdline(&cmdline)
+            .context("parsing the System VM container network")?;
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Start the guest DNS server (0.0.0.0:53).
-    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(cancel.clone()));
+    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(domain, cancel.clone())?);
     let dns_handle = {
         let dns = Arc::clone(&dns);
         tokio::spawn(async move {
@@ -313,7 +323,8 @@ async fn main() -> Result<()> {
 
     // Container domains: routes each container's ports 80 and 443 to what
     // it serves, sweeping a previous agent's rules before it follows anyone.
-    let (domains, domains_handle) = domains::DomainRoutes::spawn(cancel.clone());
+    let (domains, domains_handle) = domains::DomainRoutes::spawn(&dns, network, cancel.clone());
+    let services = agent::Services::system(domains.services(), dns.clone());
 
     // Start Docker event listener for auto-registering container DNS,
     // mirroring host-address-pinned publishes, and following containers for
@@ -354,17 +365,26 @@ async fn main() -> Result<()> {
     let ssh_auth_handle = tokio::spawn(ssh_auth::run_ssh_auth_relay(cancel.clone()));
 
     // Run the agent (vsock listener + RPC handler).
-    let result = agent::run(guest).await;
+    let result = agent::run(guest, services).await;
 
     // Shut down background tasks.
     cancel.cancel();
-    let _ = tokio::join!(dns_handle, docker_handle, domains_handle);
+    let (_, _, domains_result) = tokio::join!(dns_handle, docker_handle, domains_handle);
     #[cfg(target_os = "linux")]
     let _ = nfs_handle.await;
     #[cfg(target_os = "linux")]
     let _ = ssh_auth_handle.await;
 
-    result
+    let domains_result = domains_result
+        .context("joining container domain task")
+        .and_then(std::convert::identity);
+    match (result, domains_result) {
+        (Ok(()), domains_result) => domains_result,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("container domain task: {cleanup:#}")))
+        }
+    }
 }
 
 /// The NIC the host relay's traffic reaches the guest on; `eth0` when the

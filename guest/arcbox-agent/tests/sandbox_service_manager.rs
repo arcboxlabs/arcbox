@@ -81,7 +81,15 @@ async fn cleanup_sandbox(service: &SandboxService, sandbox_id: &str) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires kvm, firecracker assets, and root privileges"]
 async fn sandbox_service_calls_sandbox_manager() {
-    let service = SandboxService::new(test_config()).expect("failed to initialize sandbox service");
+    let dns = std::sync::Arc::new(
+        arcbox_agent::dns_server::GuestDnsServer::new(
+            Default::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+    let service =
+        SandboxService::new(test_config(), dns).expect("failed to initialize sandbox service");
 
     // Empty template = the built-in busybox image.
     let create_req = CreateSandboxRequest {

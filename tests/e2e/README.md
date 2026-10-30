@@ -16,7 +16,7 @@ macOS virtualization support (plus a local Docker CLI for the daemon-level test)
   for HV/VZ; only bridged vmnet needs Developer ID).
 - `daemon::DaemonHandle` — spawns a signed `arcbox-daemon` under an isolated
   `--data-dir` and waits for readiness on the daemon's `WatchSetupStatus` gRPC
-  stream, failing fast on a FAILED phase or daemon exit (with the log tail).
+  stream. Docker scenarios require both host `READY` and System runtime `READY`; either startup failure ends the wait with its reported cause. Only an explicit `--no-linux-vm` harness accepts System runtime `DISABLED`. Storage fault scenarios use `wait_storage_startup` and assert protection after the System startup attempt finishes. Daemon exit includes the log tail.
   Drop terminates the daemon gracefully (SIGTERM, then SIGKILL). The isolated
   data dir means tests never touch `~/.arcbox` and can run alongside a
   developer's daemon.
@@ -25,6 +25,8 @@ macOS virtualization support (plus a local Docker CLI for the daemon-level test)
   HV backend only) into `virtio-debug.json` under the data dir. The
   boot-assets scenario and the `hv_e2e` probe capture it automatically on
   failure, while the VM is still alive.
+
+The setup stream starts with the current snapshot. The smoke scenario permits missed `ASSETS_READY` and `NETWORK_READY` host phases, but requires host `READY`, System `VM_STARTING`, `VM_READY`, and `READY` in order. The guest boot budget measures only `VM_STARTING` to `VM_READY`.
 
 ## Parallel daemon control planes: one data dir per daemon
 
@@ -56,6 +58,17 @@ lifecycle checks over the Docker API socket:
 ```bash
 cargo test -p arcbox-e2e --test boot_assets -- --ignored --nocapture
 ```
+
+Automatic HTTPS with the macOS Keychain CA (VZ):
+
+```bash
+cargo build --release -p arcbox-agent --target aarch64-unknown-linux-musl
+cargo test -p arcbox-e2e --test local_https -- --ignored --nocapture
+```
+
+The test serves HTTP on container port 8080 and verifies HTTPS on port 443 with the exported root. Container and Compose names exercise signing-channel reconnection. A separate request uses the container's default DNS and CA bundle, without `--resolve` or `--cacert`. Opt-out must fail certificate verification, and an unowned SNI name must fail the TLS handshake. The test deletes its isolated CA without changing user trust.
+
+Run the same test with `ARCBOX_DNS_DOMAIN=run.dev.arcbox.local` to verify a configured instance suffix. The test also checks the public service URLs and rejects the old `web.keychain.arcbox.local` SNI when a custom suffix is active. These checks do not validate macOS system DNS or browser authorization.
 
 VMM-level HV probe — drives the HV backend directly (no daemon): boot, vsock
 agent RPC, DAX, agent supervision, pause/resume, guest PSCI poweroff, worker

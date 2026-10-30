@@ -7,7 +7,8 @@
 //!
 //! Run as the user, not under `sudo`: the Docker context, shell profile,
 //! kubeconfig and login keychain are the user's. Privileged paths are
-//! removed through `sudo`, which asks once up front.
+//! removed through `sudo`, which authenticates up front. Native CA trust
+//! removal can require a separate macOS authorization prompt.
 
 mod host;
 mod inventory;
@@ -67,8 +68,8 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     let host = Mac;
     if residue.needs_root() {
-        // One password prompt, up front, instead of one per privileged step.
-        // Inherits the terminal: sudo reads the password from it.
+        // Cache sudo credentials for privileged filesystem steps. Native CA
+        // trust authorization uses the macOS prompt separately.
         let status = std::process::Command::new("sudo")
             .arg("-v")
             .status()
@@ -80,11 +81,15 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     let report = run(&host, &roots, &residue, &mut |step| println!("{step}")).await;
     println!();
-    if report.iter().any(Step::failed) {
-        bail!(
-            "{} step(s) failed; fix the cause and run `abctl uninstall` again",
-            report.iter().filter(|step| step.failed()).count()
-        );
+    let failed_steps = report.iter().filter(|step| step.failed()).count();
+    if failed_steps != 0 {
+        let error = report
+            .into_iter()
+            .find_map(|step| step.outcome.err())
+            .expect("failed_steps counts at least one error");
+        return Err(error).with_context(|| {
+            format!("{failed_steps} step(s) failed; fix the cause and run `abctl uninstall` again")
+        });
     }
     println!("ArcBox has been removed.");
     if args.keep_data {
@@ -110,7 +115,7 @@ fn print_plan(roots: &Roots, residue: &Residue) {
         println!("  • Remove the ArcBox line from /etc/hosts  [sudo]");
     }
     println!("  • Remove the Docker context, shell, kubectl and ssh integration");
-    println!("  • Remove trust in the ArcBox local CA, if granted");
+    println!("  • Remove trust in the ArcBox local CA, if granted (macOS authorization)");
     if residue.preferences {
         println!("  • Remove the Desktop app's preferences");
     }
@@ -146,12 +151,13 @@ impl std::fmt::Display for Step {
     }
 }
 
-/// Runs every step against `residue`, calling `report` as each finishes.
+/// Runs cleanup against `residue`, calling `report` as each step finishes.
 ///
 /// Order matters: the app quits before the daemon is stopped (its handler
 /// stops the daemon itself); integrations that need binaries from the data
 /// directory (kubectl, the CA certificate) run before the data directory is
-/// removed; the helper is unregistered before its plist goes.
+/// removed. CA trust must be revoked before the helper is unregistered.
+/// Stop after a failed shutdown or CA cleanup to retain the helper and data.
 async fn run(
     host: &dyn Host,
     roots: &Roots,
@@ -160,17 +166,21 @@ async fn run(
 ) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut step = |label: String, outcome: Result<Outcome>| {
+        let failed = outcome.is_err();
         let step = Step { label, outcome };
         report(&step);
         steps.push(step);
+        failed
     };
     let layout = HostLayout::new(roots.data_dir.clone());
 
-    step(
+    if step(
         format!("Quitting {}", roots.profile.app_name()),
         steps::quit_app(host, roots.profile.app_bundle_id()),
-    );
-    step(
+    ) {
+        return steps;
+    }
+    if step(
         "Stopping the daemon".into(),
         steps::stop_daemon(
             host,
@@ -178,7 +188,15 @@ async fn run(
             &[roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON],
         )
         .await,
-    );
+    ) {
+        return steps;
+    }
+    if step(
+        "Removing trust in the ArcBox local CA".into(),
+        steps::untrust_local_ca(host, roots).await,
+    ) {
+        return steps;
+    }
     if residue.helper_registered {
         step(
             "Unregistering the helper".into(),
@@ -215,10 +233,6 @@ async fn run(
     step(
         "Removing the ssh config Include".into(),
         remove_ssh_include(roots, &layout),
-    );
-    step(
-        "Removing trust in the ArcBox local CA".into(),
-        steps::untrust_local_ca(host, roots),
     );
     if residue.hosts_alias {
         step(
@@ -313,12 +327,14 @@ pub(super) async fn brew_hook() -> Result<()> {
     let host = Mac;
     let layout = HostLayout::new(roots.data_dir.clone());
 
+    steps::quit_app(&host, roots.profile.app_bundle_id())?;
     steps::stop_daemon(
         &host,
         &layout,
         &[roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON],
     )
     .await?;
+    steps::untrust_local_ca(&host, &roots).await?;
     for label in [roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON] {
         steps::remove_path(&host, &roots.launch_agent(label))?;
     }

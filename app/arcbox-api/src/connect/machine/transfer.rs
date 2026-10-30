@@ -9,9 +9,10 @@ use arcbox_core::machine::MachineConfig;
 use arcbox_core::machine::archive::read_manifest;
 use arcbox_core::machine_image::{self, MachineImage};
 use arcbox_core::{HostCapacity, Runtime};
-use connectrpc::ConnectError;
+use connectrpc::{ConnectError, RequestContext};
 
-use super::{refusal, rootfs};
+use super::super::ContextExt as _;
+use super::{refusal, require_user_machine, rootfs};
 
 /// Writes machine `id` to the archive at `path`; the image manifest it
 /// carries is the registry entry the machine's rootfs device belongs to.
@@ -59,8 +60,13 @@ pub(super) async fn export(
 /// Creates a machine from the archive at `req.path`.
 pub(super) async fn import(
     runtime: &Arc<Runtime>,
+    ctx: &RequestContext,
     req: pb::ImportMachineRequest,
 ) -> Result<pb::ImportMachineResponse, ConnectError> {
+    ctx.check_shutdown()?;
+    if !req.name.is_empty() {
+        require_user_machine(&req.name)?;
+    }
     let path = archive_path(&req.path)?;
     let manifest_path = path.clone();
     let manifest = tokio::task::spawn_blocking(move || read_manifest(&manifest_path))
@@ -69,6 +75,7 @@ pub(super) async fn import(
         .map_err(refusal)?;
     let archived = manifest.machine;
     let name = if req.name.is_empty() {
+        require_user_machine(&archived.name)?;
         archived.name.clone()
     } else {
         req.name
@@ -93,6 +100,7 @@ pub(super) async fn import(
         .check(cpus, memory_mb)
         .map_err(|e| ConnectError::invalid_argument(format!("{e}; import with --cpus/--memory")))?;
 
+    ctx.check_shutdown()?;
     let config = MachineConfig {
         name,
         cpus,
@@ -103,12 +111,14 @@ pub(super) async fn import(
         block_devices: Vec::new(),
         rootfs: Some(rootfs::rootfs_for(runtime, &image).await?),
         mounts: archived.mounts,
+        web_ports: archived.web_ports,
         distro: Some(archived.distro.clone()),
         distro_version: archived.distro_version.clone(),
         backend: arcbox_core::VmBackend::default(),
         enable_rosetta: false,
         nested_virt: false,
     };
+    ctx.check_shutdown()?;
     let manager = Arc::clone(runtime.machine_manager());
     let id = tokio::task::spawn_blocking(move || manager.import(config, &path))
         .await

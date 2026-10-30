@@ -10,8 +10,6 @@ use std::time::Instant;
 use anyhow::Result;
 use arcbox_api::SetupPhase;
 use arcbox_core::Runtime;
-#[cfg(target_os = "macos")]
-use macos_resolver::FileResolver;
 use tracing::{info, warn};
 
 use crate::context::{ControlPlane, DaemonContext, EarlyContext, ServiceHandles, StartupHandles};
@@ -28,7 +26,7 @@ pub struct Startup {
 }
 
 pub struct ReadyDaemon {
-    pub ctx: DaemonContext,
+    pub ctx: Arc<DaemonContext>,
     pub handles: ServiceHandles,
 }
 
@@ -59,12 +57,12 @@ impl HostPrepared {
     /// Acquires the exclusive daemon lease.
     pub async fn acquire_daemon_lease(self) -> Result<DaemonLeased> {
         let ctx = record_startup_phase("acquire_daemon_lease", acquire_lock(self.early)).await?;
-        Ok(DaemonLeased { ctx })
+        Ok(DaemonLeased { ctx: Arc::new(ctx) })
     }
 }
 
 pub struct DaemonLeased {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
 }
 
 impl DaemonLeased {
@@ -85,7 +83,7 @@ impl DaemonLeased {
 }
 
 pub struct ControlPlaneStarted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
 }
 
@@ -106,7 +104,7 @@ impl ControlPlaneStarted {
 }
 
 pub struct ResourcesReleased {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
 }
 
@@ -118,99 +116,89 @@ impl ResourcesReleased {
         Ok(AssetsPrepared {
             ctx: self.ctx,
             control_plane: self.control_plane,
-            _assets: assets,
+            assets,
         })
     }
 }
 
 pub struct AssetsPrepared {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
-    _assets: assets::PreparedAssets,
+    assets: assets::PreparedAssets,
 }
 
 impl AssetsPrepared {
-    /// Builds and initializes the ArcBox runtime.
+    /// Constructs Runtime and prepares the shared Machine host.
     pub async fn boot_runtime(self) -> Result<RuntimeBooted> {
         let runtime = record_startup_phase("boot_runtime", init_runtime(&self.ctx)).await?;
         Ok(RuntimeBooted {
             ctx: self.ctx,
             control_plane: self.control_plane,
             runtime,
+            assets: self.assets,
         })
     }
 }
 
 pub struct RuntimeBooted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     control_plane: ControlPlane,
     runtime: Arc<Runtime>,
+    assets: assets::PreparedAssets,
 }
 
 impl RuntimeBooted {
     /// Starts services that require an initialized runtime.
     pub async fn start_runtime_services(self) -> Result<RuntimeServicesStarted> {
-        let linux_vm = self.runtime.config().vm.autostart;
         let handles = record_startup_phase("start_runtime_services", async {
             let handles =
-                services::start_services(&self.ctx, &self.runtime, self.control_plane).await?;
-            recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
-            if linux_vm {
-                services::enable_docker_integration(&self.ctx);
-                crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
-                crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);
-            }
-            crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
-            crate::nfs_mount::spawn(&self.ctx, &self.runtime);
-            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
-            crate::machine_dns::spawn(&self.ctx, &self.runtime);
-            crate::machine_mount::spawn(&self.ctx, &self.runtime);
+                services::start_host_services(&self.ctx, &self.runtime, self.control_plane).await?;
+            recovery::prepare_host(&self.ctx, &self.runtime, handles.dns_port).await?;
+            #[cfg(target_os = "macos")]
+            crate::tls_signer::spawn(&self.ctx, &self.runtime).await;
             Ok(handles)
         })
         .await?;
-        // DNS was bound in `start_control_plane`; with a Linux VM, Docker is
-        // bound before `start_services` returns. An explicitly requested
-        // Kubernetes endpoint is also required; the canonical best-effort
-        // 16443 listener may remain unavailable. An explicitly requested DNS
-        // resolver is installed before this phase.
+        // Host listeners and the explicitly requested resolver are available before admission.
         self.ctx
             .setup_state
             .set_phase(SetupPhase::NetworkReady, "Network services ready");
         Ok(RuntimeServicesStarted {
             ctx: self.ctx,
             handles,
-            linux_vm,
+            runtime: self.runtime,
+            assets: self.assets,
         })
     }
 }
 
 pub struct RuntimeServicesStarted {
-    ctx: DaemonContext,
+    ctx: Arc<DaemonContext>,
     handles: ServiceHandles,
-    /// Whether the Linux VM (and its Docker/K8s services) is running.
-    linux_vm: bool,
+    runtime: Arc<Runtime>,
+    assets: assets::PreparedAssets,
 }
 
 impl RuntimeServicesStarted {
     /// Marks startup complete and returns handles for the shutdown loop.
     pub async fn mark_ready(self) -> Result<ReadyDaemon> {
         record_startup_phase("mark_ready", async {
-            #[cfg(target_os = "macos")]
-            check_resolver_installed(&self.ctx.dns_domain);
-            self.ctx
-                .setup_state
-                .set_phase(SetupPhase::Ready, "Daemon ready");
+            crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
+            crate::nfs_mount::spawn(&self.ctx, &self.runtime);
+            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
+            crate::machine_dns::spawn(&self.ctx, &self.runtime);
+            crate::machine_mount::spawn(&self.ctx, &self.runtime);
+            self.admit_host_and_start_system().await?;
 
             println!("ArcBox daemon started");
-            if self.linux_vm {
-                println!("  Docker API: {}", self.ctx.layout.docker_socket.display());
-            }
             println!("  gRPC API:   {}", self.ctx.layout.grpc_socket.display());
             println!("  DNS:        127.0.0.1:{}", self.handles.dns_port);
             println!("  Data:       {}", self.ctx.layout.data_dir.display());
             println!();
-            if self.linux_vm {
-                println!("Use 'abctl docker enable' to configure Docker CLI integration.");
+            if self.runtime.config().vm.autostart {
+                println!(
+                    "System VM starts independently; watch setup status for Docker readiness."
+                );
             } else {
                 println!(
                     "Running as a VM host only (--no-linux-vm): Docker and Kubernetes are disabled."
@@ -227,13 +215,23 @@ impl RuntimeServicesStarted {
             handles: self.handles,
         })
     }
-}
 
-#[cfg(target_os = "macos")]
-fn check_resolver_installed(domain: &str) {
-    let resolver = FileResolver::new("arcbox");
-    if !resolver.is_registered(domain) {
-        println!("Hint: Run 'sudo abctl dns install' to enable *.{domain} DNS resolution.");
+    async fn admit_host_and_start_system(&self) -> Result<()> {
+        self.ctx
+            .host_runtime
+            .set(Arc::clone(&self.runtime))
+            .map_err(|_| anyhow::anyhow!("Machine host already admitted"))?;
+        self.ctx
+            .setup_state
+            .set_phase(SetupPhase::Ready, "Daemon ready");
+        let ctx = Arc::clone(&self.ctx);
+        let runtime = Arc::clone(&self.runtime);
+        let assets = self.assets;
+        self.ctx
+            .system_service
+            .start(async move { super::system::run(ctx, runtime, assets).await })
+            .await;
+        Ok(())
     }
 }
 
@@ -251,4 +249,117 @@ where
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_api::SetupState;
+    use arcbox_connect::v1::system_runtime_status::State;
+    use arcbox_core::Config;
+    use clap::Parser as _;
+    use std::{pin::pin, task::Poll, time::Duration};
+    use tokio::sync::oneshot;
+
+    async fn fixture() -> (tempfile::TempDir, RuntimeServicesStarted) {
+        let directory = tempfile::tempdir().unwrap();
+        let args = DaemonArgs::parse_from([
+            "arcbox-daemon",
+            "--profile",
+            "development",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--no-linux-vm",
+            "--no-mount-nfs",
+        ]);
+        let handles = StartupHandles::new(Arc::new(SetupState::new()));
+        let early = init_early(args, handles).await.unwrap();
+        let ctx = Arc::new(acquire_lock(early).await.unwrap());
+        let mut config = Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        };
+        config.vm.autostart = false;
+        let assets = assets::prepare(&config).await.unwrap();
+        let runtime = Arc::new(Runtime::new(config).unwrap());
+        runtime.prepare_host().await.unwrap();
+        assert!(runtime.machine_manager().list().is_empty());
+        let stage = RuntimeServicesStarted {
+            ctx,
+            runtime,
+            assets,
+            handles: ServiceHandles {
+                dns_port: 0,
+                grpc: tokio::spawn(async {}),
+                ssh: None,
+            },
+        };
+        (directory, stage)
+    }
+
+    #[tokio::test]
+    async fn host_admission_precedes_pending_system_task_start() {
+        let (_directory, stage) = fixture().await;
+        let ctx = Arc::clone(&stage.ctx);
+        let (release, pending) = oneshot::channel();
+        ctx.system_service
+            .start(async move { pending.await.map_err(Into::into) })
+            .await;
+        {
+            let mut joining = pin!(ctx.system_service.join());
+            assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+            let mut admitting = pin!(stage.admit_host_and_start_system());
+            assert!(matches!(futures::poll!(&mut admitting), Poll::Pending));
+            assert!(Arc::ptr_eq(ctx.host_runtime.get().unwrap(), &stage.runtime));
+            assert_eq!(ctx.setup_state.current().phase, SetupPhase::Ready);
+            assert_eq!(
+                ctx.setup_state.current().system_runtime.state,
+                State::StateUnspecified
+            );
+
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                joining.await.unwrap();
+                admitting.await.unwrap();
+                ctx.system_service.join().await.unwrap();
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::Disabled
+        );
+        ctx.shutdown.cancel();
+        stage.handles.grpc.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_host_admission_does_not_start_a_late_system_task() {
+        let (_directory, stage) = fixture().await;
+        let ctx = Arc::clone(&stage.ctx);
+        let (release, pending) = oneshot::channel();
+        ctx.system_service
+            .start(async move { pending.await.map_err(Into::into) })
+            .await;
+        let mut joining = pin!(ctx.system_service.join());
+        assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+        {
+            let mut admitting = pin!(stage.admit_host_and_start_system());
+            assert!(matches!(futures::poll!(&mut admitting), Poll::Pending));
+            assert!(ctx.host_runtime.get().is_some());
+            ctx.shutdown.cancel();
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), joining)
+            .await
+            .unwrap()
+            .unwrap();
+        ctx.system_service.join().await.unwrap();
+        assert_eq!(
+            ctx.setup_state.current().system_runtime.state,
+            State::StateUnspecified
+        );
+        stage.handles.grpc.await.unwrap();
+    }
 }

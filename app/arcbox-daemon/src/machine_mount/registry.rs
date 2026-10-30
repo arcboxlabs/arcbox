@@ -106,30 +106,12 @@ impl Mounts {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use arcbox_core::event::EventBus;
-    use arcbox_core::machine::MachineManager;
-    use arcbox_core::vm::{HostNetwork, VmManager};
-
     use super::*;
-
-    /// A machine manager with no machines, as the source of holds.
-    fn machine_manager(dir: &std::path::Path) -> MachineManager {
-        MachineManager::new(
-            Arc::new(VmManager::new(dir.join("snapshots"))),
-            dir.to_path_buf(),
-            HostNetwork::default(),
-            EventBus::new(),
-        )
-    }
 
     #[test]
     fn a_remount_outdates_the_generation_a_retry_holds() {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = machine_manager(dir.path());
         let mut mounts = Mounts::new();
-        let first = mounts.record("dev", PathBuf::from("/m/dev"), manager.host_hold("dev"));
+        let first = mounts.record("dev", PathBuf::from("/m/dev"), HostHold::for_test());
         assert!(mounts.is_current("dev", first));
 
         // The release failed; the entry stays, marked stale.
@@ -139,7 +121,7 @@ mod tests {
 
         // The machine started again and was mounted anew: the pending retry
         // no longer owns the path, and forgetting its generation is a no-op.
-        let second = mounts.record("dev", PathBuf::from("/m/dev"), manager.host_hold("dev"));
+        let second = mounts.record("dev", PathBuf::from("/m/dev"), HostHold::for_test());
         assert!(!mounts.is_current("dev", first));
         assert!(mounts.is_current("dev", second));
         assert!(mounts.get("dev").is_some_and(|entry| !entry.stale));
@@ -153,13 +135,11 @@ mod tests {
 
     #[test]
     fn marking_or_forgetting_an_unknown_generation_changes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = machine_manager(dir.path());
         let mut mounts = Mounts::new();
         mounts.mark_stale("dev", 7);
         mounts.forget("dev", 7);
         assert!(mounts.get("dev").is_none());
-        let generation = mounts.record("dev", PathBuf::from("/m/dev"), manager.host_hold("dev"));
+        let generation = mounts.record("dev", PathBuf::from("/m/dev"), HostHold::for_test());
         mounts.mark_stale("dev", generation + 1);
         assert!(mounts.get("dev").is_some_and(|entry| !entry.stale));
     }

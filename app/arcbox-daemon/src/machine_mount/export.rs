@@ -1,13 +1,11 @@
-//! How a machine export is mounted and unmounted: the NFSv3 options and
-//! the host addresses the export must admit. The shape such a mount has
-//! in the mount table is `MountInfo::is_machine_export`.
+//! Machine export mount options and bounded mount retries.
+//! The mount table identifies these exports through `MountInfo::is_machine_export`.
 
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::host_mount;
 
@@ -77,31 +75,6 @@ fn render_mount_opts(port: u16) -> String {
     )
 }
 
-/// The host's own IPv4 addresses on the network `bridge` belongs to: the
-/// addresses the machine will see connections from, and so the only peers
-/// its export admits.
-pub(super) fn host_addresses_on_link(bridge: Ipv4Addr) -> Vec<IpAddr> {
-    let interfaces = match nix::ifaddrs::getifaddrs() {
-        Ok(interfaces) => interfaces,
-        Err(e) => {
-            warn!(error = %e, "getifaddrs failed; the machine export has no peer to admit");
-            return Vec::new();
-        }
-    };
-    interfaces
-        .filter_map(|interface| {
-            let address = interface.address?.as_sockaddr_in()?.ip();
-            let netmask = interface.netmask?.as_sockaddr_in()?.ip();
-            same_link(address, bridge, netmask).then_some(IpAddr::V4(address))
-        })
-        .collect()
-}
-
-fn same_link(a: Ipv4Addr, b: Ipv4Addr, netmask: Ipv4Addr) -> bool {
-    let mask = u32::from(netmask);
-    u32::from(a) & mask == u32::from(b) & mask
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,22 +91,5 @@ mod tests {
         assert!(!opts.contains("nolocks"));
         // Guest uids are mapped, not hidden.
         assert!(!opts.contains("noowners"));
-    }
-
-    #[test]
-    fn a_link_is_shared_under_the_interface_netmask() {
-        let mask: Ipv4Addr = "255.255.255.0".parse().unwrap();
-        let host: Ipv4Addr = "192.168.64.1".parse().unwrap();
-        assert!(same_link(host, "192.168.64.7".parse().unwrap(), mask));
-        assert!(!same_link(host, "192.168.65.7".parse().unwrap(), mask));
-        assert!(!same_link(host, "10.0.2.15".parse().unwrap(), mask));
-    }
-
-    #[test]
-    fn loopback_is_never_on_a_machines_link() {
-        // The bridge network is a vmnet subnet; whatever interfaces this
-        // host has, 127.0.0.1 is not among the peers a machine would see.
-        let peers = host_addresses_on_link("192.168.64.7".parse().unwrap());
-        assert!(!peers.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
     }
 }

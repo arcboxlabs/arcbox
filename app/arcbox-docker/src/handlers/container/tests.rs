@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::extract_container_id;
 
 fn uri(s: &str) -> Uri {
     s.parse().unwrap()
@@ -23,10 +24,13 @@ fn extract_id_from_delete_path() {
 }
 
 #[test]
-fn extract_id_skips_collection_endpoints() {
-    assert_eq!(extract_container_id(&uri("/containers/json")), None);
-    assert_eq!(extract_container_id(&uri("/containers/create")), None);
-    assert_eq!(extract_container_id(&uri("/containers/prune")), None);
+fn extract_id_accepts_collection_named_containers() {
+    for token in ["json", "create", "prune"] {
+        assert_eq!(
+            extract_container_id(&uri(&format!("/containers/{token}"))).as_deref(),
+            Some(token)
+        );
+    }
 }
 
 #[test]
@@ -78,56 +82,12 @@ fn extract_name_from_inspect_json() {
 }
 
 #[test]
-fn extract_canonical_id_from_inspect_json() {
-    let json = br#"{"Id":"abc123def456789","Name":"/my-nginx","State":{}}"#;
-    assert_eq!(
-        extract_canonical_id_from_inspect(json).as_deref(),
-        Some("abc123def456789")
-    );
-}
-
-#[test]
-fn extract_canonical_id_missing_field() {
-    let json = br#"{"Name":"/my-nginx"}"#;
-    assert_eq!(extract_canonical_id_from_inspect(json), None);
-}
-
-#[test]
-fn extract_canonical_id_invalid_json() {
-    assert_eq!(extract_canonical_id_from_inspect(b"not json"), None);
-}
-
-#[test]
-fn canonical_id_or_fallback_uses_canonical() {
-    let json = br#"{"Id":"canonical-abcdef","Name":"/my-nginx"}"#;
-    assert_eq!(
-        canonical_id_or_fallback("web", json),
-        "canonical-abcdef".to_string()
-    );
-}
-
-#[test]
-fn canonical_id_or_fallback_falls_back_when_missing() {
-    let json = br#"{"Name":"/my-nginx"}"#;
-    assert_eq!(canonical_id_or_fallback("web", json), "web".to_string());
-}
-
-#[test]
-fn canonical_id_or_fallback_falls_back_on_invalid_json() {
-    assert_eq!(
-        canonical_id_or_fallback("web", b"not json"),
-        "web".to_string()
-    );
-}
-
-#[test]
 fn test_extract_container_dns_info_plain() {
     let json = serde_json::json!({
         "Id": "abc123",
         "Name": "/my-nginx",
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2",
-            "Networks": {}
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
@@ -148,8 +108,7 @@ fn test_extract_container_dns_info_compose() {
             }
         },
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2",
-            "Networks": {}
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();
@@ -159,12 +118,12 @@ fn test_extract_container_dns_info_compose() {
 }
 
 #[test]
-fn test_extract_container_dns_info_network_fallback() {
+fn test_extract_container_dns_info_ignores_stale_top_level_address() {
     let json = serde_json::json!({
         "Id": "abc123",
         "Name": "/web-app",
         "NetworkSettings": {
-            "IPAddress": "",
+            "IPAddress": "192.0.2.99",
             "Networks": {
                 "bridge": {
                     "IPAddress": "172.18.0.3"
@@ -176,6 +135,48 @@ fn test_extract_container_dns_info_network_fallback() {
     let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
     assert_eq!(aliases, vec!["web-app"]);
     assert_eq!(ip, "172.18.0.3".parse::<IpAddr>().unwrap());
+}
+
+#[test]
+fn test_extract_container_dns_info_rejects_top_level_only_address() {
+    let json = serde_json::json!({
+        "Id": "abc123",
+        "Name": "/web-app",
+        "NetworkSettings": { "IPAddress": "172.17.0.2" }
+    });
+    let bytes = serde_json::to_vec(&json).unwrap();
+    assert!(extract_container_dns_info(&bytes).is_none());
+}
+
+#[test]
+fn test_extract_container_dns_info_selects_networks_in_name_order() {
+    let mut networks = [
+        ("z-bridge", "172.17.0.2"),
+        ("a-invalid", "invalid"),
+        ("b-ipv6", "2001:db8::1"),
+        ("m-app", "172.18.0.3"),
+    ];
+    for _ in 0..2 {
+        let network_map: serde_json::Map<_, _> = networks
+            .iter()
+            .map(|(name, address)| {
+                (
+                    (*name).to_owned(),
+                    serde_json::json!({ "IPAddress": address }),
+                )
+            })
+            .collect();
+        let json = serde_json::json!({
+            "Id": "abc123",
+            "Name": "/web-app",
+            "NetworkSettings": { "Networks": network_map }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
+        assert_eq!(aliases, ["web-app"]);
+        assert_eq!(ip, "172.18.0.3".parse::<IpAddr>().unwrap());
+        networks.reverse();
+    }
 }
 
 #[test]
@@ -202,7 +203,7 @@ fn test_extract_container_dns_info_no_name() {
     let json = serde_json::json!({
         "Id": "abc123",
         "NetworkSettings": {
-            "IPAddress": "172.17.0.2"
+            "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
         }
     });
     let bytes = serde_json::to_vec(&json).unwrap();

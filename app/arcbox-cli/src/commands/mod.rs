@@ -171,8 +171,7 @@ pub enum Commands {
     System(system::SystemCommands),
 
     /// Manage boot assets (kernel/rootfs)
-    #[command(subcommand)]
-    Boot(boot::BootCommands),
+    Boot(boot::BootArgs),
 
     /// Manage Docker data disk
     #[command(subcommand)]
@@ -235,12 +234,7 @@ impl Cli {
         let supported = match self.format {
             OutputFormat::Table => true,
             OutputFormat::Json => match &self.command {
-                Commands::Boot(
-                    boot::BootCommands::Prefetch(_)
-                    | boot::BootCommands::Status(_)
-                    | boot::BootCommands::Clear
-                    | boot::BootCommands::List,
-                )
+                Commands::Boot(_)
                 | Commands::Setup(
                     setup::SetupCommands::Install
                     | setup::SetupCommands::Uninstall

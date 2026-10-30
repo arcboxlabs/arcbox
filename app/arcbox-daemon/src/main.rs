@@ -1,19 +1,30 @@
 //! ArcBox daemon — orchestrates VM, networking, and API services.
 
+mod background_task;
 mod context;
 mod control_plane;
 mod disk_reclaim;
 mod dns_service;
+#[cfg(target_os = "macos")]
+mod guest_trust;
+#[cfg(target_os = "macos")]
+mod guest_workers;
 mod host_mount;
+mod host_network;
+#[cfg(target_os = "macos")]
+mod https_access;
 mod kubernetes_lb;
 mod kubernetes_proxy;
 mod machine_dns;
 mod machine_mount;
 #[cfg(target_os = "macos")]
+mod machine_web;
+#[cfg(target_os = "macos")]
 mod mdns;
 mod nfs_mount;
 mod power;
 mod recovery;
+mod resolver_service;
 mod sandbox_cleanup;
 mod self_setup;
 mod services;
@@ -22,6 +33,9 @@ mod ssh_agent;
 mod ssh_service;
 mod startup;
 mod storage_health;
+#[cfg(target_os = "macos")]
+mod tls_signer;
+mod web_index;
 
 use std::sync::Arc;
 
@@ -54,7 +68,7 @@ pub struct DaemonArgs {
 
     /// DNS suffix served by this daemon (default: arcbox.local).
     #[arg(long)]
-    pub dns_domain: Option<arcbox_helper::validate::Domain>,
+    pub dns_domain: Option<arcbox_constants::dns::Domain>,
 
     /// Host UDP port for DNS; 0 asks the OS to allocate one. Unset, the
     /// profile's port (5553 production, 5554 development) is tried first and
@@ -118,6 +132,11 @@ fn main() -> Result<()> {
         .profile
         .unwrap_or_else(ArcboxProfile::from_env_or_default);
     validate_docker_integration(profile, args.docker_integration)?;
+
+    // Native authorization belongs to the login-session CLI, never the daemon.
+    #[cfg(target_os = "macos")]
+    let _keychain_interaction =
+        security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()?;
 
     let _sentry_guard = sentry::init(sentry::ClientOptions {
         dsn: sentry_dsn().and_then(|s| s.parse().ok()),

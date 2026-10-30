@@ -15,11 +15,16 @@ use crate::connect;
 
 use super::OutputFormat;
 
+#[cfg(target_os = "macos")]
+mod https;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum CheckState {
     Pass,
     Fail,
+    /// An optional capability needs attention without failing runtime health.
+    Warning,
     /// The check could not be run. Reported, but never counted as a failure —
     /// see `ComponentStatus::Unknown` in the setup status module.
     Unknown,
@@ -67,6 +72,7 @@ impl HealthCheck {
 struct Summary {
     passed: usize,
     failed: usize,
+    warnings: usize,
     unknown: usize,
 }
 
@@ -85,12 +91,14 @@ impl DoctorReport {
             count(CheckState::Fail),
             count(CheckState::Unknown),
         );
+        let warnings = count(CheckState::Warning);
         Self {
             healthy: failed == 0,
             checks,
             summary: Summary {
                 passed,
                 failed,
+                warnings,
                 unknown,
             },
         }
@@ -102,6 +110,7 @@ impl DoctorReport {
             let state = match check.status {
                 CheckState::Pass => "PASS",
                 CheckState::Fail => "FAIL",
+                CheckState::Warning => "WARN",
                 CheckState::Unknown => "UNKN",
             };
             writeln!(output, "  [{state}] {}: {}", check.name, check.detail)
@@ -117,6 +126,10 @@ impl DoctorReport {
             self.summary.passed, self.summary.failed
         )
         .expect("writing to a String cannot fail");
+        if self.summary.warnings > 0 {
+            write!(output, ", {} warnings", self.summary.warnings)
+                .expect("writing to a String cannot fail");
+        }
         if self.summary.unknown > 0 {
             write!(output, ", {} unknown", self.summary.unknown)
                 .expect("writing to a String cannot fail");
@@ -346,8 +359,16 @@ fn endpoint_matches_socket(endpoint: &str, expected: &Path) -> Result<bool, Stri
 
 #[cfg(target_os = "macos")]
 async fn add_macos_checks(checks: &mut Vec<HealthCheck>) {
+    let setup = setup_status().await;
+    checks.push(match &setup {
+        Ok(status) => https::check(&status.local_https),
+        Err(error) => HealthCheck::unknown(
+            "Local HTTPS certificate",
+            format!("status query failed: {error}"),
+        ),
+    });
     if ArcboxProfile::from_env_or_default() == ArcboxProfile::Development {
-        match setup_status().await {
+        match &setup {
             Ok(status) => {
                 checks.push(if status.dns_resolver_installed {
                     HealthCheck::pass("DNS resolver", "installed for this instance")
@@ -386,7 +407,7 @@ async fn add_macos_checks(checks: &mut Vec<HealthCheck>) {
             "DNS resolver",
             dns.resolver_error
                 .unwrap_or_else(|| format!("missing {}", dns.resolver_path)),
-            "Run `sudo abctl dns install`.",
+            "Start ArcBox and complete helper setup. Inspect DNS with `abctl dns status`.",
         )
     });
     checks.push(match &dns.health {
@@ -458,13 +479,13 @@ async fn add_macos_checks(checks: &mut Vec<HealthCheck>) {
         },
     );
 
-    checks.push(check_container_route().await);
+    checks.push(check_container_route(&setup));
     checks.push(check_helper().await);
 }
 
 #[cfg(target_os = "macos")]
-async fn check_container_route() -> HealthCheck {
-    match setup_status().await {
+fn check_container_route(setup: &Result<pb::SetupStatus>) -> HealthCheck {
+    match setup {
         Ok(status) if status.route_installed => {
             HealthCheck::pass("Container route", "installed for this instance")
         }

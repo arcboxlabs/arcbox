@@ -98,37 +98,86 @@ gives the machine the identity and network the distro cannot know on its own
   an address and nothing else, and is declared unmanaged to systemd-networkd
   and NetworkManager by MAC so the distro never routes out of it. The agent
   reports that address as `SystemInfo.bridge_ip_address`, and the daemon
-  publishes `<name>.arcbox.local` there while the machine runs.
+  publishes `<hostname>.machine.<configured suffix>` there while the machine runs.
 
-The agent in a machine then serves RPC and nothing else: none of the System
-VM services below run there.
+The machine agent serves host requests without starting System VM DNS or Docker services.
+
+Machine web configuration uses `OpenMachineWebRequest` to fix the raw machine name, exact canonical hostname, and live bridge IPv4 for one host connection. The guest sweeps owned redirects with `/usr/lib/arcbox/iptables` and binds its HTTPS frontend and host signing listener before publishing the private DNS claim and confirming Open. `ReplaceMachineWebRequest` validates both policies and optional public-root PEM before replacing the complete snapshot with a positive, increasing source revision. The frontend consumes that root from session memory, including before certificate cache reuse. An absent root withdraws proxy authority without changing guest client trust. Ack waits for tracking replacement after any active scan; installed routes appear separately in typed snapshots. The boot image must provide the owned iptables tool. Installed machine HTTPS acceptance remains pending.
+
+Canceling the RPC caller immediately withdraws the machine claim, public root, and web publication. The session retains admission until both stream shutdown and the route actor finish. The actor completes in-flight rule operations, joins the frontend, and removes owned redirects before returning. Initialization and cleanup failures propagate to the caller.
+
+The trust RPC supports Debian, Ubuntu, and Alpine machines with an installed `update-ca-certificates` and a regular system PEM bundle. ArcBox owns only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`. Unsupported distributions and missing prerequisites return an error. Updater failure leaves reconciliation pending until replay. The daemon delivers its current public root to each running machine independently of System VM startup.
 
 The machine root export stores oversized Mac attributes in `.arcbox-xattrs` beside each target. Side-entry version 3 combines Linux file handles with filesystem IDs to distinguish recreated files and replaced mounts. Unsupported side-entry versions return an error and preserve the side entry and inline attributes. See the [identity investigation](../../docs/logs/2026-10-07-sidecar-inode-generation.md) for compatibility and validation.
 
 ## Container Domains
 
-`http://<container>.arcbox.local` (and `<service>.<project>.arcbox.local`)
-resolves to the container's IP, and the agent makes port 80 there reach the
-port the container actually serves (`domains/`). The HTTP port is, in order:
-the `dev.arcbox.http-port` label (a port number, or `off`); 80 when the
-container listens on it; the lowest listening port the container exposes;
-the lowest listening port. 443 never counts. Listeners are read from
-`/proc/<pid>/net/tcp{,6}` of the container's init process, repeatedly for two
-minutes after `start` because servers bind late. The agent then DNATs port 80
-of each of the container's IPv4 addresses to that port in nat PREROUTING,
-tagged `arcbox-domain:<container id>`, removes the rules on `die`/`destroy`,
-and sweeps a previous agent's at startup. A rule matches the destination
-only, so it serves both the Mac (routed in over the bridge NIC) and sibling
-containers (switched on a Docker bridge, which reaches iptables through the
-kernel's built-in `br_netfilter`).
+`http://<container>.arcbox.local` and `<service>.<project>.arcbox.local`
+resolve to a container IPv4 address. The agent discovers HTTP with a bounded
+`HEAD /` request that includes the container domain in `Host`. A valid HTTP
+response is required; listening TCP ports alone do not identify web services.
 
-`https://` works the same way once the daemon has written its local CA to
-`/arcbox/tls/` (`arcbox-local-ca`): port 443 of each container with an HTTP
-port is REDIRECTed to a proxy on port 61443 of the VM's namespace, unless the
-container listens on 443 itself. The proxy finds the container the client
-dialled through conntrack, presents a certificate minted for the SNI name, and
-relays plain HTTP/1.1 to the container's HTTP port. Port 61443 is therefore
-not available to container publishes.
+Discovery prefers cleartext HTTP/2 and probes HTTP/1.1 on a separate connection if needed. Each probe has a one-second deadline. Explicit HTTP ports remain selected while their protocol is unknown; failed probes retry, and listener replacement invalidates the cached protocol.
+
+DNS checks local names for every query type, including HTTPS and SVCB. Known IPv4-only names return NODATA for other types. Missing names under the configured suffix return NXDOMAIN; external names are forwarded to the gateway.
+
+The guest reserves `host`, `host.<configured suffix>`, `host.docker.internal`, `gateway.docker.internal`, and the configured index apex before containers register. These exact names use the host's current DNS answer through the gateway even without a local address. Container aliases cannot override these reservations; descendant names remain independent.
+
+The configured apex serves a browser index through gateway ports 80 and 443. Managed HTTPS requires a `.local` apex and the trusted ArcBox CA. The agent publishes the index only after the frontend binds and both exact gateway redirects precede Docker's PREROUTING jump. The page distinguishes unavailable Docker discovery from an empty service list. Failed publication retries without containers. Shutdown immediately withdraws the index and installed container web routes, then joins the frontend before removing domain and index redirects. Cleanup failures propagate to the agent caller. Task abort also invalidates web publication; the next agent startup sweeps any remaining redirects. Container DNS owners remain under the Docker watcher’s control. Installed NAT and browser validation remain pending.
+
+Machines use `<hostname>.machine.<configured suffix>` through the gateway. Sandboxes use exact `<id>.sandbox.<configured suffix>` names in the same guest Registry as container claims and instance authority. Both resource trees remain reserved after addresses disappear. Sandbox IDs must form one DNS label; creation and restore reject invalid IDs before provisioning. Sandbox DNS ownership is scoped to the injected System VM services.
+
+Guest registration uses complete container IDs and canonical name claims. Generated names include descendant wildcards; `dev.arcbox.domains` accepts exact and explicit wildcard `.local` names. Independent owners of an exclusive name produce SERVFAIL. Compose service replicas select the smallest complete ID. Short names require an exact claim, so a container named `com` cannot capture `example.com` through a wildcard. Host registration, helper resolver leases, and host-to-guest authority delivery are implemented; installed macOS resolver and browser validation remain pending.
+
+`ListGuestWebServices` accepts an optional concrete `hostname` to resolve wildcard claims against current ownership; an empty value lists exact aliases. It returns the installed HTTP and HTTPS routes and their
+current DNS names. Each shared Compose alias appears only on the container
+selected by guest DNS. The host uses this snapshot for service URLs; explicit
+port labels describe configured routes and do not guarantee application health.
+Container directory entries remain hidden until Docker subscription and complete reconciliation succeed. A disconnected or cancelled watcher hides cached directory entries until a new subscription replays the complete snapshot; installed forwarding routes remain available independently.
+
+The HTTPS proxy accepts a TLS SNI name only when the selected DNS owner has an installed managed route at the container address the client dialled. The proxy pins that owner's registration revision and installed route identity. A change during authorization, certificate configuration, TLS handshake, or upstream connection rejects the request before application bytes are forwarded, including replacement at the same address and port. Identical registration and route publication preserve the handshake. A failed connection cannot remove a newer installed route.
+
+Leaf certificates renew after three quarters of their actual remaining validity.
+Concurrent requests for the same domain share one signing operation. The cache
+holds up to 256 domains and evicts idle entries without interrupting TLS sessions.
+The proxy reads `/arcbox/tls/ca.pem` before cache reuse and verifies new leaves
+against the requested name and published root. Replacing the root renews cached
+leaves. Missing or invalid roots and signing results from a replaced root fail
+the handshake; the next connection can retry after publication recovers.
+
+The host can observe managed HTTPS access through the unary `ReconcileHttpsAccess` RPC on either backend. The observer supplies exact Mac source addresses and renews a three-second lease. The guest reports the first valid ClientHello in that observation, including when the leaf is cached. A matching Mac connection waits at most 30 seconds for authorization before continuing TLS. Disabling observation or losing the lease releases waiting connections. Container clients and clients without an active observer proceed immediately. Native HTTPS bypasses observation. The proxy checks DNS ownership again after waiting.
+The agent tries port 80, then exposed listeners, then other listeners in
+ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
+to a port number to override discovery, or `off` to disable managed HTTP. Cleartext discovery prefers HTTP/2 and probes HTTP/1.1 on a separate socket. An explicit port stays published when probes fail. Managed HTTPS resolves an unknown pinned protocol before sending application requests.
+
+Native HTTPS on 443 or 8443 takes precedence over automatic TLS termination.
+Set `dev.arcbox.https-port` to another native TLS port, or `off` to disable
+managed HTTPS. Native HTTPS preserves the application's certificate. Otherwise,
+a selected HTTP service receives HTTPS through the guest proxy. The kernel selects an available frontend port, and the guest redirects public port 443 to that bound port.
+Native discovery negotiates HTTP/2 or HTTP/1.1 with ALPN and requires an HTTP response. Use an explicit native port for a service that requires a client certificate.
+The proxy obtains a certificate for the client's SNI through the host signing
+channel, then negotiates HTTP/2 or HTTP/1.1 with ALPN. The CA private key stays in the macOS Keychain;
+only the public root is shared in `/arcbox/tls/`. The proxy does not reserve a fixed frontend port.
+
+Managed forwarding supports HTTP/1.1 and HTTP/2 in either direction and replaces `X-Forwarded-Proto` with `https`. The relay preserves authority, redirects, repeated cookies, and streaming bodies. With HTTP/2 on both sides, native gRPC supports unary, client streaming, server streaming, and bidirectional streaming calls without decoding message data or compression. HTTP/2 streams share the HTTP/2 upstream connection and use separate connections to an HTTP/1 backend. Cancellation remains observable after response completion while a request upload is active. An HTTP/1 WebSocket upgrade uses an HTTP/1 connection even when discovery selected HTTP/2. Listener shutdown cancels and joins every internal connection and stream task. Native TLS remains passthrough.
+
+When converting an HTTP/2 body to HTTP/1.1, the relay uses chunked framing and requires trailer names in the initial `Trailer` header. HTTP/1.1 clients must send `TE: trailers` to receive response trailers. Declared, supported trailer fields retain repeated values. Undeclared, forbidden, or unaccepted trailers fail the HTTP/1.1 message. Arbitrary HTTP/2 trailer sets are not supported across the HTTP/1.1 boundary.
+
+Listeners are read from `/proc/<pid>/net/tcp{,6}` with startup backoff, then
+on a five-second schedule while the container runs. Socket identity changes
+invalidate successful protocol probes, including replacement listeners on
+the same port. Failed discovery probes retry. Failed proxy upstream connects
+also invalidate discovery. Closed listeners lose their managed routes.
+Network connect/disconnect events refresh container addresses and discovery.
+DNS and protocol probes use the same default address; disconnecting the last
+addressed network removes the container's DNS ownership and routes.
+
+The agent installs destination-only rules in nat PREROUTING for every
+container IPv4 address, tagged `arcbox-domain:<container id>`. HTTP and native
+HTTPS use DNAT; automatic TLS termination uses REDIRECT. The agent removes
+rules on `die`/`destroy` and sweeps stale rules at startup. The rules serve
+both routed Mac traffic and switched sibling traffic through the kernel's
+built-in `br_netfilter`.
 
 ## Cross-Compilation
 

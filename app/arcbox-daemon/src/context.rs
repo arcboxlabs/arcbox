@@ -6,7 +6,7 @@
 //! Startup::prepare_host()          → EarlyContext   (no lock, no runtime)
 //! Startup::acquire_daemon_lease()  → DaemonContext  (lock held, no runtime yet)
 //! Startup::start_control_plane()   → ControlPlane   (gRPC serving, DNS socket bound)
-//! Startup::boot_runtime()          → Arc<Runtime>   (also fills SharedRuntime for gRPC)
+//! Startup::boot_runtime()          → Arc<Runtime>   (shared host state prepared)
 //! ```
 //!
 //! This encoding makes it a compile error to access the daemon lock
@@ -17,9 +17,12 @@ use std::sync::Arc;
 
 use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_constants::container_network::ContainerNetwork;
+use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use tokio_util::sync::CancellationToken;
 
+use crate::background_task::BackgroundTask;
+use crate::control_plane::Calls;
 use crate::dns_service::DnsService;
 use crate::startup::{ContainerNetworkLease, DaemonLock};
 
@@ -45,27 +48,50 @@ pub type SharedContainerNetworkLease = Arc<std::sync::OnceLock<ContainerNetworkL
 #[derive(Clone)]
 pub struct StartupHandles {
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled right after runtime construction, before the VM boots.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Filled by the lease phase. Held here (not only in the pipeline's
     /// context) so the exclusive flock lives until process exit even when
     /// the startup future is cancelled mid-flight.
     pub daemon_lock: SharedDaemonLock,
     /// Filled before an isolated VM boots and held through shutdown cleanup.
     pub container_network_lease: SharedContainerNetworkLease,
+    pub system_service: BackgroundTask,
+    pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
+    pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
+    pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
 }
 
 impl StartupHandles {
     pub fn new(setup_state: Arc<SetupState>) -> Self {
         Self {
             shared_runtime: Arc::new(std::sync::OnceLock::new()),
+            host_runtime: Arc::new(std::sync::OnceLock::new()),
             early_runtime: Arc::new(std::sync::OnceLock::new()),
             setup_state,
             shutdown: CancellationToken::new(),
+            rpc_calls: Calls::default(),
             daemon_lock: Arc::new(std::sync::OnceLock::new()),
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
+            system_service: BackgroundTask::default(),
+            resolver_service: BackgroundTask::default(),
+            dns_service: BackgroundTask::default(),
+            guest_trust_service: BackgroundTask::default(),
+            web_index_service: BackgroundTask::default(),
+            tls_signer: BackgroundTask::default(),
+            machine_web_service: BackgroundTask::default(),
+            https_access_service: BackgroundTask::default(),
+            kubernetes_lb_service: BackgroundTask::default(),
         }
     }
 }
@@ -80,17 +106,28 @@ pub struct EarlyContext {
     pub profile: ArcboxProfile,
     pub layout: HostLayout,
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled as soon as the runtime is constructed, before the VM boots.
-    /// Diagnostics only (`GetVirtioDebug`) — a stuck boot must stay
-    /// observable while `shared_runtime` is still empty.
+    /// Serves diagnostics and read-only directories while startup is incomplete.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Empty slot the lease phase publishes the acquired lock into.
     pub daemon_lock_slot: SharedDaemonLock,
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub dns_domain: String,
+    pub system_service: BackgroundTask,
+    pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
+    pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
+    pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
+    pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
     pub dns_port: Option<u16>,
@@ -123,16 +160,31 @@ pub struct DaemonContext {
     /// `StartupHandles` holds a sibling clone so a cancelled startup
     /// future cannot release it early.
     pub daemon_lock: Arc<DaemonLock>,
-    /// Shared with gRPC services. Filled after runtime service endpoints bind.
+    /// System RPC admission, filled after System initialization and endpoint binding.
     pub shared_runtime: SharedRuntime,
+    /// Admits Machine operations after shared host preparation and listener startup.
+    pub host_runtime: SharedRuntime,
     /// Filled by `init_runtime` right after runtime construction, before
-    /// the VM boots. Diagnostics only (`GetVirtioDebug`).
+    /// the VM boots, for diagnostics and read-only directories.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
+    /// The daemon's private signer for the published root, replaced after recovery or rotation.
+    #[cfg(target_os = "macos")]
+    pub local_ca: tokio::sync::watch::Sender<Option<Arc<arcbox_local_ca::KeychainAuthority>>>,
     pub shutdown: CancellationToken,
+    pub rpc_calls: Calls,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub dns_domain: String,
+    pub system_service: BackgroundTask,
+    pub resolver_service: BackgroundTask,
+    pub dns_service: BackgroundTask,
+    pub guest_trust_service: BackgroundTask,
+    pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
+    pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
+    pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].
     pub dns_port: Option<u16>,
@@ -171,17 +223,18 @@ pub struct ControlPlane {
     pub dns: DnsService,
 }
 
-/// Handles to spawned services for drain-on-shutdown.
+/// Machine host endpoints drained during daemon shutdown.
 pub struct ServiceHandles {
-    pub dns: tokio::task::JoinHandle<()>,
     /// Actual UDP port selected by the bound DNS socket.
     pub dns_port: u16,
-    /// Docker API server task; `None` in VM-host-only mode.
-    pub docker: Option<tokio::task::JoinHandle<()>>,
     pub grpc: tokio::task::JoinHandle<()>,
-    pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
-    /// SSH server task; `None` when its best-effort default port was taken.
+    /// SSH server task; absent when the best-effort default port was taken.
     pub ssh: Option<tokio::task::JoinHandle<()>>,
-    /// Host container-route guard; present only on macOS with the Linux VM enabled.
+}
+
+/// System VM endpoints owned by the retained System startup task.
+pub struct SystemServiceHandles {
+    pub docker: Option<tokio::task::JoinHandle<()>>,
+    pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
     pub route_guard: Option<tokio::task::JoinHandle<()>>,
 }

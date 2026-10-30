@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arcbox_api::{SetupPhase, SetupState};
+use arcbox_api::SetupState;
+use arcbox_connect::v1::system_runtime_status::State;
 use arcbox_core::{BootAssetProvider, Config};
 use tracing::info;
 
@@ -12,12 +13,31 @@ use tracing::info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PreparedAssets {
     agent: PreparedAgent,
+    bundle_seed: BundleSeed,
 }
 
 impl PreparedAssets {
     /// Returns where the staged `arcbox-agent` came from.
     pub(super) fn agent(self) -> PreparedAgent {
         self.agent
+    }
+
+    /// Downloads missing shared boot assets before preparing the System VM.
+    /// Bundle provenance prevents a downloaded agent from replacing the launched app's agent.
+    pub(super) async fn prepare_system(
+        self,
+        config: &Config,
+        setup_state: &Arc<SetupState>,
+    ) -> Result<()> {
+        ensure_boot_assets(config, setup_state).await?;
+        let data_dir = config.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            ensure_agent_binary_fallback(&data_dir, self.bundle_seed)
+        })
+        .await
+        .context("System agent preparation task panicked")?
+        .context("System agent preparation failed")?;
+        Ok(())
     }
 }
 
@@ -32,33 +52,27 @@ pub(super) enum PreparedAgent {
     Unavailable,
 }
 
-/// Reconciles all startup assets into `data_dir`.
+/// Reconciles bundle assets and cached agent data without network access.
 ///
-/// Bundle contents are seeded first so Sparkle app updates refresh staged
-/// binaries. Network/download fallback then fills any missing boot assets, and
-/// the boot-cache agent is staged only if the bundle did not provide one.
-pub(super) async fn prepare(
+/// Bundle seeding keeps shared Machine assets coherent with the launched app.
+/// Missing assets are prepared by System startup or a Machine operation.
+pub(super) async fn prepare(config: &Config) -> Result<PreparedAssets> {
+    prepare_with_seed(config, seed_from_bundle).await
+}
+
+async fn prepare_with_seed(
     config: &Config,
-    setup_state: &Arc<SetupState>,
+    seed: impl FnOnce(&Path) -> Result<BundleSeed> + Send + 'static,
 ) -> Result<PreparedAssets> {
-    let data_dir = &config.data_dir;
-    let seed_data_dir = data_dir.clone();
-    let bundle_seed = tokio::task::spawn_blocking(move || seed_from_bundle(&seed_data_dir))
-        .await
-        .context("bundle seed task panicked")?
-        .context("bundle seed failed")?;
-
-    ensure_boot_assets(config, setup_state).await?;
-
-    let fallback_data_dir = data_dir.clone();
-    let agent = tokio::task::spawn_blocking(move || {
-        ensure_agent_binary_fallback(&fallback_data_dir, bundle_seed)
+    let data_dir = config.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let bundle_seed = seed(&data_dir).context("bundle seed failed")?;
+        let agent = ensure_agent_binary_fallback(&data_dir, bundle_seed)
+            .context("cached agent preparation failed")?;
+        Ok(PreparedAssets { agent, bundle_seed })
     })
     .await
-    .context("agent fallback task panicked")?
-    .context("agent fallback failed")?;
-
-    Ok(PreparedAssets { agent })
+    .context("host asset preparation task panicked")?
 }
 
 /// Returns the `Contents/` directory if the daemon is running inside an app bundle.
@@ -320,8 +334,7 @@ fn walkdir(root: &Path) -> impl Iterator<Item = std::io::Result<(PathBuf, bool)>
     })
 }
 
-/// Downloads kernel and rootfs if not already cached. Sets the setup phase to
-/// `DownloadingAssets` while the download is in progress.
+/// Downloads kernel and rootfs if missing without changing host readiness.
 pub(super) async fn ensure_boot_assets(
     config: &Config,
     setup_state: &Arc<SetupState>,
@@ -334,7 +347,7 @@ pub(super) async fn ensure_boot_assets(
         return Ok(());
     }
 
-    setup_state.set_phase(SetupPhase::DownloadingAssets, "Downloading boot assets...");
+    setup_state.set_system_runtime(State::Starting, "Downloading shared boot assets");
     provider
         .get_assets_with_progress(Some(Box::new(|p| {
             tracing::info!(
@@ -398,10 +411,32 @@ pub(super) fn ensure_agent_binary(data_dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSeed, BundleSeed, PreparedAgent, copy_if_changed, ensure_agent_binary_fallback,
-        seed_agent_from_bundle,
+        BundleSeed, PreparedAgent, copy_if_changed, ensure_agent_binary_fallback,
+        prepare_with_seed, seed_agent_from_bundle,
     };
+    use arcbox_core::Config;
     use std::fs;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn host_preparation_requires_no_boot_cache_or_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        };
+        // An unusable cache would fail or trigger a download if host preparation touched boot assets.
+        let cache = directory.path().join("boot");
+        fs::write(&cache, b"System cache unavailable").unwrap();
+        let prepared = prepare_with_seed(&config, |_| Ok(BundleSeed::default()))
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.agent(), PreparedAgent::Unavailable);
+        assert_eq!(fs::read(cache).unwrap(), b"System cache unavailable");
+        assert!(!directory.path().join("runtime").exists());
+        assert!(!directory.path().join("bin").exists());
+    }
 
     #[test]
     fn copies_when_missing_then_skips_when_identical() {
@@ -472,13 +507,23 @@ mod tests {
         assert_eq!(fs::read(staged_agent).unwrap(), b"boot-cache-agent");
     }
 
-    #[test]
-    fn boot_cache_does_not_overwrite_bundle_agent() {
+    #[tokio::test]
+    async fn system_preparation_preserves_host_bundle_agent() {
         let dir = tempfile::tempdir().unwrap();
         let bundle_agent = dir.path().join("bundle-agent");
         fs::write(&bundle_agent, b"bundle-agent").unwrap();
-        let agent = seed_agent_from_bundle(&bundle_agent, dir.path()).unwrap();
-        assert_eq!(agent, AgentSeed::Bundle);
+        let config = Config {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        };
+        let prepared = prepare_with_seed(&config, move |data_dir| {
+            Ok(BundleSeed {
+                agent: seed_agent_from_bundle(&bundle_agent, data_dir)?,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(prepared.agent(), PreparedAgent::Bundle);
 
         let cached_agent = dir.path().join(format!(
             "boot/{}/arcbox-agent",
@@ -486,15 +531,13 @@ mod tests {
         ));
         fs::create_dir_all(cached_agent.parent().unwrap()).unwrap();
         fs::write(&cached_agent, b"older-boot-cache-agent").unwrap();
-
-        let agent = ensure_agent_binary_fallback(
-            dir.path(),
-            BundleSeed {
-                agent: AgentSeed::Bundle,
-            },
-        )
-        .unwrap();
-        assert_eq!(agent, PreparedAgent::Bundle);
+        for asset in ["manifest.json", "kernel", "rootfs.erofs"] {
+            fs::write(cached_agent.parent().unwrap().join(asset), b"cached").unwrap();
+        }
+        let setup = Arc::new(arcbox_api::SetupState::new());
+        setup.set_phase(arcbox_api::SetupPhase::Ready, "host ready");
+        prepared.prepare_system(&config, &setup).await.unwrap();
+        assert_eq!(setup.current().phase, arcbox_api::SetupPhase::Ready);
 
         let staged_agent = dir.path().join("bin/arcbox-agent");
         assert_eq!(fs::read(staged_agent).unwrap(), b"bundle-agent");

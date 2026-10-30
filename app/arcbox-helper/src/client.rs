@@ -6,6 +6,7 @@
 
 use crate::HelperServiceClient;
 use crate::error::HelperError;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Errors from helper client operations.
 #[derive(Debug, thiserror::Error)]
@@ -19,7 +20,7 @@ pub enum ClientError {
     /// The helper returned a version string that cannot be interpreted safely.
     #[error("unrecognized helper version {0:?}")]
     UnrecognizedVersion(String),
-    /// The helper's RPC wire major or minimum version is incompatible.
+    /// The helper's package major or minimum version is incompatible.
     #[error("helper {installed} is incompatible; required {required}")]
     IncompatibleVersion {
         /// Version line returned by the helper.
@@ -42,38 +43,49 @@ impl Client {
     ///
     /// Uses launchd-managed socket by default (`/var/run/arcbox-helper.sock`),
     /// overridable via `ARCBOX_HELPER_SOCKET` env var. The connection is
-    /// rejected before any mutation when the helper wire version is
+    /// rejected before any mutation when the helper package version is
     /// incompatible with this client.
     pub async fn connect() -> Result<Self, ClientError> {
-        let inner = crate::connect().await?;
-        let client = Self { inner };
-        client.ensure_compatible().await?;
-        Ok(client)
+        Self::connect_to(&crate::socket_path()).await
     }
 
     /// Connects to the helper daemon at an explicit socket path.
     ///
     /// Unlike [`connect()`](Self::connect), this does not read the
     /// `ARCBOX_HELPER_SOCKET` env var, making it safe for parallel tests. It
-    /// enforces the same wire-version check as [`connect()`](Self::connect).
+    /// enforces the same package-version check as [`connect()`](Self::connect).
     pub async fn connect_to(path: &str) -> Result<Self, ClientError> {
-        let transport = tarpc::serde_transport::unix::connect(
-            path,
-            tarpc::tokio_serde::formats::Bincode::default,
-        )
-        .await?;
-        let inner =
-            crate::HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn();
-        let client = Self { inner };
-        client.ensure_compatible().await?;
+        let (client, dispatch) = Self::connect_owned_to(path).await?;
+        drop(dispatch.detach());
         Ok(client)
+    }
+
+    /// Connects with dispatcher ownership retained through version verification.
+    /// Drop the client before awaiting the dispatcher during orderly shutdown.
+    pub async fn connect_owned_to(
+        path: &str,
+    ) -> Result<
+        (
+            Self,
+            AbortOnDropHandle<Result<(), tarpc::ChannelError<std::io::Error>>>,
+        ),
+        ClientError,
+    > {
+        let transport =
+            tarpc::serde_transport::unix::connect(path, tarpc::tokio_serde::formats::Json::default)
+                .await?;
+        let tarpc::client::NewClient { client, dispatch } =
+            crate::HelperServiceClient::new(tarpc::client::Config::default(), transport);
+        let dispatch = AbortOnDropHandle::new(tokio::spawn(dispatch));
+        let client = Self { inner: client };
+        client.ensure_compatible().await?;
+        Ok((client, dispatch))
     }
 
     /// Connects only long enough to report the installed helper version.
     ///
-    /// This intentionally skips compatibility enforcement so diagnostics can
-    /// explain why an old helper must be replaced. It never exposes a client
-    /// capable of sending mutation RPCs.
+    /// This skips package-version enforcement for JSON-speaking helpers.
+    /// It never exposes a client capable of sending mutation RPCs.
     pub async fn probe_version() -> Result<String, ClientError> {
         let inner = crate::connect().await?;
         Self { inner }.version().await
@@ -104,30 +116,6 @@ impl Client {
         Ok(self
             .inner
             .route_remove_if_owned(tarpc::context::current(), subnet.into(), iface.into())
-            .await??)
-    }
-
-    /// Installs a DNS resolver file for `domain` on port `port`.
-    pub async fn dns_install(&self, domain: &str, port: u16) -> Result<(), ClientError> {
-        Ok(self
-            .inner
-            .dns_install(tarpc::context::current(), domain.into(), port)
-            .await??)
-    }
-
-    /// Removes the DNS resolver file for `domain`.
-    pub async fn dns_uninstall(&self, domain: &str) -> Result<(), ClientError> {
-        Ok(self
-            .inner
-            .dns_uninstall(tarpc::context::current(), domain.into())
-            .await??)
-    }
-
-    /// Checks if a DNS resolver file is installed for `domain`.
-    pub async fn dns_status(&self, domain: &str) -> Result<bool, ClientError> {
-        Ok(self
-            .inner
-            .dns_status(tarpc::context::current(), domain.into())
             .await??)
     }
 
@@ -190,6 +178,48 @@ impl Client {
     /// Returns the helper daemon version.
     pub async fn version(&self) -> Result<String, ClientError> {
         Ok(self.inner.version(tarpc::context::current()).await?)
+    }
+
+    /// Stores a public ArcBox CA in the System Keychain without granting trust.
+    pub async fn ca_install(&self, der: &[u8]) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .ca_install(tarpc::context::current(), der.into())
+            .await??)
+    }
+
+    /// Checks whether the public CA has TLS-only Admin trust and is installed.
+    pub async fn ca_status(&self, der: &[u8]) -> Result<bool, ClientError> {
+        Ok(self
+            .inner
+            .ca_status(tarpc::context::current(), der.into())
+            .await??)
+    }
+
+    /// Removes only this public CA from the System Keychain after Admin trust is revoked.
+    pub async fn ca_remove(&self, der: &[u8]) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .ca_remove(tarpc::context::current(), der.into())
+            .await??)
+    }
+
+    /// Replaces this connection's resolver roots after daemon-identity verification.
+    pub async fn resolver_lease(&self, update: crate::ResolverLease) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .resolver_lease(tarpc::context::current(), update)
+            .await??)
+    }
+
+    /// Watches authority with five seconds of margin beyond the helper's bounded wait.
+    pub async fn resolver_watch(
+        &self,
+        after_epoch: Option<u64>,
+    ) -> Result<crate::ResolverAuthoritySnapshot, ClientError> {
+        let mut context = tarpc::context::current();
+        context.deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+        Ok(self.inner.resolver_watch(context, after_epoch).await??)
     }
 
     async fn ensure_compatible(&self) -> Result<(), ClientError> {

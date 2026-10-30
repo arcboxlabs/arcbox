@@ -1,9 +1,9 @@
-//! Startup milestones reported out of [`Runtime::init`](crate::Runtime::init).
+//! Startup milestones reported out of [`Runtime::init_system`](crate::Runtime::init_system).
 
-/// A milestone [`Runtime::init`](crate::Runtime::init) passes while bringing
+/// A milestone [`Runtime::init_system`](crate::Runtime::init_system) passes while bringing
 /// the System VM up.
 ///
-/// `init` is a single call spanning the slowest stretch of daemon startup:
+/// `init_system` is a single call spanning the slowest stretch of daemon startup:
 /// staging the guest runtime binaries, booting the VM, the agent handshake,
 /// then probing the guest container runtime. A caller that wants to report
 /// progress to its own clients needs the boundaries *inside* that call, and

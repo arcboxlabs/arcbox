@@ -10,9 +10,9 @@
 //! `0.0.0.0` bindings work because their rule carries no `-d`.
 //!
 //! The agent therefore mirrors each such binding with a rule that matches
-//! traffic arriving on the uplink interface for the same host port, DNATing
-//! it to the same container endpoint dockerd chose. The rule lives only in
-//! the guest, carries a comment naming the container, and is removed when
+//! traffic arriving on the uplink interface for the same host port.
+//! The DNAT target is the container's primary IPv4 address in network-name order.
+//! The rule lives only in the guest, carries a comment naming the container, and is removed when
 //! the container dies; rules left behind by an agent restart are swept at
 //! startup. Since the uplink only ever carries traffic the host relay
 //! injected, and the relay only injects what its own address-bound listener
@@ -21,6 +21,7 @@
 use std::net::Ipv4Addr;
 
 use anyhow::Result;
+use arcbox_dns::container::ContainerMetadata;
 
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -36,7 +37,7 @@ pub struct PinnedPublish {
     pub host_port: u16,
     /// Container port behind it.
     pub container_port: u16,
-    /// The container's address on the network the binding was made on.
+    /// The container's primary IPv4 address in network-name order.
     pub container_ip: Ipv4Addr,
 }
 
@@ -53,7 +54,9 @@ pub fn pinned_publishes(inspect: &serde_json::Value) -> Vec<PinnedPublish> {
     else {
         return Vec::new();
     };
-    let Some(container_ip) = container_ipv4(inspect) else {
+    let Some(container_ip) =
+        ContainerMetadata::from_inspect(inspect).and_then(|metadata| metadata.primary_ipv4())
+    else {
         return Vec::new();
     };
 
@@ -106,15 +109,6 @@ pub fn pinned_publishes(inspect: &serde_json::Value) -> Vec<PinnedPublish> {
     out
 }
 
-/// The container's IPv4 address on its first attached network.
-fn container_ipv4(inspect: &serde_json::Value) -> Option<Ipv4Addr> {
-    inspect
-        .pointer("/NetworkSettings/Networks")?
-        .as_object()?
-        .values()
-        .find_map(|net| net.get("IPAddress")?.as_str()?.parse().ok())
-}
-
 /// The PREROUTING rule that mirrors one binding for traffic arriving on
 /// `uplink`.
 fn rule(uplink: &str, container_id: &str, publish: &PinnedPublish) -> NatRule {
@@ -141,7 +135,7 @@ impl PublishMirror {
     pub fn new(uplink: String) -> Self {
         Self {
             uplink,
-            rules: TaggedRules::new(RULE_OWNER),
+            rules: TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL),
         }
     }
 
@@ -176,7 +170,9 @@ impl PublishMirror {
 /// process's rules, and dockerd re-creates its own on restart, so the
 /// event reconciliation that follows reinstalls what is still needed.
 pub async fn remove_all_orphans() -> Result<()> {
-    let removed = iptables::sweep(RULE_OWNER).await?;
+    let removed = TaggedRules::new(RULE_OWNER, iptables::SYSTEM_TOOL)
+        .sweep()
+        .await?;
     if removed > 0 {
         tracing::info!(removed, "swept publish mirror rules from a previous agent");
     }
@@ -189,6 +185,8 @@ mod tests {
 
     fn inspect(ports: serde_json::Value, ip: &str) -> serde_json::Value {
         serde_json::json!({
+            "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "Name": "/web",
             "NetworkSettings": {
                 "Ports": ports,
                 "Networks": { "bridge": { "IPAddress": ip } }
@@ -235,12 +233,39 @@ mod tests {
     fn no_ports_or_no_ip_yields_nothing() {
         assert_eq!(pinned_publishes(&serde_json::json!({})), []);
         let no_ip = serde_json::json!({
+            "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "Name": "/web",
             "NetworkSettings": {
                 "Ports": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "1"}]},
                 "Networks": {}
             }
         });
         assert_eq!(pinned_publishes(&no_ip), []);
+    }
+
+    #[test]
+    fn publishes_use_one_primary_address_in_network_name_order() {
+        let mut doc = inspect(
+            serde_json::json!({
+                "80/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "8080" }]
+            }),
+            "172.17.0.2",
+        );
+        for networks in [
+            serde_json::json!({
+                "z": { "IPAddress": "172.17.0.2" },
+                "a": { "IPAddress": "172.18.0.3" },
+            }),
+            serde_json::json!({
+                "a": { "IPAddress": "172.18.0.3" },
+                "z": { "IPAddress": "172.17.0.2" },
+            }),
+        ] {
+            doc["NetworkSettings"]["Networks"] = networks;
+            let publishes = pinned_publishes(&doc);
+            assert_eq!(publishes.len(), 1);
+            assert_eq!(publishes[0].container_ip, Ipv4Addr::new(172, 18, 0, 3));
+        }
     }
 
     #[test]

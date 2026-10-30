@@ -36,6 +36,11 @@ tokio-util = "0.7"
 httparse = "1.10.1"
 http-body = "1.1.0"
 arcbox-connect.workspace = true
+tar = "0.4.46"
+base64 = "0.22.1"
+arcbox-local-ca.workspace = true
+percent-encoding = "2.3.2"
+arcbox-dns.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
@@ -43,6 +48,8 @@ tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 hyper = { workspace = true }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+arcbox-core = { workspace = true, features = ["test-support"] }
 
 [features]
 default = []

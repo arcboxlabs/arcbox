@@ -20,10 +20,9 @@ run fails, and which paths must change together.
 ## Readiness
 
 - Observe readiness ONLY via `WatchSetupStatus` (`DaemonHandle::wait_ready`
-  / `wait_ready_blocking`). WHY: the stream fails fast on the FAILED phase
-  (with the daemon's reported error) or on daemon exit (with the log tail);
-  log-grep and sleep both race the startup sequence. Never grep logs or
-  sleep for readiness.
+  / `wait_ready_blocking`). Require host `READY` and System runtime `READY` for Docker scenarios. Host readiness alone does not imply Docker readiness. The stream reports host and System failures with their causes. Accept System `DISABLED` only when the harness explicitly passes `--no-linux-vm`. Storage fault scenarios may use `wait_storage_startup`; validate the resulting protection and stopped state in the scenario. Never grep logs or sleep for readiness.
+- Measure guest boot from structured System runtime `VM_STARTING` to `VM_READY`. Preserve the `boot_span`, `phase_vm_starting`, and `phase_vm_ready` metric names. Record host and System `READY` separately.
+- A setup subscription starts with the current snapshot. Early host phases `ASSETS_READY` and `NETWORK_READY` may precede subscription. Check the order of observed phases. Require host `READY` and both System VM boot milestones in the smoke scenario.
 
 ## Forensics: where to look when a run fails
 

@@ -1,4 +1,4 @@
-//! Everything ArcBox writes to a Mac, and which of it is present.
+//! ArcBox-owned paths to remove, including the lock directory created during CA cleanup.
 //!
 //! This list is the contract behind `abctl uninstall`; the "Uninstall"
 //! section of `docs/data-directories.md` restates it for users. Change the
@@ -20,8 +20,7 @@ use arcbox_constants::paths::{
 };
 use arcbox_helper::validate::SocketTarget;
 
-/// Marker prefix shared by the resolver files `abctl dns install`
-/// (`# managed by arcbox`) and the helper (`# managed by arcbox-helper`) write.
+/// Marker prefix for historical CLI files and current helper lease files.
 const RESOLVER_MARKER: &str = "# managed by arcbox";
 
 /// Marker on the one `/etc/hosts` line the helper manages.
@@ -86,14 +85,6 @@ impl Roots {
         HostMountLayout::under_home(&self.home)
     }
 
-    pub(super) fn login_keychain(&self) -> PathBuf {
-        self.home.join("Library/Keychains/login.keychain-db")
-    }
-
-    pub(super) fn local_ca(&self) -> PathBuf {
-        self.data_dir.join(guest::TLS).join(guest::TLS_CA_CERT)
-    }
-
     /// The Desktop app's preferences, which `cfprefsd` caches: removed with
     /// `defaults delete`, not by unlinking the file.
     pub(super) fn preferences(&self) -> PathBuf {
@@ -118,7 +109,7 @@ impl Roots {
     }
 }
 
-/// A file or directory ArcBox left behind.
+/// An ArcBox-owned file or directory scheduled for removal.
 pub(super) struct Found {
     pub(super) what: &'static str,
     pub(super) path: PathBuf,
@@ -126,7 +117,7 @@ pub(super) struct Found {
     pub(super) needs_root: bool,
 }
 
-/// What is present on this Mac out of everything ArcBox writes.
+/// Existing ArcBox state and paths created during uninstall.
 pub(super) struct Residue {
     pub(super) files: Vec<Found>,
     /// `/etc/hosts` carries the managed `ArcBox` alias line.
@@ -145,8 +136,8 @@ impl Residue {
     }
 }
 
-/// Lists what is present. Read-only; ownership checks read links and files
-/// as the current user.
+/// Plans removal of existing state and the directory created by CA cleanup.
+/// Ownership checks read links and files as the current user.
 pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     let mut files = Vec::new();
     let mut found = |what, path: PathBuf, needs_root| {
@@ -159,6 +150,7 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
         }
     };
 
+    // Preserve HELPER_INSTALL_LOCK so concurrent installers keep locking the same inode.
     // Privileged, by path.
     found(
         "helper binary",
@@ -238,13 +230,12 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     if keep_data {
         if let Ok(entries) = std::fs::read_dir(&roots.data_dir) {
             for entry in entries.flatten() {
-                if entry.file_name() != "data" {
+                let name = entry.file_name();
+                if name != "data" && name != guest::TLS {
                     found("data directory entry", entry.path(), false);
                 }
             }
         }
-    } else {
-        found("data directory", roots.data_dir.clone(), false);
     }
 
     let app = roots.app_bundle();
@@ -252,6 +243,20 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     if !app_left_to_homebrew {
         found("app bundle", app, false);
     }
+    // CA cleanup creates operation.lock even when the profile directory is absent.
+    files.push(Found {
+        what: if keep_data {
+            "CA directory"
+        } else {
+            "data directory"
+        },
+        path: if keep_data {
+            roots.data_dir.join(guest::TLS)
+        } else {
+            roots.data_dir.clone()
+        },
+        needs_root: false,
+    });
 
     Residue {
         files,

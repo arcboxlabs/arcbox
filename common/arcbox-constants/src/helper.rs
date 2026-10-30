@@ -2,7 +2,7 @@
 //! string format) the Desktop app.
 //!
 //! The helper crate (`arcbox-helper`) owns an **independent** Cargo version
-//! (currently `1.1.0`), not `workspace.package.version`. Compare that version
+//! (currently `1.2.0`), not `workspace.package.version`. Compare that version
 //! — never the daemon/workspace crate version — when deciding whether to
 //! reinstall the root binary.
 //!
@@ -19,7 +19,7 @@
 ///
 /// Must stay in sync with `app/arcbox-helper/Cargo.toml` `version` (and the
 /// workspace path-dep pin) whenever the floor moves.
-pub const MIN_HELPER_VERSION: &str = "1.1.0";
+pub const MIN_HELPER_VERSION: &str = "1.2.0";
 
 /// Strips the optional `arcbox-helper ` prefix and whitespace from a version line.
 #[must_use]
@@ -67,12 +67,11 @@ pub fn parse_helper_version(version_output: &str) -> Option<(u64, u64, u64)> {
 /// `minimum`.
 ///
 /// Rules:
-/// - **Same major** as `minimum` (wire major; a future `2.x` helper is not
+/// - **Same major** as `minimum` (a future `2.x` helper is not
 ///   accepted by a `1.x` daemon even if `2.x > 1.x` numerically).
 /// - `installed >= minimum` within that major (minor/patch floor).
 ///
-/// A higher major must force reinstall / doctor fail so tarpc ordinal and
-/// `HelperError` layout breaks cannot be silently driven into the wrong binary.
+/// A higher major requires reinstall because the helper behavior may differ.
 #[must_use]
 pub fn helper_version_satisfies(installed: (u64, u64, u64), minimum: (u64, u64, u64)) -> bool {
     installed.0 == minimum.0 && installed >= minimum
@@ -82,7 +81,7 @@ pub fn helper_version_satisfies(installed: (u64, u64, u64), minimum: (u64, u64, 
 ///
 /// Reinstall when:
 /// - installed or bundled version is missing / unparseable
-/// - **major differs** either way (wire break; including app downgrade that
+/// - **major differs** either way (including an app downgrade that
 ///   left a newer-major helper on disk)
 /// - installed is **strictly older** than bundled within the same major
 ///
@@ -133,7 +132,7 @@ mod tests {
         assert!(helper_version_satisfies((1, 0, 0), (1, 0, 0)));
         assert!(helper_version_satisfies((1, 0, 1), (1, 0, 0)));
         assert!(!helper_version_satisfies((0, 4, 24), (1, 0, 0)));
-        // Higher major is a wire break — not "newer is fine".
+        // A different package major does not satisfy the required behavior.
         assert!(!helper_version_satisfies((2, 0, 0), (1, 0, 0)));
         assert!(!helper_version_satisfies((1, 0, 0), (2, 0, 0)));
 

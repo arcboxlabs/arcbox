@@ -49,6 +49,7 @@ from memory. Every new file is added to the index below.
 
 - [Packet primitives](../common/arcbox-packet/README.md) — IP views, Ethernet framing, and checksums
 - [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle, force-stop completion, and storage maintenance
+- [Local domains and HTTPS](local-https.md) — service contract, trust operations, and completion requirements
 - [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [Data directories](data-directories.md) — every path the daemon writes
 - [Boot assets](boot-assets.md) — the kernel/rootfs bundle and its pin
@@ -68,6 +69,12 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [0009 — Host work must drain before machine teardown](adr/0009-host-work-drains-before-machine-teardown.md) (2026-10-09; supersedes ADR 0003 decision 5)
+- [0008 — The local CA covers concrete names under `.local`](adr/0008-local-ca-covers-local-domains.md) (2026-10-08)
+- [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
+- [0006 — Authorize local CA trust in the login user's session](adr/0006-authorize-local-ca-in-user-session.md) (2026-10-08)
+- [0005 — The privileged helper manages local CA trust](adr/0005-helper-manages-local-ca-trust.md) (2026-10-08; trust mutation and authorization superseded by ADR 0006)
+- [0004 — The macOS Keychain owns the local CA key](adr/0004-local-ca-signs-in-macos-keychain.md) (2026-10-07)
 - [0001 — On the HV backend, asserting the SPI is the whole wake](adr/0001-hv-spi-is-the-whole-wake.md) (2026-09-30)
 - [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03; decisions 4 and 5 superseded by ADR 0003)
 - [0003 — One host mount root: `~/ArcBox` is a plain directory, with the docker export at `docker/` and every running machine's root at `machines/<name>`](adr/0003-single-host-mount-root.md) (2026-10-04)
@@ -81,6 +88,8 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-09 — Does the Keychain CA reject other application identities?](experiments/2026-10-09-keychain-signing-identity.md)
+- [2026-10-09 — Can a Linux CA bundle preserve macOS SSL trust?](experiments/2026-10-09-macos-trust-portability.md)
 - [2026-10-08 — Why can copying into a stopped container fail with OverlayFS EBUSY?](experiments/2026-10-08-overlay-copy-lifetime.md) — [guest lifecycle recorder](../tests/bench/signoz/probe-overlay-lifecycle.sh), [lifecycle analyzer](../tests/bench/signoz/analyze_overlay_lifecycle.py), [experimental exit barrier](../tests/bench/signoz/moby-overlay-exit/README.md)
 - [2026-10-08 — Does ClickHouse still stall with a low-cost observer?](experiments/2026-10-08-clickhouse-native-observer.md) — [native observer](../tests/bench/signoz/observe_clickhouse.c)
 - [2026-10-08 — Can kernel events retain the ClickHouse stall path?](experiments/2026-10-08-clickhouse-kernel-events.md) — [recorder controller](../tests/bench/signoz/clickhouse_trace.py), [guest helper](../tests/bench/signoz/trace-clickhouse.sh), [futex PC helper](../tests/bench/signoz/trace-clickhouse-pc.sh), [recorder lifecycle regressions](../tests/bench/signoz/test_clickhouse_trace.py), [PC ownership and export regressions](../tests/bench/signoz/test_trace_clickhouse_pc.py), [capture validator](../tests/bench/signoz/validate_clickhouse_trace.py), [spin/runtime analyzer](../tests/bench/signoz/analyze_clickhouse_spin.py), [stack integrity and association checks](../tests/bench/signoz/analyze_clickhouse_stacks.py), [host scheduler analyzer](../tests/bench/signoz/analyze_host_ktrace.py), [host scheduler extraction regression](../tests/bench/signoz/test_host_ktrace.py)
@@ -148,6 +157,12 @@ from memory. Every new file is added to the index below.
 - [2026-10-19 — Align Clippy configuration with Rust 1.96](logs/2026-10-19-pinned-clippy.md)
 - [2026-10-14 — TCP promotion and receive batches preserve protocol state](logs/2026-10-14-network-followups.md)
 - [2026-10-12 — Passive-open completion preserves payload and receive window](logs/2026-10-12-passive-open-payload.md)
+- [2026-10-11 — Docker archive teardown releases indexed overlay mounts](logs/2026-10-11-docker-archive-mount-lifetime.md)
+- [2026-10-10 — Signed HTTPS candidates pass artifact verification](logs/2026-10-10-https-signed-candidates.md)
+- [2026-10-09 — HTTPS packaging prerequisites and isolated NAT validation are ready](logs/2026-10-09-https-validation-preparation.md)
+- [2026-10-08 — Custom local domains and deterministic ownership](logs/2026-10-08-custom-local-domains.md)
+- [2026-10-08 — Local CA rotation and recovery](logs/2026-10-08-local-ca-rotation.md)
+- [2026-10-08 — One DNS suffix reaches the host and System VM](logs/2026-10-08-instance-dns-domain.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)
 - [2026-10-08 — Sandbox benchmarks distinguish creation paths and preserve measurement units](logs/2026-10-08-sandbox-benchmark-integration.md)
 - [2026-10-07 — Caller-owned rootfs capacity and publication passed Linux validation](logs/2026-10-07-rootfs-capacity-integration.md)
@@ -156,5 +171,7 @@ from memory. Every new file is added to the index below.
 - [2026-10-05 — Every agent business request requires protocol v7](logs/2026-10-05-agent-v7-admission.md)
 - Application restart probes: [isolated ClickHouse driver](../tests/bench/signoz/run_clickhouse_restart.py), [configuration permission regression](../tests/bench/signoz/test_clickhouse_config.py), [retained-network regression](../tests/bench/signoz/test_clickhouse_network.py), [thread observer](../tests/bench/signoz/observe-clickhouse.sh), [strict evidence checks](../tests/bench/signoz/analyze_clickhouse_samples.py), [independent host CPU sampler](../tests/bench/signoz/sample_host_vm.py), [host/guest counter comparison](../tests/bench/signoz/compare_host_guest_cpu.py), [profiler fixture preparation](../tests/bench/signoz/prepare_profiler_fixture.py)
 - [2026-10-07 — SigNoz remains idle after ClickHouse stalls](logs/2026-10-07-signoz-profiler-and-cpu-accounting.md) — Collector rollback, profiler truncation, CPU parser correction, and accounting divergence reproduced by host suspension; the original stall remains unresolved. Probes: [SQL](../tests/bench/signoz/diagnose.sql), [CPU parser](../tests/bench/signoz/cpu_ticks_repro.rs), [CPU sampler](../tests/bench/signoz/sample_cpu.py), [workload](../tests/bench/signoz/cpu_workload.sql), [VM suspension](../tests/bench/signoz/pause_vm.py), [accounting overhead](../tests/bench/signoz/accounting_overhead.c), [stall history](../tests/bench/signoz/stall_history.sql), [scheduler delay](../tests/bench/signoz/run_scheduler_debt.py)
+- [2026-10-08 — The helper manages local HTTPS trust](logs/2026-10-08-helper-ca-trust.md)
+- [2026-10-08 — The host signs local HTTPS certificates with a Keychain CA](logs/2026-10-08-keychain-ca-migration.md)
 - [2026-09-29 — vsock RX: drain a stream per round, aim the kick](logs/2026-09-29-vsock-rx-round-and-targeted-kick.md)
 - [2026-10-07 — A restored sandbox can be checkpointed and restored again](logs/2026-10-07-checkpoint-chain-live.md)

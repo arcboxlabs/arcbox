@@ -147,6 +147,7 @@ impl From<&MachineInfo> for ArchivedMachine {
             distro: machine.distro.clone().unwrap_or_default(),
             distro_version: machine.distro_version.clone(),
             mounts: machine.mounts.clone(),
+            web_ports: machine.web_ports,
         }
     }
 }

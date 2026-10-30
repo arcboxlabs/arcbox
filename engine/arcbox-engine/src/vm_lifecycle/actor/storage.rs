@@ -89,7 +89,7 @@ impl LifecycleActor {
                         )
                     })
                 {
-                    shared.machine_manager.stop(&shared.machine_name)?;
+                    shared.machine_manager.stop(&shared.machine_name, None)?;
                 }
                 Ok::<_, EngineError>(())
             })

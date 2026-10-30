@@ -1,7 +1,12 @@
 //! `ArcBox` runtime.
 
 mod assets;
+mod dns_reservations;
 mod engine_config;
+mod host_network;
+#[cfg(target_os = "macos")]
+mod inbound_listeners;
+mod initialization;
 mod kubeconfig;
 mod kubernetes_lb;
 mod machine_dns;
@@ -10,12 +15,17 @@ mod progress;
 mod sandbox_host;
 mod storage_health;
 mod storage_recovery;
+mod web_services;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use host_network::NetworkFixture;
+pub use host_network::{ContainerChange, ContainerNetwork, HostMutationLease, HostNetworkSnapshot};
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
+pub use web_services::{CapturedMachineWeb, CapturedWebGuest};
 
 use crate::config::Config;
 use crate::container_backend::{DynContainerBackend, create_backend};
@@ -34,19 +44,21 @@ use arcbox_connect::v1::{
     ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
+use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
+use arcbox_engine::vm::VmIncarnation;
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
-use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+use arcbox_net::darwin::inbound_relay::InboundProtocol;
 #[cfg(not(target_os = "macos"))]
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
-use assets::ensure_guest_binaries;
+#[cfg(target_os = "macos")]
+use inbound_listeners::Slot as InboundListenerSlot;
 use kubeconfig::{host_endpoint, rewrite_kubeconfig};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(not(target_os = "macos"))]
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as TokioRwLock};
@@ -130,22 +142,16 @@ fn resolve_bind_ip(host_ip_str: &str, unspecified: Ipv4Addr) -> Option<Ipv4Addr>
 
 /// Inbound port-forwarding rules per container.
 ///
-/// Maps the canonical container ID to the machine that holds the rules and
-/// the list of `(host_ip, host_port, protocol)` tuples registered on that
-/// machine. The machine name is needed so teardown reaches the right
+/// Maps each canonical container ID to its machine and complete host-to-guest
+/// bindings. The destination port participates in refresh equality.
+/// The machine name is needed so teardown reaches the right
 /// inbound listener when both utility VMs are active concurrently.
 #[cfg(target_os = "macos")]
 type InboundRulesMap =
-    Arc<TokioRwLock<HashMap<String, (String, Vec<(Ipv4Addr, u16, InboundProtocol)>)>>>;
+    Arc<TokioRwLock<HashMap<String, (String, Vec<(Ipv4Addr, u16, u16, InboundProtocol)>)>>>;
 /// Per-machine inbound listener managers, keyed by machine name.
 #[cfg(target_os = "macos")]
-type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerManager>>>;
-
-struct DnsRegistration {
-    hostnames: Vec<String>,
-    ip: IpAddr,
-    revision: u64,
-}
+type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerSlot>>>;
 
 struct KubernetesHostEndpoint {
     port: u16,
@@ -211,9 +217,11 @@ pub struct Runtime {
     /// Generation fence for cleanup racing RPC-created host state.
     /// ponytail: keep one fence until unrelated cleanup retries are measurable.
     sandbox_host_state: TokioMutex<u64>,
-    /// Tracks DNS owner → registered hostnames and IP.
-    dns_entries: Arc<TokioRwLock<HashMap<String, DnsRegistration>>>,
-    dns_revision: AtomicU64,
+    /// Authoritative resource claims, addresses, and revisions shared with DNS consumers.
+    dns_registry: Arc<RwLock<Registry>>,
+    /// Lifecycle operations for one canonical container ID share the same lock.
+    container_lifecycle: Mutex<HashMap<String, Weak<TokioMutex<()>>>>,
+    host_network: host_network::HostNetwork,
     /// Maps a container's unique name to its canonical ID, so teardown can
     /// resolve the name/short-ID a client used without a guest inspect
     /// round-trip. Populated at registration, updated on rename, cleared with
@@ -279,20 +287,28 @@ impl Runtime {
         vm_lifecycle_config.guest_docker_vsock_port =
             Some(config.container.guest_docker_vsock_port);
         vm_lifecycle_config.container_network = config.container.cidr;
+        vm_lifecycle_config.dns_domain = config.network.dns_domain.clone();
         vm_lifecycle_config.allow_unpinned_boot_manifest =
             config.profile == arcbox_constants::paths::ArcboxProfile::Development;
 
         let event_bus = EventBus::new();
         let snapshot_dir = config.data_dir.join("snapshots");
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
-        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
+        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig {
+            dns: arcbox_net::dns::DnsConfig::default()
+                .with_local_domain(config.network.dns_domain.as_str()),
+            ..Default::default()
+        }));
+        let dns_registry = network_manager.dns_registry();
+        *dns_registry.write().expect("DNS registry lock poisoned") =
+            dns_reservations::registry(&config.network.dns_domain)?;
 
         // Every VM's datapath is wired to the host the same way: the DNS
-        // hosts table it shares with the host DnsService, and the operator's
+        // registry it shares with the host DnsService, and the operator's
         // egress proxy policy. `system` probes the Mac's proxy settings here,
         // once per daemon start.
         let host_network = HostNetwork {
-            dns_hosts: Some(network_manager.local_hosts_table()),
+            dns: Some(network_manager.shared_dns()),
             proxy: config.network.proxy_settings().resolve(),
         };
 
@@ -373,8 +389,9 @@ impl Runtime {
             kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
-            dns_entries: Arc::new(TokioRwLock::new(HashMap::new())),
-            dns_revision: AtomicU64::new(0),
+            dns_registry,
+            container_lifecycle: Mutex::default(),
+            host_network: host_network::HostNetwork::default(),
             container_aliases: Arc::new(TokioRwLock::new(HashMap::new())),
             stats_hub,
             machine_stats_hubs: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -389,6 +406,25 @@ impl Runtime {
     /// Fence a cleanup or host-side sandbox state mutation.
     pub async fn lock_sandbox_host_state(&self) -> TokioMutexGuard<'_, u64> {
         self.sandbox_host_state.lock().await
+    }
+
+    /// Serializes lifecycle operations for one complete Docker container ID.
+    pub async fn lock_container_lifecycle(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .container_lifecycle
+                .lock()
+                .expect("container lifecycle locks poisoned");
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(TokioMutex::new(()));
+                locks.insert(id.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     /// Subscribes to live System VM machine stats (see
@@ -903,6 +939,23 @@ impl Runtime {
             .map_err(CoreError::from)
     }
 
+    /// Opens the System VM's agent connection for one captured physical run.
+    ///
+    /// # Errors
+    /// Returns an error if the expected VM is unavailable, replaced, or cannot connect.
+    pub async fn connect_system_agent_expected(
+        &self,
+        expected: VmIncarnation,
+    ) -> Result<crate::agent_client::AgentClient> {
+        let machine_manager = Arc::clone(&self.machine_manager);
+        tokio::task::spawn_blocking(move || {
+            machine_manager.connect_agent_expected(DEFAULT_MACHINE_NAME, &expected)
+        })
+        .await
+        .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))?
+        .map_err(CoreError::from)
+    }
+
     /// Connects to a machine's guest service via vsock port.
     ///
     /// # Errors
@@ -911,6 +964,21 @@ impl Runtime {
     pub fn connect_vsock_port(&self, machine_name: &str, port: u32) -> Result<std::os::fd::RawFd> {
         self.machine_manager
             .connect_vsock_port(machine_name, port)
+            .map_err(CoreError::from)
+    }
+
+    /// Opens a guest service connection for one captured physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the expected VM is unavailable, replaced, or cannot connect.
+    pub fn connect_vsock_port_expected(
+        &self,
+        machine_name: &str,
+        expected: &VmIncarnation,
+        port: u32,
+    ) -> Result<std::os::fd::RawFd> {
+        self.machine_manager
+            .connect_vsock_port_expected(machine_name, expected, port)
             .map_err(CoreError::from)
     }
 
@@ -1059,7 +1127,7 @@ impl Runtime {
         } else {
             self.release_kubernetes().await;
         }
-        response.host_ports = self.kubernetes_host_ports().await;
+        response.host_ports = self.kubernetes_host_ports().await?;
         Ok(response)
     }
 
@@ -1079,108 +1147,6 @@ impl Runtime {
         response.context_name.clone_from(&endpoint.context_name);
         response.endpoint = host_endpoint;
         Ok(response)
-    }
-
-    /// Initializes the runtime and eagerly starts the default VM.
-    ///
-    /// Validates that all guest binaries (agent + runtime) are present and
-    /// executable before starting the VM. This is a boot-blocking check.
-    ///
-    /// `progress` observes the [`InitProgress`] milestones as they are
-    /// reached — this is the only way to see inside the call, which spans
-    /// the slowest part of daemon startup. It is never invoked in
-    /// VM-host-only mode, where no VM starts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if initialization fails or guest binaries are missing.
-    pub async fn init(&self, progress: impl Fn(InitProgress) + Send) -> Result<()> {
-        // Create data directories.
-        tokio::fs::create_dir_all(&self.config.data_dir).await?;
-        tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
-        tokio::fs::create_dir_all(self.config.data_dir.join("machines")).await?;
-
-        // VM-host-only mode: skip the entire Linux/Docker system-VM bootstrap.
-        // The Linux VM never boots (so no lifecycle actor and no idle balloon
-        // management), and no guest binaries are downloaded. The daemon layer
-        // likewise skips the Docker API, Docker CLI integration, and the
-        // Kubernetes proxy. macOS guest management is unaffected.
-        if !self.config.vm.autostart {
-            tracing::info!(
-                "Linux VM autostart disabled; running as a VM host only (Docker/Kubernetes unavailable)"
-            );
-            return Ok(());
-        }
-
-        // Download every runtime binary in the boot manifest if not cached:
-        // dockerd, containerd, containerd-shim-runc-v2, runc, docker-init, k3s,
-        // and the optional FEX x86_64 interpreter for linux/amd64. ArcBox's
-        // FEX carries a small patch making it binfmt-only — no FEXServer.
-        let generation = self.vm_lifecycle.boot_assets().config().version.clone();
-        let runtime_bin_dir = self
-            .config
-            .data_dir
-            .join("runtime")
-            .join(&generation)
-            .join("bin");
-        tokio::fs::create_dir_all(&runtime_bin_dir).await?;
-        self.vm_lifecycle
-            .boot_assets()
-            .prepare_binaries(&runtime_bin_dir, None)
-            .await?;
-
-        // Validate all guest binaries are present and executable (boot-blocking).
-        ensure_guest_binaries(&self.config.data_dir, &generation)?;
-
-        // The operator's dockerd overrides ride the shared data directory
-        // into the guest, which merges them into daemon.json at init.
-        engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
-
-        if self.machine_manager.storage_is_held()? {
-            tracing::warn!(
-                "System VM storage is held for recovery; keeping the control plane available"
-            );
-            return Ok(());
-        }
-
-        // So does the CA behind HTTPS on container domains: generated once,
-        // signed with in the guest, trusted by the user (`abctl tls trust`).
-        let tls_dir = self
-            .config
-            .data_dir
-            .join(arcbox_constants::paths::guest::TLS);
-        if arcbox_local_ca::ensure(&tls_dir)? {
-            tracing::info!(path = %tls_dir.display(), "generated the local CA for container domains");
-        }
-
-        // Boot the VM through the lifecycle manager first so the agent
-        // handshake is observable on its own: `ensure_vm_ready` below covers
-        // the VM *and* the guest container runtime with no boundary between
-        // them. With the VM already up it short-circuits on the lifecycle
-        // actor's cached CID and only waits for dockerd.
-        progress(InitProgress::SystemVmStarting);
-        if let Err(error) = self.vm_lifecycle.ensure_ready().await {
-            if self.protect_failed_storage_boot(&error)? {
-                tracing::warn!(%error, "System VM storage is protected; keeping the control plane available");
-                return Ok(());
-            }
-            return Err(error.into());
-        }
-        progress(InitProgress::SystemVmReady);
-
-        if let Err(error) = self.ensure_vm_ready().await {
-            if self.protect_failed_runtime_start(&error).await? {
-                tracing::warn!(%error, "Required storage is unavailable; keeping the stopped System VM protected");
-                return Ok(());
-            }
-            return Err(error);
-        }
-
-        tracing::info!(
-            backend = self.container_backend.name(),
-            "ArcBox runtime initialized"
-        );
-        Ok(())
     }
 
     /// Stops every running macOS guest, logging any per-machine failures.
@@ -1218,11 +1184,12 @@ impl Runtime {
     ///
     /// Returns an error if shutdown fails.
     pub async fn shutdown(&self) -> Result<()> {
+        self.close_host_network_admission();
         tracing::info!("ArcBox runtime shutting down");
         let recovery_closed = self.close_storage_recovery().await;
 
         // 1. Stop all active host port forwarders.
-        self.stop_port_forwarding_all().await;
+        self.clear_host_network_for_shutdown().await;
 
         // 2. Shutdown VM lifecycle manager (gracefully stops default VM).
         if matches!(recovery_closed, Ok(false))
@@ -1236,33 +1203,12 @@ impl Runtime {
         for machine in machines {
             if machine.state == MachineState::Running && machine.name != DEFAULT_MACHINE_NAME {
                 tracing::debug!("Stopping machine {}", machine.name);
-                let stopped_gracefully = match self.machine_manager.graceful_stop(
+                let stop_result = self.machine_manager.stop(
                     &machine.name,
-                    Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
-                ) {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        tracing::warn!(
-                            "Graceful stop timed out for machine {}, forcing stop",
-                            machine.name
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Graceful stop failed for machine {}: {}, forcing stop",
-                            machine.name,
-                            e
-                        );
-                        false
-                    }
-                };
-
-                let stop_result = if stopped_gracefully {
-                    Ok(())
-                } else {
-                    self.machine_manager.stop(&machine.name)
-                };
+                    Some(Duration::from_secs(
+                        arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                    )),
+                );
 
                 match stop_result {
                     Ok(()) => {
@@ -1294,10 +1240,11 @@ impl Runtime {
     ///
     /// Returns an error if shutdown fails.
     pub async fn shutdown_force(&self) -> Result<()> {
+        self.close_host_network_admission();
         tracing::warn!("ArcBox runtime force shutdown");
         let recovery_closed = self.close_storage_recovery().await;
 
-        self.stop_port_forwarding_all().await;
+        self.clear_host_network_for_shutdown().await;
 
         // Force stop VM lifecycle manager (immediate VM termination).
         if matches!(recovery_closed, Ok(false))
@@ -1311,7 +1258,7 @@ impl Runtime {
         for machine in machines {
             if machine.state == MachineState::Running && machine.name != DEFAULT_MACHINE_NAME {
                 tracing::debug!("Force stopping machine {}", machine.name);
-                let _ = self.machine_manager.stop(&machine.name);
+                let _ = self.machine_manager.stop(&machine.name, None);
             }
         }
 
@@ -1362,7 +1309,20 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)], // (host_ip, host_port, container_port, protocol)
     ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.start_port_forwarding_raw(machine_name, container_id, bindings)
+            .await
+    }
+
+    async fn start_port_forwarding_raw(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+    ) -> Result<()> {
         if bindings.is_empty() {
+            self.stop_port_forwarding_raw(container_id).await;
             return Ok(());
         }
 
@@ -1374,36 +1334,9 @@ impl Runtime {
 
         #[cfg(not(target_os = "macos"))]
         {
-            self.start_port_forwarding_fallback(machine_name, container_id, bindings)
+            let expected = self.machine_manager.network_incarnation(machine_name)?;
+            self.start_port_forwarding_fallback(machine_name, container_id, bindings, &expected)
                 .await
-        }
-    }
-
-    /// Installs the manager the machine's VMM created for the running VM.
-    ///
-    /// A manager already cached under the name belongs to the previous
-    /// incarnation of the VM: its listeners inject into a datapath that no
-    /// longer exists, and they hold the host ports the same publishes need
-    /// on the new VM. It is stopped, and the ownership records that pointed
-    /// at its listeners dropped, before the new manager takes its place.
-    #[cfg(target_os = "macos")]
-    async fn adopt_inbound_listener_manager(
-        &self,
-        machine_name: &str,
-        manager: InboundListenerManager,
-    ) {
-        // Ownership map before the listener map, the order every other
-        // path takes.
-        let mut rules = self.inbound_rules.write().await;
-        let mut listeners = self.inbound_listeners.write().await;
-        if let Some(mut stale) = listeners.insert(machine_name.to_owned(), manager) {
-            tracing::info!(
-                machine = machine_name,
-                listeners = stale.len(),
-                "retiring the previous VM incarnation's inbound listeners"
-            );
-            stale.stop_all().await;
-            rules.retain(|_, (machine, _)| machine != machine_name);
         }
     }
 
@@ -1415,33 +1348,53 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
-        // A manager the VMM still holds belongs to a VM booted since the
-        // last publish: adopt it, retiring the previous incarnation's.
-        if let Some(manager) = self
-            .machine_manager
-            .take_inbound_listener_manager(machine_name)
-        {
-            self.adopt_inbound_listener_manager(machine_name, manager)
-                .await;
-        }
-        if !self
-            .inbound_listeners
-            .read()
+        let expected = self.machine_manager.network_incarnation(machine_name)?;
+        self.start_port_forwarding_with_incarnation(machine_name, container_id, bindings, &expected)
             .await
-            .contains_key(machine_name)
-        {
-            return Err(CoreError::Machine(format!(
-                "inbound listener manager not available for machine '{machine_name}'",
-            )));
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn start_port_forwarding_with_incarnation(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
+    ) -> Result<()> {
+        self.adopt_inbound_listener_manager(machine_name, || {
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
+            #[cfg(any(test, feature = "test-support"))]
+            if self.has_network_fixture() {
+                return Ok(None);
+            }
+            Ok(self
+                .machine_manager
+                .take_inbound_listener_manager(machine_name, expected)?
+                .map(|manager| (expected.clone(), manager)))
+        })
+        .await?;
+        let result = self
+            .start_port_forwarding_inbound(machine_name, container_id, bindings, expected)
+            .await;
+        if let Err(error) = result {
+            self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+                .await
+                .map_err(|cleanup| {
+                    CoreError::invalid_state(format!("{error}; port cleanup failed: {cleanup}"))
+                })?;
+            return Err(error);
         }
+        Ok(())
+    }
 
-        // Remove previously tracked listeners for this container before
-        // applying new bindings, so stale ports do not leak. Cleanup
-        // routes to the machine the rules were originally bound to —
-        // which may differ from the requested machine if the container
-        // was previously on a different role.
-        self.stop_port_forwarding_by_id(container_id).await;
-
+    #[cfg(target_os = "macos")]
+    async fn start_port_forwarding_inbound(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
+    ) -> Result<()> {
         let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
         for (host_ip_str, host_port, container_port, protocol) in bindings {
@@ -1458,8 +1411,33 @@ impl Runtime {
                 );
                 continue;
             };
-            planned_rules.push((host_ip, *host_port, *container_port, proto));
+            let rule = (host_ip, *host_port, *container_port, proto);
+            if !planned_rules.contains(&rule) {
+                planned_rules.push(rule);
+            }
         }
+        {
+            let rules = self.inbound_rules.read().await;
+            let listeners = self.inbound_listeners.read().await;
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
+            if rules.get(container_id).is_some_and(|(machine, installed)| {
+                machine == machine_name
+                    && installed.len() == planned_rules.len()
+                    && planned_rules.iter().all(|rule| installed.contains(rule))
+                    && listeners.get(machine_name).is_some_and(|slot| {
+                        slot.incarnation == *expected
+                            && installed.iter().all(|(ip, port, _, protocol)| {
+                                slot.current.has_rule(*ip, *port, *protocol)
+                            })
+                    })
+            }) {
+                return Ok(());
+            }
+        }
+        self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+            .await?;
+        self.with_host_network_incarnation(machine_name, expected, || ())?;
+
         let mut added_count = 0usize;
         let mut bind_errors: Vec<String> = Vec::new();
         for (host_ip, host_port, container_port, protocol) in planned_rules {
@@ -1468,13 +1446,25 @@ impl Runtime {
             // cancellation cannot leave a live listener undiscoverable.
             let mut rules_guard = self.inbound_rules.write().await;
             let mut listeners_guard = self.inbound_listeners.write().await;
-            let manager = listeners_guard
-                .get_mut(machine_name)
-                .expect("checked machine_name presence above");
-            if let Err(e) = manager
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
+            let slot = listeners_guard.get_mut(machine_name).ok_or_else(|| {
+                CoreError::Machine(format!(
+                    "inbound listener manager not available for machine '{machine_name}'",
+                ))
+            })?;
+            if slot.incarnation != *expected {
+                return Err(CoreError::Machine(
+                    "inbound listener incarnation changed".into(),
+                ));
+            }
+            slot.finish_retiring().await;
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
+            if let Err(e) = slot
+                .current
                 .add_rule(host_ip, host_port, container_port, protocol)
                 .await
             {
+                self.with_host_network_incarnation(machine_name, expected, || ())?;
                 tracing::warn!(
                     "Failed to bind inbound port {}:{}:{:?}: {}",
                     host_ip,
@@ -1489,7 +1479,10 @@ impl Runtime {
                 .entry(container_id.to_owned())
                 .or_insert_with(|| (machine_name.to_owned(), Vec::new()));
             debug_assert_eq!(authority.0, machine_name);
-            authority.1.push((host_ip, host_port, protocol));
+            authority
+                .1
+                .push((host_ip, host_port, container_port, protocol));
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
             added_count += 1;
         }
 
@@ -1498,7 +1491,8 @@ impl Runtime {
         // "exposed on localhost" while nothing is actually listening. Docker
         // multi-port publish stays best-effort as long as one port binds.
         if added_count == 0 && !bindings.is_empty() {
-            self.stop_port_forwarding_by_id(container_id).await;
+            self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+                .await?;
             return Err(CoreError::Machine(format!(
                 "no requested port could be bound: {}",
                 bind_errors.join("; ")
@@ -1515,8 +1509,8 @@ impl Runtime {
         machine_name: &str,
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
     ) -> Result<()> {
-        self.stop_port_forwarding_by_id(container_id).await;
         let guest_ip = self.guest_ip_for_machine(machine_name);
         let unspecified = self.config.docker.default_publish_address();
         let mut forwarder = PortForwarder::new();
@@ -1550,18 +1544,34 @@ impl Runtime {
         }
 
         let mut forwarders = self.port_forwarders.write().await;
-        forwarders.insert(container_id.to_string(), forwarder);
+        self.with_host_network_incarnation(machine_name, expected, || ())?;
+        let unchanged = forwarders.get(container_id).is_some_and(|installed| {
+            installed.rules().len() == forwarder.rules().len()
+                && forwarder
+                    .rules()
+                    .iter()
+                    .all(|rule| installed.rules().contains(rule))
+        });
+        if !unchanged {
+            if let Some(installed) = forwarders.get_mut(container_id) {
+                installed.stop().await;
+                self.with_host_network_incarnation(machine_name, expected, || ())?;
+            }
+            forwarders.insert(container_id.to_string(), forwarder);
+        }
         let result = forwarders
             .get_mut(container_id)
-            .expect("forwarder was just inserted")
+            .expect("forwarder retained or inserted")
             .start()
-            .await;
+            .await
+            .map_err(CoreError::from)
+            .and_then(|()| self.with_host_network_incarnation(machine_name, expected, || ()));
         if let Err(error) = result {
             if let Some(forwarder) = forwarders.get_mut(container_id) {
                 forwarder.stop().await;
             }
             forwarders.remove(container_id);
-            return Err(error.into());
+            return Err(error);
         }
 
         Ok(())
@@ -1569,29 +1579,17 @@ impl Runtime {
 
     /// Stops port forwarding for a container by its string ID.
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.stop_port_forwarding_raw(container_id).await;
+    }
+
+    async fn stop_port_forwarding_raw(&self, container_id: &str) {
         #[cfg(target_os = "macos")]
         {
-            let authority = self.inbound_rules.read().await.get(container_id).cloned();
-            if let Some((machine_name, rules)) = authority.as_ref() {
-                let mut guard = self.inbound_listeners.write().await;
-                if let Some(manager) = guard.get_mut(machine_name) {
-                    for (host_ip, host_port, proto) in rules.iter().copied() {
-                        manager.remove_rule(host_ip, host_port, proto).await;
-                    }
-                }
-                drop(guard);
-                let mut rules_guard = self.inbound_rules.write().await;
-                if rules_guard.get(container_id) == authority.as_ref() {
-                    // The authoritative owner remains visible through every
-                    // await and a concurrent replacement is never removed.
-                    rules_guard.remove(container_id);
-                }
-                tracing::debug!(
-                    machine = %machine_name,
-                    container_id,
-                    "Stopped port forwarding for container",
-                );
-            }
+            self.stop_inbound_rules(container_id, None)
+                .await
+                .expect("unconditional cleanup cannot reject an incarnation");
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -1618,6 +1616,8 @@ impl Runtime {
         machine_name: &str,
         exposure: &SandboxPortExposure,
     ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
         let key = Self::sandbox_port_key(
             &exposure.sandbox_id,
             exposure.sandbox_port,
@@ -1627,7 +1627,7 @@ impl Runtime {
         // code; unlike published container ports (which intentionally bind all
         // interfaces), a sandbox port must not be reachable from the LAN. The
         // proto/docs/CLI all promise "localhost".
-        self.start_port_forwarding_for(
+        self.start_port_forwarding_raw(
             machine_name,
             &key,
             &[(
@@ -1649,8 +1649,10 @@ impl Runtime {
 
     /// Removes the host listener of one sandbox port exposure.
     pub async fn unexpose_sandbox_port(&self, sandbox_id: &str, sandbox_port: u16, protocol: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let key = Self::sandbox_port_key(sandbox_id, sandbox_port, protocol);
-        self.stop_port_forwarding_by_id(&key).await;
+        self.stop_port_forwarding_raw(&key).await;
         if let Some(keys) = self.sandbox_port_keys.write().await.get_mut(sandbox_id) {
             keys.retain(|k| k != &key);
         }
@@ -1679,7 +1681,7 @@ impl Runtime {
             mappings.extend(
                 rules
                     .iter()
-                    .map(|(_, host_port, protocol)| SandboxPortMapping {
+                    .map(|(_, host_port, _, protocol)| SandboxPortMapping {
                         sandbox_port,
                         host_port: *host_port,
                         protocol: match protocol {
@@ -1717,6 +1719,8 @@ impl Runtime {
 
     /// Removes every host listener a sandbox owns (Stop/Remove teardown).
     pub async fn remove_sandbox_ports(&self, sandbox_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let mut keys: HashSet<String> = self
             .sandbox_port_keys
             .read()
@@ -1728,35 +1732,56 @@ impl Runtime {
             .collect();
         keys.extend(self.sandbox_authority_keys(sandbox_id).await);
         for key in keys {
-            self.stop_port_forwarding_by_id(&key).await;
+            self.stop_port_forwarding_raw(&key).await;
         }
         self.sandbox_port_keys.write().await.remove(sandbox_id);
     }
 
+    /// Returns the canonical sandbox name, validated before provisioning.
+    ///
+    /// # Errors
+    /// Returns an error if the sandbox ID cannot form a DNS name.
+    pub fn sandbox_dns_name(&self, sandbox_id: &str) -> Result<arcbox_constants::dns::Domain> {
+        arcbox_dns::claims::ResourceScope::Sandbox
+            .name(sandbox_id, &self.config.network.dns_domain)
+            .map_err(CoreError::config)
+    }
+
     /// Register a sandbox hostname and remember its ownership independently
     /// from Docker container DNS state.
-    pub async fn register_sandbox_dns(&self, sandbox_id: &str, ip: IpAddr) {
-        self.register_dns(
+    ///
+    /// # Errors
+    /// Returns an error if the DNS name is invalid or host networking admission is closed.
+    pub async fn register_sandbox_dns(&self, sandbox_id: &str, ip: IpAddr) -> Result<()> {
+        let name = self.sandbox_dns_name(sandbox_id)?;
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_dns_raw(
             &Self::sandbox_dns_owner(sandbox_id),
-            &[sandbox_id.to_owned()],
+            &[name.to_string()],
             ip,
-        )
-        .await;
+        );
         self.sandbox_dns_ids
             .write()
             .await
             .insert(sandbox_id.to_owned());
+        Ok(())
     }
 
     /// Register stable host aliases through the same ownership table as
     /// containers and sandboxes.
-    pub async fn register_host_dns(&self, hostnames: &[String], ip: IpAddr) {
-        self.register_dns(HOST_DNS_OWNER, hostnames, ip).await;
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_host_dns(&self, hostnames: &[String], ip: IpAddr) -> Result<()> {
+        self.register_dns(HOST_DNS_OWNER, hostnames, ip).await
     }
 
     /// Remove one sandbox's host DNS state.
     pub async fn deregister_sandbox_dns(&self, sandbox_id: &str) {
-        self.deregister_dns_by_id(&Self::sandbox_dns_owner(sandbox_id))
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.deregister_dns_by_id_raw(&Self::sandbox_dns_owner(sandbox_id))
             .await;
         self.sandbox_dns_ids.write().await.remove(sandbox_id);
     }
@@ -1766,6 +1791,8 @@ impl Runtime {
     /// Called during the agent startup handshake before the guest relay
     /// allocator is allowed to serve new exposures.
     pub async fn clear_sandbox_host_state(&self) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let mut port_keys = self.all_sandbox_authority_keys().await;
         port_keys.extend(
             self.sandbox_port_keys
@@ -1776,19 +1803,19 @@ impl Runtime {
                 .cloned(),
         );
         for key in port_keys {
-            self.stop_port_forwarding_by_id(&key).await;
+            self.stop_port_forwarding_raw(&key).await;
         }
 
         let dns_owners: Vec<_> = self
-            .dns_entries
+            .dns_registry
             .read()
-            .await
-            .keys()
+            .expect("DNS registry lock poisoned")
+            .owners()
             .filter(|owner| owner.starts_with("sandbox:"))
-            .cloned()
+            .map(str::to_owned)
             .collect();
         for owner in dns_owners {
-            self.deregister_dns_by_id(&owner).await;
+            self.deregister_dns_by_id_raw(&owner).await;
         }
         self.sandbox_port_keys.write().await.clear();
         self.sandbox_dns_ids.write().await.clear();
@@ -1851,87 +1878,120 @@ impl Runtime {
         Self::sandbox_port_key_owner(key).is_none() && !kubernetes_lb::is_owner_key(key)
     }
 
-    /// Registers DNS entries for a container.
+    fn is_container_dns_owner(owner: &str) -> bool {
+        !owner.starts_with("sandbox:")
+            && !owner.starts_with("system:")
+            && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
+    }
+
+    /// Replaces a container's claims from one validated inspect, including address loss.
     ///
-    /// Maps each hostname in `hostnames` to `ip` so the host can reach the
-    /// container by name. Also tracks the `container_id → hostnames` mapping
-    /// for cleanup.
-    pub async fn register_dns(&self, container_id: &str, hostnames: &[String], ip: IpAddr) {
-        let hostnames: Vec<_> = hostnames
-            .iter()
-            .map(|hostname| hostname.to_ascii_lowercase())
-            .collect();
-        let mut entries = self.dns_entries.write().await;
-        let previous = entries.insert(
-            container_id.to_string(),
-            DnsRegistration {
-                hostnames: hostnames.clone(),
-                ip,
-                revision: self.dns_revision.fetch_add(1, Ordering::Relaxed),
-            },
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_container_dns(&self, container: &ContainerMetadata) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_container_alias_raw(&container.name, &container.id)
+            .await?;
+        self.replace_container_dns(container);
+        Ok(())
+    }
+
+    fn replace_container_dns(&self, container: &ContainerMetadata) {
+        self.replace_dns_registration(
+            &container.id,
+            self.container_dns_claims(container),
+            container.primary_ipv4().map(IpAddr::V4),
         );
-        if let Some(previous) = previous {
-            for hostname in previous
-                .hostnames
-                .iter()
-                .filter(|hostname| !hostnames.contains(hostname))
-            {
-                self.restore_dns_hostname(&entries, hostname);
+    }
+
+    fn container_dns_claims(&self, container: &ContainerMetadata) -> Vec<Claim> {
+        let claims = container.claims(&self.config.network.dns_domain, "container");
+        for warning in claims.warnings {
+            tracing::warn!(container_id = %container.id, %warning, "container DNS claim rejected");
+        }
+        claims.claims
+    }
+
+    /// Registers exact resource names; bare labels also receive the configured domain suffix.
+    /// Invalid names are reported individually without discarding other valid claims.
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_dns(
+        &self,
+        container_id: &str,
+        hostnames: &[String],
+        ip: IpAddr,
+    ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_dns_raw(container_id, hostnames, ip);
+        Ok(())
+    }
+
+    fn register_dns_raw(&self, container_id: &str, hostnames: &[String], ip: IpAddr) {
+        let authority = container_id
+            .split_once(':')
+            .map_or("container", |(kind, _)| kind);
+        let mut claims = Vec::new();
+        for hostname in hostnames {
+            let hostname = hostname.to_ascii_lowercase();
+            let qualified = (!hostname.contains('.'))
+                .then(|| format!("{hostname}.{}", self.config.network.dns_domain));
+            for name in std::iter::once(hostname).chain(qualified) {
+                match name.parse() {
+                    Ok(name) => claims.push(Claim::exclusive(
+                        NamePattern::Exact(name),
+                        container_id.into(),
+                        authority.into(),
+                    )),
+                    Err(error) => {
+                        tracing::warn!(container_id, %name, %error, "resource DNS claim rejected");
+                    }
+                }
             }
         }
-        // Ownership is authoritative before the synchronous DNS mutation, so
-        // cancellation can never leave an unenumerable hostname.
-        for hostname in &hostnames {
-            self.network_manager.register_dns(hostname, ip);
-        }
-        drop(entries);
-        tracing::info!(
-            container_id,
-            ?hostnames,
-            %ip,
-            "DNS entries registered",
-        );
+        self.replace_dns_registration(container_id, claims, Some(ip));
     }
 
-    fn restore_dns_hostname(&self, entries: &HashMap<String, DnsRegistration>, hostname: &str) {
-        if let Some(owner) = entries
-            .values()
-            .filter(|entry| entry.hostnames.iter().any(|name| name == hostname))
-            .max_by_key(|entry| entry.revision)
-        {
-            self.network_manager.register_dns(hostname, owner.ip);
-        } else {
-            self.network_manager.deregister_dns(hostname);
-        }
-    }
-
-    /// Maps canonical container ID → display name, inverting the registered
-    /// name aliases. Used to enrich per-container stats so a monitor can
-    /// show names instead of bare IDs. When a container has several
-    /// registered names, the shortest wins (the primary Docker name is
-    /// shorter than the alias set it accretes).
-    pub async fn container_names(&self) -> HashMap<String, String> {
-        let mut names: HashMap<String, String> = HashMap::new();
-        for (name, id) in self.container_aliases.read().await.iter() {
-            names
-                .entry(id.clone())
-                .and_modify(|existing| {
-                    if name.len() < existing.len() {
-                        existing.clone_from(name);
-                    }
-                })
-                .or_insert_with(|| name.clone());
-        }
-        names
-    }
-
-    /// Records a container's unique name so later lifecycle calls can resolve
-    /// it to the canonical ID without a guest round-trip.
-    pub async fn register_container_alias(&self, name: &str, container_id: &str) {
-        self.container_aliases
+    fn replace_dns_registration(&self, owner: &str, claims: Vec<Claim>, address: Option<IpAddr>) {
+        let mut registry = self
+            .dns_registry
             .write()
+            .expect("DNS registry lock poisoned");
+        registry
+            .replace(owner.into(), claims, address)
+            .expect("runtime claims retain their registration owner");
+        self.network_manager.replace_dns_projection(&registry);
+    }
+
+    /// Maps canonical container IDs to their current display names for per-container stats.
+    pub async fn container_names(&self) -> HashMap<String, String> {
+        self.container_aliases
+            .read()
             .await
-            .insert(name.to_string(), container_id.to_string());
+            .iter()
+            .map(|(name, id)| (id.clone(), name.clone()))
+            .collect()
+    }
+
+    /// Replaces a container's unique name so lifecycle calls cannot use its old alias.
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_container_alias(&self, name: &str, container_id: &str) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_container_alias_raw(name, container_id).await
+    }
+
+    async fn register_container_alias_raw(&self, name: &str, container_id: &str) -> Result<()> {
+        let mut aliases = self.container_aliases.write().await;
+        self.ensure_host_network_open()?;
+        aliases.retain(|_, id| id != container_id);
+        aliases.insert(name.to_owned(), container_id.to_owned());
+        Ok(())
     }
 
     /// Removes DNS entries for a container by its canonical ID.
@@ -1943,24 +2003,27 @@ impl Runtime {
     /// Shared DNS hostnames (e.g. compose service-level names used by multiple
     /// replicas) are restored to another owner's IP when one owner leaves.
     pub async fn deregister_dns_by_id(&self, container_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.deregister_dns_by_id_raw(container_id).await;
+    }
+
+    async fn deregister_dns_by_id_raw(&self, container_id: &str) {
         self.container_aliases
             .write()
             .await
             .retain(|_, id| id != container_id);
-        let mut entries = self.dns_entries.write().await;
-        let Some(registration) = entries.remove(container_id) else {
-            return;
-        };
+        self.remove_dns_registration(container_id);
+    }
 
-        for hostname in &registration.hostnames {
-            self.restore_dns_hostname(&entries, hostname);
+    fn remove_dns_registration(&self, container_id: &str) {
+        let mut registry = self
+            .dns_registry
+            .write()
+            .expect("DNS registry lock poisoned");
+        if registry.remove(container_id) {
+            self.network_manager.replace_dns_projection(&registry);
         }
-        drop(entries);
-        tracing::info!(
-            container_id,
-            hostnames = ?registration.hostnames,
-            "DNS entries deregistered"
-        );
     }
 
     /// Returns the set of container IDs that currently hold host-side
@@ -1974,16 +2037,12 @@ impl Runtime {
     /// otherwise every ephemeral `--rm` run would leak one alias forever.
     pub async fn registered_container_ids(&self) -> std::collections::HashSet<String> {
         let mut ids: std::collections::HashSet<String> = self
-            .dns_entries
+            .dns_registry
             .read()
-            .await
-            .keys()
-            .filter(|owner| {
-                !owner.starts_with("sandbox:")
-                    && !owner.starts_with("system:")
-                    && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
-            })
-            .cloned()
+            .expect("DNS registry lock poisoned")
+            .owners()
+            .filter(|owner| Self::is_container_dns_owner(owner))
+            .map(str::to_owned)
             .collect();
         ids.extend(self.container_aliases.read().await.values().cloned());
         ids.extend(self.listener_owner_keys(Self::is_container_owner).await);
@@ -2017,49 +2076,24 @@ impl Runtime {
         None
     }
 
-    /// Drops every piece of host state the System VM's containers left
-    /// behind — their listeners and ownership records, DNS entries and name
-    /// aliases — once the VM has gone down. Nothing it hosted is reachable
-    /// any more, and a listener bound for it would hold its port while
-    /// injecting into a datapath that no longer exists. The Docker layer's
-    /// reconciler rebuilds the state from the guest once it is back.
-    pub async fn retire_system_vm_container_networking(&self) {
-        let containers = self.registered_container_ids().await;
-        for id in &containers {
-            self.stop_port_forwarding_by_id(id).await;
-            self.deregister_dns_by_id(id).await;
-        }
-        if !containers.is_empty() {
-            tracing::info!(
-                containers = containers.len(),
-                "retired the stopped System VM's container networking"
-            );
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // Ownership map before the listener map, the order every other
-            // path takes.
-            let mut rules = self.inbound_rules.write().await;
-            let mut listeners = self.inbound_listeners.write().await;
-            if let Some(mut stale) = listeners.remove(DEFAULT_MACHINE_NAME) {
-                stale.stop_all().await;
-            }
-            rules.retain(|_, (machine, _)| machine != DEFAULT_MACHINE_NAME);
-        }
-    }
-
     /// Stops all active port forwarders across every machine.
     pub async fn stop_port_forwarding_all(&self) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.stop_port_forwarding_all_raw().await;
+    }
+
+    async fn stop_port_forwarding_all_raw(&self) {
         #[cfg(target_os = "macos")]
         {
+            let mut rules = self.inbound_rules.write().await;
             let mut guard = self.inbound_listeners.write().await;
-            for manager in guard.values_mut() {
-                manager.stop_all().await;
+            for slot in guard.values_mut() {
+                slot.stop_all().await;
             }
             // Clear only after every listener task has terminated.
             guard.clear();
-            drop(guard);
-            self.inbound_rules.write().await.clear();
+            rules.clear();
         }
 
         #[cfg(not(target_os = "macos"))]

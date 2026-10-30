@@ -4,18 +4,81 @@
 //! Input validation (parse, don't validate) happens here at the RPC
 //! boundary — mutation functions only accept validated types.
 
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+
 use arcbox_helper::HelperError;
 use arcbox_helper::HelperService;
-use arcbox_helper::validate::{
-    BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
-};
+use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, SocketTarget, Subnet};
+use arcbox_local_ca::PublicAuthority;
 
 use super::mutations;
+use super::peer_auth::VerifiedPeer;
 
 #[derive(Clone)]
-pub struct HelperServer;
+pub(super) struct HelperServer {
+    peer: VerifiedPeer,
+    resolvers: Arc<mutations::dns::ResolverStore>,
+    connection: u64,
+    closed: CancellationToken,
+}
+
+impl HelperServer {
+    pub(super) fn new(peer: VerifiedPeer, resolvers: Arc<mutations::dns::ResolverStore>) -> Self {
+        let connection = resolvers.connection();
+        Self {
+            peer,
+            resolvers,
+            connection,
+            closed: CancellationToken::new(),
+        }
+    }
+
+    pub(super) fn retire(&self) {
+        self.resolvers.retire(self.connection);
+        self.closed.cancel();
+    }
+
+    pub(super) fn release(&self) -> Result<(), HelperError> {
+        self.resolvers.release(self.connection)
+    }
+}
 
 impl HelperService for HelperServer {
+    async fn resolver_watch(
+        self,
+        _: tarpc::context::Context,
+        after_epoch: Option<u64>,
+    ) -> Result<arcbox_helper::ResolverAuthoritySnapshot, HelperError> {
+        if self.peer.resolver_profile().is_none() {
+            return Err(HelperError::validation(
+                "resolver watch requires an audit-verified daemon",
+            ));
+        }
+        self.resolvers
+            .watch(self.connection, after_epoch, &self.closed)
+            .await
+    }
+
+    async fn resolver_lease(
+        self,
+        _: tarpc::context::Context,
+        update: arcbox_helper::ResolverLease,
+    ) -> Result<(), HelperError> {
+        let result = (|| {
+            let update = mutations::dns::lease::Update::try_from(update)?;
+            if self.peer.resolver_profile() != Some(update.profile) {
+                return Err(HelperError::validation(
+                    "resolver lease requires the matching audit-verified daemon",
+                ));
+            }
+            self.resolvers
+                .update(self.connection, self.peer.uid(), update)
+        })();
+        result.inspect_err(|_| self.resolvers.invalidate(self.connection))
+    }
+
     async fn route_add(
         self,
         _: tarpc::context::Context,
@@ -45,35 +108,6 @@ impl HelperService for HelperServer {
         let subnet: Subnet = subnet.parse().map_err(HelperError::validation)?;
         let iface: BridgeIface = iface.parse().map_err(HelperError::validation)?;
         mutations::route::remove_if_owned(&subnet, &iface)
-    }
-
-    async fn dns_install(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-        port: u16,
-    ) -> Result<(), HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        let port = DnsPort::try_from(port).map_err(HelperError::validation)?;
-        mutations::dns::install(&domain, port)
-    }
-
-    async fn dns_uninstall(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<(), HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        mutations::dns::uninstall(&domain)
-    }
-
-    async fn dns_status(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<bool, HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        mutations::dns::status(&domain)
     }
 
     async fn hosts_alias_install(self, _: tarpc::context::Context) -> Result<(), HelperError> {
@@ -121,5 +155,27 @@ impl HelperService for HelperServer {
         // Same shape as `arcbox-helper --version` so Desktop/doctor can parse
         // one format from either path.
         format!("arcbox-helper {}", env!("CARGO_PKG_VERSION"))
+    }
+
+    async fn ca_install(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::install(&ca)
+    }
+
+    async fn ca_status(
+        self,
+        _: tarpc::context::Context,
+        der: Vec<u8>,
+    ) -> Result<bool, HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::status(&ca)
+    }
+
+    async fn ca_remove(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::remove(&ca)
     }
 }

@@ -12,12 +12,23 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
 use crate::agent::Guest;
 use arcbox_connect::v1::AgentPingResponse as PingResponse;
+#[cfg(test)]
 use buffa::Message as _;
 
+#[cfg(test)]
+use crate::rpc::write_message;
 use crate::rpc::{
     AGENT_VERSION, ErrorResponse, RpcRequest, RpcResponse, parse_request, read_message,
-    write_message, write_response,
+    write_response,
 };
+
+#[cfg(test)]
+mod guest_trust_tests;
+#[cfg(test)]
+mod index_tests;
+#[cfg(test)]
+pub(in crate::agent) mod instance_authority_tests;
+mod readiness;
 
 use super::disk::handle_disk_trim;
 use super::kubernetes::{
@@ -38,10 +49,26 @@ enum RequestResult {
 /// Handles a single vsock connection.
 ///
 /// Reads RPC requests, processes them, and writes responses.
-pub(super) async fn handle_connection<S>(mut stream: S, guest: Guest) -> Result<()>
+pub(super) async fn handle_connection<S>(
+    mut stream: S,
+    guest: Guest,
+    services: &crate::agent::Services,
+    peer_cid: u32,
+) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // Assign before Ping: reconnecting must not let buffered older updates win.
+    let trust_order = if peer_cid == tokio_vsock::VMADDR_CID_HOST && guest != Guest::StorageRecovery
+    {
+        services
+            .trust
+            .as_ref()
+            .map(super::super::guest_trust::Store::connection_order)
+            .transpose()?
+    } else {
+        None
+    };
     loop {
         // Read the next request (V2 wire format with trace_id).
         let (msg_type, trace_id, payload) = match read_message(&mut stream).await {
@@ -82,11 +109,45 @@ where
             continue;
         }
 
+        if matches!(
+            msg_type,
+            crate::rpc::MessageType::ReconcileHttpsAccessRequest
+                | crate::rpc::MessageType::ReconcileGuestTrustRequest
+        ) && peer_cid != tokio_vsock::VMADDR_CID_HOST
+        {
+            write_response(
+                &mut stream,
+                &RpcResponse::Error(ErrorResponse::new(403, "HTTPS control requires the host")),
+                &trace_id,
+            )
+            .await?;
+            continue;
+        }
+
+        if matches!(
+            msg_type,
+            crate::rpc::MessageType::OpenMachineWebRequest
+                | crate::rpc::MessageType::ReplaceMachineWebRequest
+        ) && (guest != Guest::DistroMachine || peer_cid != tokio_vsock::VMADDR_CID_HOST)
+        {
+            write_response(
+                &mut stream,
+                &RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "machine web configuration requires the host and distro machine",
+                )),
+                &trace_id,
+            )
+            .await?;
+            continue;
+        }
+
         // Sandbox requests are handled separately — they bypass the normal
         // RPC request/response cycle because streaming operations hold the
         // connection open and write multiple frames.
         if msg_type.is_sandbox_request() {
-            if let Err(e) = handle_sandbox_message(&mut stream, msg_type, &trace_id, &payload).await
+            if let Err(e) =
+                handle_sandbox_message(&mut stream, msg_type, &trace_id, &payload, services).await
             {
                 tracing::warn!(
                     trace_id = %trace_id,
@@ -131,8 +192,51 @@ where
 
         // Parse and handle the request.
         let result = match parse_request(msg_type, &payload) {
+            Ok(RpcRequest::ReconcileGuestTrust(request)) => {
+                RequestResult::Single(match services.trust.as_ref().zip(trust_order) {
+                    Some((store, order)) => store.reconcile(order, request).await,
+                    None => RpcResponse::Error(ErrorResponse::new(
+                        503,
+                        "guest trust installation is unavailable for this guest",
+                    )),
+                })
+            }
+            Ok(RpcRequest::OpenMachineWeb(request)) => {
+                if let Some(receiver) = &services.machine_web {
+                    return receiver
+                        .serve(
+                            stream,
+                            &trace_id,
+                            request,
+                            super::system_info::bridge_ipv4(),
+                        )
+                        .await;
+                }
+                RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                    503,
+                    "machine web services are unavailable",
+                )))
+            }
+            Ok(RpcRequest::ReplaceMachineWeb(_)) => {
+                anyhow::bail!("machine web replacement requires an open connection");
+            }
+            Ok(RpcRequest::OpenInstanceAuthority(_)) => {
+                if guest == Guest::SystemVm
+                    && peer_cid == tokio_vsock::VMADDR_CID_HOST
+                    && let Some(authority) = &services.authority
+                {
+                    return authority.serve(&mut stream, &trace_id).await;
+                }
+                RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "instance authority requires the host and System VM services",
+                )))
+            }
+            Ok(RpcRequest::ReplaceInstanceAuthority(_)) => {
+                anyhow::bail!("instance replacement requires an open authority connection");
+            }
             Ok(RpcRequest::WatchReadiness(req)) => {
-                handle_watch_readiness(&mut stream, req, &trace_id, guest).await?;
+                readiness::watch(&mut stream, req, &trace_id, guest).await?;
                 continue;
             }
             Ok(RpcRequest::WatchMemoryPressure(req)) => {
@@ -164,7 +268,7 @@ where
                 }
                 return Ok(());
             }
-            Ok(request) => handle_request(request, guest).await,
+            Ok(request) => handle_request(request, guest, &services.web).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
                 RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
@@ -197,10 +301,47 @@ fn allowed_in_recovery(kind: crate::rpc::MessageType) -> bool {
 }
 
 /// Handles a single RPC request.
-async fn handle_request(request: RpcRequest, guest: Guest) -> RequestResult {
+async fn handle_request(
+    request: RpcRequest,
+    guest: Guest,
+    web_services: &crate::domains::WebServices,
+) -> RequestResult {
     match request {
+        RpcRequest::OpenMachineWeb(_) | RpcRequest::ReplaceMachineWeb(_) => {
+            unreachable!("machine web configuration owns the connection")
+        }
+        RpcRequest::OpenInstanceAuthority(_) | RpcRequest::ReplaceInstanceAuthority(_) => {
+            unreachable!("instance authority owns the connection")
+        }
+        RpcRequest::ReconcileGuestTrust(_) => unreachable!("guest trust uses the injected store"),
         RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
+        RpcRequest::ReconcileHttpsAccess(request) => {
+            RequestResult::Single(match web_services.reconcile_https_access(request) {
+                Ok(response) => RpcResponse::ReconcileHttpsAccess(response),
+                Err(error) => RpcResponse::Error(ErrorResponse::new(400, error.to_string())),
+            })
+        }
+        RpcRequest::ListGuestWebServices(request) => {
+            let hostname = if request.hostname.is_empty() {
+                None
+            } else {
+                match request.hostname.to_ascii_lowercase().parse() {
+                    Ok(name) => Some(name),
+                    Err(error) => {
+                        return RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                            400, error,
+                        )));
+                    }
+                }
+            };
+            RequestResult::Single(RpcResponse::ListGuestWebServices(
+                arcbox_connect::v1::ListGuestWebServicesResponse {
+                    services: web_services.snapshot(hostname.as_ref()),
+                    ..Default::default()
+                },
+            ))
+        }
         RpcRequest::EnsureRuntime(req) => RequestResult::Single(handle_ensure_runtime(req).await),
         RpcRequest::RuntimeStatus(req) => RequestResult::Single(handle_runtime_status(req).await),
         RpcRequest::StartKubernetes(req) => {
@@ -239,79 +380,6 @@ async fn handle_request(request: RpcRequest, guest: Guest) -> RequestResult {
         RpcRequest::WatchStats(_) => unreachable!("watch stats is streaming"),
         RpcRequest::WatchStorageHealth(_) => unreachable!("storage health is streaming"),
     }
-}
-
-async fn handle_watch_readiness<S>(
-    stream: &mut S,
-    req: arcbox_connect::v1::WatchReadinessRequest,
-    trace_id: &str,
-    guest: Guest,
-) -> Result<()>
-where
-    S: AsyncWrite + Unpin,
-{
-    use arcbox_connect::v1::ReadinessEvent;
-    use arcbox_connect::v1::readiness_event::Kind;
-
-    if guest == Guest::StorageRecovery && req.start_runtime_if_needed {
-        write_response(
-            stream,
-            &RpcResponse::Error(ErrorResponse::new(
-                403,
-                "storage recovery mode cannot start the runtime",
-            )),
-            trace_id,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    write_readiness_event(
-        stream,
-        trace_id,
-        ReadinessEvent {
-            kind: Kind::AgentReady.into(),
-            detail: "agent ready".to_string(),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    if !req.start_runtime_if_needed {
-        return Ok(());
-    }
-
-    write_readiness_event(
-        stream,
-        trace_id,
-        ReadinessEvent {
-            kind: Kind::RuntimeStarting.into(),
-            detail: "ensuring guest runtime".to_string(),
-            ..Default::default()
-        },
-    )
-    .await?;
-
-    let timeout = Duration::from_millis(u64::from(req.timeout_ms).max(1));
-    let event = super::runtime::watch_runtime_readiness(timeout).await;
-    write_readiness_event(stream, trace_id, event).await
-}
-
-async fn write_readiness_event<S>(
-    stream: &mut S,
-    trace_id: &str,
-    event: arcbox_connect::v1::ReadinessEvent,
-) -> Result<()>
-where
-    S: AsyncWrite + Unpin,
-{
-    write_message(
-        stream,
-        crate::rpc::MessageType::ReadinessEvent,
-        trace_id,
-        &event.encode_to_vec(),
-    )
-    .await
 }
 
 /// Handles a Shutdown request.
@@ -579,9 +647,49 @@ mod recovery_tests {
     use crate::rpc::MessageType;
 
     #[tokio::test]
+    async fn sandbox_requests_require_injected_system_services_before_runtime_access() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::DistroMachine,
+                &crate::agent::Services::default(),
+                2,
+            )
+            .await
+        });
+        for kind in [
+            MessageType::SandboxCreateRequest,
+            MessageType::SandboxRestoreRequest,
+        ] {
+            write_message(&mut client, kind, "sandbox-scope", &[0xff])
+                .await
+                .unwrap();
+            let (kind, trace, payload) =
+                tokio::time::timeout(Duration::from_secs(3), read_message(&mut client))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(kind, MessageType::Error);
+            assert_eq!(trace, "sandbox-scope");
+            assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 403);
+        }
+        drop(client);
+        dispatcher.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn recovery_blocks_mutation_requests_before_parsing_or_dispatch() {
         let (mut client, server) = tokio::io::duplex(4096);
-        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::StorageRecovery,
+                &crate::agent::Services::default(),
+                tokio_vsock::VMADDR_CID_HOST,
+            )
+            .await
+        });
         for kind in [
             MessageType::EnsureRuntimeRequest,
             MessageType::MachineExecRequest,
@@ -606,7 +714,15 @@ mod recovery_tests {
     #[tokio::test]
     async fn recovery_readiness_does_not_require_docker_and_refuses_runtime_start() {
         let (mut client, server) = tokio::io::duplex(4096);
-        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::StorageRecovery,
+                &crate::agent::Services::default(),
+                tokio_vsock::VMADDR_CID_HOST,
+            )
+            .await
+        });
         for start_runtime_if_needed in [false, true] {
             let request = arcbox_connect::v1::WatchReadinessRequest {
                 start_runtime_if_needed,
@@ -666,7 +782,15 @@ mod storage_check_tests {
             (Guest::DistroMachine, Action::VerifyWrites.into(), 403),
         ] {
             let (mut client, server) = tokio::io::duplex(4096);
-            let dispatcher = tokio::spawn(handle_connection(server, guest));
+            let dispatcher = tokio::spawn(async move {
+                handle_connection(
+                    server,
+                    guest,
+                    &crate::agent::Services::default(),
+                    tokio_vsock::VMADDR_CID_HOST,
+                )
+                .await
+            });
             tokio::time::timeout(Duration::from_secs(5), async {
                 let request = StorageCheckRequest {
                     action,
@@ -690,5 +814,277 @@ mod storage_check_tests {
             .await
             .expect("storage check response and connection close exceeded five seconds");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domains::{EndpointFacts, HttpsBackend, SelectedRoutes, WebServices};
+
+    #[tokio::test]
+    async fn https_observation_requires_host_cid_and_valid_addresses_over_the_wire() {
+        use crate::rpc::MessageType;
+        use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
+        for (guest, (cid, address, error_code)) in [Guest::SystemVm, Guest::DistroMachine]
+            .into_iter()
+            .flat_map(|guest| {
+                [
+                    (tokio_vsock::VMADDR_CID_HOST, "192.168.64.1", None),
+                    (tokio_vsock::VMADDR_CID_HOST, "192.168.64.0/24", Some(400)),
+                    (tokio_vsock::VMADDR_CID_HOST + 1, "192.168.64.1", Some(403)),
+                ]
+                .map(|case| (guest, case))
+            })
+        {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let task = tokio::spawn(async move {
+                handle_connection(server, guest, &crate::agent::Services::default(), cid).await
+            });
+            let request = ReconcileHttpsAccessRequest {
+                observation_id: "wire-test".into(),
+                host_addresses: vec![address.into()],
+                enabled: true,
+                ..Default::default()
+            };
+            write_message(
+                &mut client,
+                MessageType::ReconcileHttpsAccessRequest,
+                "access",
+                &request.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+            assert_eq!(trace, "access");
+            if let Some(code) = error_code {
+                assert_eq!(kind, MessageType::Error);
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, code);
+            } else {
+                assert_eq!(kind, MessageType::ReconcileHttpsAccessResponse);
+                assert_eq!(
+                    ReconcileHttpsAccessResponse::decode_from_slice(&payload)
+                        .unwrap()
+                        .sequence,
+                    0
+                );
+            }
+            drop(client);
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_web_services_dispatches_a_framed_request_with_native_tls() {
+        let dns = crate::dns_server::GuestDnsServer::new(
+            Default::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        let mut claims = arcbox_dns::claims::Claim::generated(
+            "api.arcbox.local".parse().unwrap(),
+            "a".into(),
+            "container".into(),
+        )
+        .to_vec();
+        claims.push(arcbox_dns::claims::Claim::exclusive(
+            arcbox_dns::NamePattern::parse_custom("*.svc.local").unwrap(),
+            "a".into(),
+            "container".into(),
+        ));
+        dns.registry()
+            .write()
+            .unwrap()
+            .replace("a".into(), claims, Some("172.17.0.2".parse().unwrap()))
+            .unwrap();
+        let services = WebServices::new(dns.registry());
+        let directory = services.directory_source();
+        directory.ready();
+        for id in ["a", "b"] {
+            let facts = EndpointFacts::from_inspect(
+                &serde_json::json!({
+                    "Id": id, "Name": "/api", "State": { "Pid": 1 },
+                    "NetworkSettings": {
+                        "SandboxKey": "/var/run/docker/netns/api",
+                        "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+                    }
+                }),
+                dns.domain(),
+            )
+            .unwrap();
+            services.publish(
+                &facts,
+                SelectedRoutes {
+                    http: None,
+                    https: Some(HttpsBackend::Native(8443)),
+                },
+            );
+        }
+        let (mut client, server) = tokio::io::duplex(4096);
+        let dns = std::sync::Arc::new(dns);
+        let services = crate::agent::Services::system(services, dns.clone());
+        let task = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::SystemVm,
+                &services,
+                tokio_vsock::VMADDR_CID_HOST,
+            )
+            .await
+        });
+        write_message(
+            &mut client,
+            crate::rpc::MessageType::ListGuestWebServicesRequest,
+            "web-services-test",
+            &arcbox_connect::v1::ListGuestWebServicesRequest::default().encode_to_vec(),
+        )
+        .await
+        .unwrap();
+        let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+        assert_eq!(kind, crate::rpc::MessageType::ListGuestWebServicesResponse);
+        assert_eq!(trace, "web-services-test");
+        let response =
+            arcbox_connect::v1::ListGuestWebServicesResponse::decode_from_slice(&payload).unwrap();
+        assert_eq!(response.services.len(), 1);
+        let Some(arcbox_connect::v1::guest_web_service::Route::Container(service)) =
+            response.services[0].route.as_ref()
+        else {
+            panic!("expected container route")
+        };
+        assert_eq!(service.container_id, "a");
+        assert_eq!(service.hostnames, ["api.arcbox.local"]);
+        assert_eq!(service.ipv4_address, "172.17.0.2");
+        assert_eq!(service.http_port, 0);
+        assert_eq!(
+            service.https_backend,
+            Some(arcbox_connect::v1::container_web_service::HttpsBackend::NativeHttpsPort(8443))
+        );
+        let exact = |owner: &str| {
+            arcbox_dns::claims::Claim::exclusive(
+                arcbox_dns::NamePattern::Exact("api.svc.local".parse().unwrap()),
+                owner.into(),
+                "container".into(),
+            )
+        };
+        for (change, hostname, owner) in [
+            ("wildcard", "API.SVC.LOCAL", Some("a")),
+            ("nested", "v1.api.svc.local", Some("a")),
+            ("apex", "svc.local", None),
+            ("invalid", "*.svc.local", None),
+            ("exact", "api.svc.local", Some("b")),
+            ("conflict", "api.svc.local", None),
+            ("exact-unavailable", "api.svc.local", Some("a")),
+            ("recovered", "api.svc.local", Some("a")),
+            ("addressless", "api.svc.local", None),
+            ("stale", "api.svc.local", None),
+        ] {
+            {
+                let registry = dns.registry();
+                let mut registry = registry.write().unwrap();
+                match change {
+                    "exact" | "conflict" => {
+                        let id = if change == "exact" { "b" } else { "c" };
+                        registry
+                            .replace(
+                                id.into(),
+                                vec![exact(id)],
+                                Some("172.17.0.2".parse().unwrap()),
+                            )
+                            .unwrap();
+                    }
+                    "exact-unavailable" => {
+                        registry.remove("c");
+                        registry
+                            .replace("b".into(), vec![exact("b")], None)
+                            .unwrap();
+                    }
+                    "recovered" => {
+                        registry.remove("b");
+                    }
+                    "addressless" | "stale" => {
+                        let claims = registry.get("a").unwrap().claims.clone();
+                        let address = (change == "stale").then(|| "172.17.0.3".parse().unwrap());
+                        registry.replace("a".into(), claims, address).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let request = arcbox_connect::v1::ListGuestWebServicesRequest {
+                hostname: hostname.into(),
+                ..Default::default()
+            };
+            write_message(
+                &mut client,
+                crate::rpc::MessageType::ListGuestWebServicesRequest,
+                change,
+                &request.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+            assert_eq!(trace, change);
+            if change == "invalid" {
+                assert_eq!(kind, crate::rpc::MessageType::Error);
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 400);
+                continue;
+            }
+            assert_eq!(kind, crate::rpc::MessageType::ListGuestWebServicesResponse);
+            let response =
+                arcbox_connect::v1::ListGuestWebServicesResponse::decode_from_slice(&payload)
+                    .unwrap();
+            assert_eq!(
+                response.services.len(),
+                usize::from(owner.is_some()),
+                "{change}"
+            );
+            if let Some(owner) = owner {
+                let Some(arcbox_connect::v1::guest_web_service::Route::Container(route)) =
+                    response.services[0].route.as_ref()
+                else {
+                    panic!("expected container route")
+                };
+                assert_eq!(route.container_id, owner);
+                assert_eq!(route.hostnames, [hostname.to_ascii_lowercase()]);
+                assert_eq!(route.https_backend, service.https_backend);
+            }
+        }
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_web_rejects_nonhost_and_wrong_guests_before_decoding() {
+        use crate::rpc::MessageType;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            for (guest, cid) in [
+                (Guest::DistroMachine, 3),
+                (Guest::SystemVm, 2),
+                (Guest::StorageRecovery, 2),
+            ] {
+                let services = crate::agent::Services::machine();
+                let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+                let task =
+                    tokio::spawn(
+                        async move { handle_connection(server, guest, &services, cid).await },
+                    );
+                for kind in [
+                    MessageType::OpenMachineWebRequest,
+                    MessageType::ReplaceMachineWebRequest,
+                ] {
+                    write_message(&mut client, kind, "untrusted", &[0x80])
+                        .await
+                        .unwrap();
+                    let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+                    assert_eq!(kind, MessageType::Error);
+                    assert_eq!(trace, "untrusted");
+                    assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 403);
+                }
+                drop(client);
+                task.await.unwrap().unwrap();
+            }
+        })
+        .await
+        .unwrap();
     }
 }

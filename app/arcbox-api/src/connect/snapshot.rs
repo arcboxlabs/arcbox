@@ -2,7 +2,7 @@
 
 use arcbox_connect::sandbox_v1 as pb;
 use buffa_types::google::protobuf::Empty;
-use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult};
+use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, ServiceResult};
 
 use std::sync::Arc;
 
@@ -73,6 +73,11 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
         let runtime = self.runtime.ready_for_write(&machine)?;
+        if !sandbox_id.is_empty() {
+            runtime
+                .sandbox_dns_name(&sandbox_id)
+                .map_err(|error| ConnectError::invalid_argument(error.to_string()))?;
+        }
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_restore(req)
@@ -84,7 +89,8 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         // Register restored sandbox DNS (shared live-match discipline;
         // see register_live_sandbox_dns).
         sandbox_cleanup::register_live_sandbox_dns(runtime, &machine, &resp.id, &resp.ip_address)
-            .await;
+            .await
+            .map_err(ApiError::from)?;
 
         Response::ok(resp)
     }

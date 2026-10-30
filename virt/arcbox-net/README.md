@@ -13,7 +13,7 @@ This crate provides networking capabilities for VMs including NAT, bridge, and h
 - **Host-only networking**: Isolated VM networks
 - **Port forwarding**: Expose guest services to host
 - **DHCP server**: Automatic IP assignment for guests
-- **DNS forwarding**: Transparent DNS resolution
+- **DNS forwarding**: Local names are checked for every query type, including HTTPS and SVCB; external queries retain their original question when forwarded.
 - **Zero-copy packets**: Direct guest memory access
 - **Lock-free data path**: SPSC ring buffers for hot path
 

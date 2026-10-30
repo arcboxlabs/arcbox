@@ -98,9 +98,9 @@ pub struct Vmm {
     /// Inbound listener manager for port forwarding (Darwin only).
     #[cfg(target_os = "macos")]
     inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
-    /// Shared DNS hosts table from NetworkManager.
+    /// Shared DNS ownership and relative-name policy from NetworkManager.
     #[cfg(target_os = "macos")]
-    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    shared_dns: Option<arcbox_net::dns::SharedDns>,
     /// Proxy the guest's egress is tunnelled through; `None` is direct.
     #[cfg(target_os = "macos")]
     proxy_env: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
@@ -308,7 +308,7 @@ impl Vmm {
             #[cfg(target_os = "macos")]
             inbound_listener_manager: None,
             #[cfg(target_os = "macos")]
-            shared_dns_hosts: None,
+            shared_dns: None,
             #[cfg(target_os = "macos")]
             proxy_env: None,
             #[cfg(target_os = "macos")]
@@ -386,14 +386,13 @@ impl Vmm {
         Arc::clone(&self.running)
     }
 
-    /// Sets the shared DNS hosts table from the host-side `NetworkManager`.
+    /// Sets the shared DNS context from the host-side `NetworkManager`.
     ///
-    /// Must be called before `initialize()`. When set, the VMM-side
-    /// `DnsForwarder` (in the network datapath) shares this table so that
-    /// host-side `register_dns()` calls are visible to guest DNS queries.
+    /// Call before `initialize()` so every datapath uses the host's current ownership
+    /// and the configured suffix for relative names.
     #[cfg(target_os = "macos")]
-    pub fn set_shared_dns_hosts(&mut self, table: std::sync::Arc<arcbox_dns::LocalHostsTable>) {
-        self.shared_dns_hosts = Some(table);
+    pub fn set_shared_dns(&mut self, dns: arcbox_net::dns::SharedDns) {
+        self.shared_dns = Some(dns);
     }
 
     /// Tunnels the guest's TCP and UDP egress through `env`'s proxy.

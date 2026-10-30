@@ -1,11 +1,24 @@
 //! Boot asset cache commands.
 
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand};
 
 use super::OutputFormat;
 
 mod cache;
 mod status;
+
+/// Boot asset commands and their cache location.
+#[derive(Args)]
+pub struct BootArgs {
+    /// Data directory containing boot assets and runtime binaries.
+    #[arg(long, global = true)]
+    pub data_dir: Option<PathBuf>,
+    /// Boot asset operation.
+    #[command(subcommand)]
+    pub command: BootCommands,
+}
 
 /// Boot asset management commands.
 #[derive(Subcommand)]
@@ -40,12 +53,15 @@ pub struct StatusArgs {
 }
 
 /// Execute boot commands.
-pub async fn execute(command: BootCommands, format: OutputFormat) -> anyhow::Result<()> {
-    let config = arcbox_core::Config::load()?;
+pub async fn execute(args: BootArgs, format: OutputFormat) -> anyhow::Result<()> {
+    let mut config = arcbox_core::Config::load()?;
+    if let Some(data_dir) = args.data_dir {
+        config.data_dir = data_dir;
+    }
     let boot_config = config.boot_asset_config();
     let cache_dir = boot_config.cache_dir.clone();
 
-    match command {
+    match args.command {
         BootCommands::Prefetch(args) => {
             cache::prefetch(&config.data_dir, boot_config, args, format).await
         }

@@ -377,9 +377,10 @@ impl Vmm {
             .with_dns_servers(vec![gateway_ip]);
         let dhcp_server = DhcpServer::new(dhcp_config);
 
-        let dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = if let Some(ref shared_table) = self.shared_dns_hosts {
-            DnsForwarder::with_shared_hosts(dns_config, std::sync::Arc::clone(shared_table))
+        let mut dns_config = DnsConfig::new(gateway_ip);
+        let dns_forwarder = if let Some(ref dns) = self.shared_dns {
+            dns_config.local_domain.clone_from(&dns.local_domain);
+            DnsForwarder::with_shared_registry(dns_config, std::sync::Arc::clone(&dns.registry))
         } else {
             DnsForwarder::new(dns_config)
         };

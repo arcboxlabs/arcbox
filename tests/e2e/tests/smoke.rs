@@ -38,6 +38,7 @@ use arcbox_e2e::metrics::RunMetrics;
 use arcbox_e2e::net_fixtures::spawn_blob_server;
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_protocol::v1::setup_status::Phase;
+use arcbox_protocol::v1::system_runtime_status::State;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -63,17 +64,8 @@ const BOOT_BUDGET_DEFAULT_SECS: f64 = 10.0;
 
 /// Phases a healthy cold start publishes, in order.
 ///
-/// `AssetsReady` may be missed — the harness subscribes only once the gRPC
-/// socket exists, and a fast startup can already be past it. Everything from
-/// `VmStarting` on is published well after that point, so a missing one is a
-/// real defect, not a fast run.
-const EXPECTED_PROGRESSION: [Phase; 5] = [
-    Phase::AssetsReady,
-    Phase::VmStarting,
-    Phase::VmReady,
-    Phase::NetworkReady,
-    Phase::Ready,
-];
+/// The host becomes ready before the independent System VM startup.
+const EXPECTED_PROGRESSION: [Phase; 3] = [Phase::AssetsReady, Phase::NetworkReady, Phase::Ready];
 
 #[test]
 #[ignore = "boots a VZ System VM through a real daemon; run on the e2e runner"]
@@ -130,31 +122,16 @@ fn smoke_suite() -> Result<()> {
     })
 }
 
-/// CORE-67 — the setup stream reports the whole progression, in order.
+/// CORE-67 — observed host and System milestones retain startup order.
 ///
-/// An unpublished phase is not observable as a gap: it never arrives, so a
-/// client waits forever or reports a plausible zero. This asserts the phases
-/// actually show up, and that their sighting order matches the declared
-/// progression, so a reordering of the startup pipeline cannot silently
-/// start lying to clients.
+/// The stream starts with the current snapshot. Host preparation can finish
+/// before subscription, so AssetsReady and NetworkReady can both be missed.
+/// Host Ready and the System boot milestones remain required.
 fn check_phase_progression(marks: &PhaseMarks) -> Result<()> {
     let observed: Vec<Phase> = EXPECTED_PROGRESSION
         .into_iter()
         .filter(|phase| marks.at(*phase).is_some())
         .collect();
-
-    for phase in EXPECTED_PROGRESSION {
-        // AssetsReady is genuinely missable on a fast start; the rest are
-        // published long after the harness subscribes.
-        if phase != Phase::AssetsReady && !observed.contains(&phase) {
-            bail!(
-                "daemon never published {} — observed {:?}. A declared-but-unpublished phase \
-                 leaves clients blind to that stage (CORE-67).",
-                phase.as_str_name(),
-                observed
-            );
-        }
-    }
 
     // Sorting by sighting time is a stable no-op when the order is right;
     // ties (two phases in the same instant) keep declaration order.
@@ -162,6 +139,21 @@ fn check_phase_progression(marks: &PhaseMarks) -> Result<()> {
     by_sighting.sort_by_key(|phase| marks.at(*phase).expect("filtered to observed phases"));
     if by_sighting != observed {
         bail!("setup phases arrived out of order: {by_sighting:?}, expected {observed:?}");
+    }
+    let mut previous = marks
+        .at(Phase::Ready)
+        .context("host READY was not observed")?;
+    for state in [State::VmStarting, State::VmReady, State::Ready] {
+        let at = marks
+            .system_at(state)
+            .with_context(|| format!("System runtime never published {}", state.as_str_name()))?;
+        if at < previous {
+            bail!(
+                "System runtime {} preceded host or guest startup",
+                state.as_str_name()
+            );
+        }
+        previous = at;
     }
     Ok(())
 }
@@ -178,7 +170,7 @@ fn check_phase_progression(marks: &PhaseMarks) -> Result<()> {
 /// it — which is unobservable as a gap and would otherwise pass as a silent
 /// skip (CORE-67).
 fn check_boot_budget(marks: &PhaseMarks, metrics: &mut RunMetrics) -> Result<()> {
-    let Some(span) = marks.span(Phase::VmStarting, Phase::VmReady) else {
+    let Some(span) = marks.system_span(State::VmStarting, State::VmReady) else {
         bail!(
             "no VmStarting → VmReady pair on the setup stream, so the guest boot cannot be \
              measured at all"

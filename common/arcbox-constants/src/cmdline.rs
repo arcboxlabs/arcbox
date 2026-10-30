@@ -5,6 +5,9 @@ pub const GUEST_DOCKER_VSOCK_PORT_KEY: &str = "arcbox.guest_docker_vsock_port=";
 /// routing, guest firewall rules, and Docker network allocation.
 pub const CONTAINER_NETWORK_KEY: &str = "arcbox.container_network=";
 
+/// Kernel cmdline key carrying the DNS domain shared by host and guest.
+pub const DNS_DOMAIN_KEY: &str = "arcbox.dns_domain=";
+
 /// Kernel cmdline key for guest Docker data block-device path.
 pub const DOCKER_DATA_DEVICE_KEY: &str = "arcbox.docker_data_device=";
 

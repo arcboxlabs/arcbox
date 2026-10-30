@@ -25,6 +25,8 @@ abctl machine list
 abctl machine ssh -u alice myvm         # login shell as alice; `exec -u` runs a command as a user
 abctl machine default myvm              # `exec`/`ssh` without a name use it
 abctl machine resize myvm --cpus 4      # takes effect at the next start
+abctl machine web myvm                 # show saved web configuration
+abctl machine web myvm --http-port 8080 --https-port off
 abctl machine stop myvm
 abctl machine clone myvm myvm-2         # stopped machines only; copy-on-write
 abctl machine export myvm myvm.tar.zst  # self-contained archive
@@ -40,8 +42,20 @@ abctl migrate from orbstack --no-start         # recreate but leave stopped
 # Daemon management
 abctl daemon start              # Start daemon in background
 abctl daemon stop               # Stop daemon
+abctl daemon status             # Show host and System runtime readiness
 abctl info                      # System info
 abctl version                   # Version info
+
+# Prepare and inspect boot resources in a separate data directory
+abctl boot --data-dir /tmp/arcbox-resources prefetch
+abctl boot --data-dir /tmp/arcbox-resources status --offline --format json
+
+# Local HTTPS trust (macOS login session)
+abctl tls status --json          # Inspect the profile's certificate and native trust
+abctl tls trust                  # Authorize HTTPS through the macOS prompt
+abctl tls rotate                 # Replace the CA and migrate trust through the running daemon
+abctl tls repair                 # Restore only the current public certificate file
+abctl tls untrust                # Revoke trust while containers keep running
 
 # Docker storage checks and recovery
 abctl disk check                # Stop the System VM, preserve disks, check offline, leave stopped
@@ -61,6 +75,16 @@ kubectl get nodes
 docker run hello-world
 ```
 
+Run TLS commands as the logged-in user. `tls rotate` requires a running daemon and resumes any pending rotation. The command authorizes the replacement before revoking the old CA, then asks the daemon to publish the replacement. Cancelling authorization before old-CA revocation preserves the original public certificate. `tls trust`, `tls repair`, and `tls rotate` accept `--expected-fingerprint` to pin the current certificate shown by `tls status`.
+
+`daemon start` returns after the daemon takes process ownership. Use `daemon status` to inspect host services and the System runtime separately. Host readiness permits machine operations; Docker requires the System runtime to report `ready`. System startup failure leaves host services available, and status prints the failure cause.
+
+## Machine web configuration
+
+The machine name `default` is reserved for the daemon-managed System VM. Machine create, start, stop, remove, clone targets, and import targets reject that name. Use `abctl system resources`, `abctl system backend`, and `abctl disk` for System VM configuration and recovery. User machine operations remain available when the System VM is disabled, starting, or failed.
+
+`abctl machine web NAME` shows the saved HTTP and HTTPS backend selection. Set `--http-port` or `--https-port` to `auto`, `off`, or a port from 1 through 65535. Omitted options preserve their values. Both protocols default to `auto`; an explicit HTTPS port selects native TLS. These settings persist across daemon restarts, clones, and archives. `machine inspect` includes the saved `web_ports` object. This command saves configuration only; machine web routing is not yet available.
+
 ## Output formats
 
 `--format` is global but validated for the selected command before any command
@@ -79,6 +103,7 @@ and `setup status` exit nonzero when their report is unhealthy or incomplete.
 A check that could not be run is reported as `unknown` rather than failed —
 `doctor` counts it separately and `setup status` still exits zero, because a
 login-shell probe that times out says nothing about the integration itself.
+On macOS, `doctor` includes the daemon's cached local CA status without requesting authorization. A CA that needs trust, renewal, or repair appears as `warning`, counted in `summary.warnings`; warnings do not change the exit code. Missing or incomplete daemon status remains `unknown`. This certificate check does not probe DNS, HTTPS routing, or application traffic.
 Drift the daemon repairs on its next start is likewise reported as a detail,
 not as an incomplete cache: `boot status` says so for a runtime binary missing
 its executable bit instead of asking for a re-download.
@@ -92,6 +117,7 @@ reclaimable fields to `null`, reports the query error, and exits nonzero.
 - `0`: command succeeded.
 - `1`: an `abctl` operation or daemon connection failed.
 - `2`: command-line arguments were invalid.
+- `130`: native authorization was cancelled during a TLS command.
 - Remote commands (`machine exec`, `sandbox run` / `exec`, and `claude`) propagate the
   command's exit status; sandbox signal exits use the shell convention `128 + signal`.
 

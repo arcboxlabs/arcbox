@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{}", crate::error::render(&error, debug));
-            ExitCode::FAILURE
+            crate::error::exit_code(&error)
         }
     }
 }
@@ -129,6 +129,7 @@ fn run(cli: Cli) -> Result<()> {
         )
         .with(
             tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
                 .with_target(false)
                 .with_ansi(arcbox_cli::terminal::ansi_enabled(
                     std::io::stderr().is_terminal(),

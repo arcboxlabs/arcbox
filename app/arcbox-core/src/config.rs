@@ -44,6 +44,7 @@
 //! ```
 
 use arcbox_constants::container_network::ContainerNetwork;
+use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout};
 use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
 use arcbox_fakeip::proxy_policy::{ProxyPolicy, ProxySettings};
@@ -324,6 +325,9 @@ impl Default for MachineDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
+    /// Local suffix supplied by the daemon's DNS CLI or environment setting.
+    #[serde(skip)]
+    pub dns_domain: Domain,
     /// Subnet for NAT networking.
     pub subnet: String,
     /// Gateway address (first address in subnet if not specified).
@@ -362,6 +366,7 @@ impl NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
+            dns_domain: Domain::default(),
             subnet: "10.0.2.0/24".to_string(),
             gateway: None,
             dns: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],

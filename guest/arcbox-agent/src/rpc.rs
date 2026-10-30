@@ -9,22 +9,28 @@ use anyhow::{Context, Result};
 use buffa::Message;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::Cursor;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use arcbox_connect::v1::{
     AgentPingRequest as PingRequest, AgentPingResponse as PingResponse, ContainerFsPathsRequest,
     ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, Empty, EnsureMachineExportRequest,
     EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
-    ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
-    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
-    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
-    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
-    PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
-    ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
+    ImageFsPathsRequest, ImageFsPathsResponse, InstanceAuthorityAck, KubernetesDeleteRequest,
+    KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, ListGuestWebServicesRequest,
+    ListGuestWebServicesResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
+    OpenInstanceAuthorityRequest, OpenInstanceAuthorityResponse, PortBindingsChanged,
+    PortBindingsRemoved, ReadinessEvent, ReconcileGuestTrustRequest, ReconcileGuestTrustResponse,
+    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, ReplaceInstanceAuthorityRequest,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
     WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
     WatchStorageHealthRequest,
+};
+use arcbox_connect::v1::{
+    MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -75,6 +81,13 @@ impl ErrorResponse {
 pub enum RpcRequest {
     Ping(PingRequest),
     GetSystemInfo,
+    ListGuestWebServices(ListGuestWebServicesRequest),
+    ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
+    ReconcileGuestTrust(ReconcileGuestTrustRequest),
+    OpenInstanceAuthority(OpenInstanceAuthorityRequest),
+    ReplaceInstanceAuthority(ReplaceInstanceAuthorityRequest),
+    OpenMachineWeb(OpenMachineWebRequest),
+    ReplaceMachineWeb(ReplaceMachineWebRequest),
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
     StartKubernetes(KubernetesStartRequest),
@@ -104,6 +117,13 @@ pub enum RpcRequest {
 pub enum RpcResponse {
     Ping(PingResponse),
     SystemInfo(SystemInfo),
+    ListGuestWebServices(ListGuestWebServicesResponse),
+    ReconcileHttpsAccess(ReconcileHttpsAccessResponse),
+    ReconcileGuestTrust(ReconcileGuestTrustResponse),
+    OpenInstanceAuthority(OpenInstanceAuthorityResponse),
+    InstanceAuthorityAck(InstanceAuthorityAck),
+    OpenMachineWeb(OpenMachineWebResponse),
+    MachineWebAck(MachineWebAck),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
     KubernetesStart(KubernetesStartResponse),
@@ -136,6 +156,13 @@ impl RpcResponse {
         match self {
             Self::Ping(_) => MessageType::PingResponse,
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
+            Self::ListGuestWebServices(_) => MessageType::ListGuestWebServicesResponse,
+            Self::ReconcileHttpsAccess(_) => MessageType::ReconcileHttpsAccessResponse,
+            Self::ReconcileGuestTrust(_) => MessageType::ReconcileGuestTrustResponse,
+            Self::OpenInstanceAuthority(_) => MessageType::OpenInstanceAuthorityResponse,
+            Self::InstanceAuthorityAck(_) => MessageType::InstanceAuthorityAck,
+            Self::OpenMachineWeb(_) => MessageType::OpenMachineWebResponse,
+            Self::MachineWebAck(_) => MessageType::MachineWebAck,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
             Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
@@ -167,6 +194,13 @@ impl RpcResponse {
         match self {
             Self::Ping(msg) => msg.encode_to_vec(),
             Self::SystemInfo(msg) => msg.encode_to_vec(),
+            Self::ListGuestWebServices(msg) => msg.encode_to_vec(),
+            Self::ReconcileHttpsAccess(msg) => msg.encode_to_vec(),
+            Self::ReconcileGuestTrust(msg) => msg.encode_to_vec(),
+            Self::OpenInstanceAuthority(msg) => msg.encode_to_vec(),
+            Self::InstanceAuthorityAck(msg) => msg.encode_to_vec(),
+            Self::OpenMachineWeb(msg) => msg.encode_to_vec(),
+            Self::MachineWebAck(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesStart(msg) => msg.encode_to_vec(),
@@ -209,65 +243,23 @@ impl RpcResponse {
 pub async fn read_message<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(MessageType, String, Vec<u8>)> {
-    // Read header: 4 bytes length + 4 bytes type.
-    let mut header = [0u8; 8];
-    reader
-        .read_exact(&mut header)
+    let mut frame = arcbox_transport::vsock::read_framed(reader)
         .await
-        .context("failed to read message header")?;
-
-    let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let msg_type_raw = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
-
+        .context("failed to read RPC frame")?;
+    frame.advance(4);
+    anyhow::ensure!(
+        frame.remaining() >= 6,
+        "RPC frame is shorter than V2 header"
+    );
+    let msg_type_raw = frame.get_u32();
     let msg_type = MessageType::from_u32(msg_type_raw)
         .with_context(|| format!("unknown message type: {msg_type_raw}"))?;
-
-    // Remaining bytes = length - 4 (type already consumed from length).
-    let remaining = length.saturating_sub(4);
-
-    if remaining < 2 {
-        // Minimal frame: just a 2-byte trace_len of 0, no payload.
-        let mut tail = vec![0u8; remaining];
-        if remaining > 0 {
-            reader
-                .read_exact(&mut tail)
-                .await
-                .context("failed to read remaining")?;
-        }
-        return Ok((msg_type, String::new(), tail));
-    }
-
-    // Read trace_len (2 bytes BE).
-    let mut trace_len_buf = [0u8; 2];
-    reader
-        .read_exact(&mut trace_len_buf)
-        .await
-        .context("failed to read trace length")?;
-    let trace_len = u16::from_be_bytes(trace_len_buf) as usize;
-
-    // Read trace_id bytes.
-    let trace_id = if trace_len > 0 {
-        let mut trace_buf = vec![0u8; trace_len];
-        reader
-            .read_exact(&mut trace_buf)
-            .await
-            .context("failed to read trace id")?;
-        String::from_utf8(trace_buf).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    // Payload = remaining - 2 (trace_len field) - trace_len.
-    let payload_len = remaining.saturating_sub(2 + trace_len);
-    let mut payload = vec![0u8; payload_len];
-    if payload_len > 0 {
-        reader
-            .read_exact(&mut payload)
-            .await
-            .context("failed to read message payload")?;
-    }
-
-    Ok((msg_type, trace_id, payload))
+    let trace_len = usize::from(frame.get_u16());
+    anyhow::ensure!(trace_len <= frame.remaining(), "trace ID exceeds RPC frame");
+    let trace_id = std::str::from_utf8(&frame.split_to(trace_len))
+        .context("trace ID is not UTF-8")?
+        .to_owned();
+    Ok((msg_type, trace_id, frame.to_vec()))
 }
 
 /// Writes a single RPC message to the stream.
@@ -322,11 +314,33 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
 /// Parses an RPC request from message type and payload.
 pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest> {
     match msg_type {
+        MessageType::OpenMachineWebRequest => Ok(RpcRequest::OpenMachineWeb(
+            OpenMachineWebRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::ReplaceMachineWebRequest => Ok(RpcRequest::ReplaceMachineWeb(
+            ReplaceMachineWebRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::OpenInstanceAuthorityRequest => Ok(RpcRequest::OpenInstanceAuthority(
+            OpenInstanceAuthorityRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::ReplaceInstanceAuthorityRequest => Ok(RpcRequest::ReplaceInstanceAuthority(
+            ReplaceInstanceAuthorityRequest::decode_from_slice(payload)?,
+        )),
         MessageType::PingRequest => {
             let req = PingRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::Ping(req))
         }
         MessageType::GetSystemInfoRequest => Ok(RpcRequest::GetSystemInfo),
+        MessageType::ListGuestWebServicesRequest => {
+            let request = ListGuestWebServicesRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::ListGuestWebServices(request))
+        }
+        MessageType::ReconcileGuestTrustRequest => Ok(RpcRequest::ReconcileGuestTrust(
+            ReconcileGuestTrustRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::ReconcileHttpsAccessRequest => Ok(RpcRequest::ReconcileHttpsAccess(
+            ReconcileHttpsAccessRequest::decode_from_slice(payload)?,
+        )),
         MessageType::EnsureRuntimeRequest => {
             let req = RuntimeEnsureRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::EnsureRuntime(req))
@@ -414,6 +428,62 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_frame_does_not_consume_next_frame() {
+        for body in [&[][..], &[0, 0, 0, 1, 0], &[0, 0, 0, 1, 0, 2, b'a']] {
+            let (mut reader, mut writer) = tokio::io::duplex(128);
+            writer
+                .write_all(&(body.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            writer.write_all(body).await.unwrap();
+            write_message(&mut writer, MessageType::PingRequest, "next", b"payload")
+                .await
+                .unwrap();
+            assert!(read_message(&mut reader).await.is_err());
+            assert_eq!(
+                read_message(&mut reader).await.unwrap(),
+                (MessageType::PingRequest, "next".into(), b"payload".to_vec())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_trace_encoding_is_rejected() {
+        let (mut reader, mut writer) = tokio::io::duplex(128);
+        writer
+            .write_all(&[0, 0, 0, 7, 0, 0, 0, 1, 0, 1, 0xff])
+            .await
+            .unwrap();
+        assert!(
+            read_message(&mut reader)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("UTF-8")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_reading_body() {
+        let (mut reader, mut writer) = tokio::io::duplex(128);
+        writer.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(1), read_message(&mut reader))
+                .await
+                .expect("oversized frame must not wait for a body")
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("frame too large"));
+    }
+
+    #[tokio::test]
+    async fn truncated_frame_is_rejected() {
+        let (mut reader, mut writer) = tokio::io::duplex(128);
+        writer.write_all(&[0, 0, 0, 6, 0, 0, 0, 1]).await.unwrap();
+        drop(writer);
+        assert!(read_message(&mut reader).await.is_err());
+    }
 
     #[test]
     fn test_message_type_from_u32_requests() {

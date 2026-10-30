@@ -20,6 +20,8 @@ pub enum Event {
     /// machine's root export — acts on this edge. Internal; the public
     /// machine event stream does not carry it.
     MachineStopping { name: String },
+    /// A failed stop left the same machine run available. Internal recovery event.
+    MachineStopCancelled { name: String },
     /// Machine stopped.
     MachineStopped { name: String },
     /// Machine removed (record and disks deleted).

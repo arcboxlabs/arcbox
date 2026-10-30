@@ -46,3 +46,7 @@ pub const NFS_NFSD_RELAY_PORT: u32 = 2049;
 /// to the next container that opens the forwarded socket. See
 /// `arcbox_constants::paths::HOST_SERVICES_SSH_AUTH_SOCK`.
 pub const SSH_AUTH_RELAY_PORT: u32 = 2201;
+
+/// Guest vsock listener for host-initiated local CA signing connections.
+/// Each connection carries one length-delimited DER CSR and certificate (8192 bytes maximum).
+pub const TLS_SIGNING_PORT: u32 = 2202;

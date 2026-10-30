@@ -206,6 +206,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures",
+ "h2",
  "hostname",
  "http",
  "http-body-util",
@@ -267,6 +268,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -327,6 +329,7 @@ dependencies = [
  "arcbox-docker",
  "arcbox-docker-tools",
  "arcbox-helper",
+ "arcbox-local-ca",
  "buffa",
  "buffa-types",
  "chrono",
@@ -338,7 +341,6 @@ dependencies = [
  "hickory-proto",
  "humantime",
  "libc",
- "macos-resolver",
  "sentry",
  "serde",
  "serde_json",
@@ -579,12 +581,14 @@ dependencies = [
  "arcbox-connectrpc-reflection",
  "arcbox-constants",
  "arcbox-core",
+ "arcbox-dns",
  "arcbox-docker",
  "arcbox-docker-tools",
  "arcbox-engine",
  "arcbox-error",
  "arcbox-grpc",
  "arcbox-helper",
+ "arcbox-local-ca",
  "arcbox-logging",
  "arcbox-net",
  "arcbox-protocol",
@@ -593,19 +597,22 @@ dependencies = [
  "arcbox-transport",
  "async-trait",
  "axum",
+ "buffa",
  "bytes",
  "clap",
  "dirs",
  "filetime",
+ "futures",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
  "libproc",
- "macos-resolver",
  "nix 0.29.0",
+ "security-framework",
  "sentry",
  "serde_json",
+ "tarpc",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -615,6 +622,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -636,6 +644,8 @@ dependencies = [
 name = "arcbox-dns"
 version = "0.10.5"
 dependencies = [
+ "arcbox-constants",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -645,9 +655,12 @@ version = "0.10.5"
 dependencies = [
  "arcbox-connect",
  "arcbox-core",
+ "arcbox-dns",
  "arcbox-error",
+ "arcbox-local-ca",
  "arcbox-transport",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dirs",
@@ -659,9 +672,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "percent-encoding",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -698,6 +714,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-core",
  "arcbox-grpc",
+ "arcbox-local-ca",
  "arcbox-protocol",
  "arcbox-storage",
  "arcbox-vmm",
@@ -725,7 +742,6 @@ dependencies = [
  "arcbox-atomic-file",
  "arcbox-connect",
  "arcbox-constants",
- "arcbox-dns",
  "arcbox-error",
  "arcbox-fakeip",
  "arcbox-hypervisor",
@@ -829,16 +845,20 @@ dependencies = [
 
 [[package]]
 name = "arcbox-helper"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
+ "arcbox-atomic-file",
  "arcbox-constants",
+ "arcbox-local-ca",
  "arcbox-logging",
  "arcbox-route",
  "core-foundation 0.10.1",
  "futures",
  "ipnetwork 0.21.1",
  "libc",
+ "rcgen",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "tarpc",
  "tempfile",
@@ -893,6 +913,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
 ]
@@ -903,12 +924,20 @@ version = "0.10.5"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-constants",
+ "core-foundation 0.10.1",
+ "pem",
  "rcgen",
  "rustls",
+ "security-framework",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
@@ -934,6 +963,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1348,7 +1378,6 @@ name = "arcbox-vmm"
 version = "0.10.5"
 dependencies = [
  "arcbox-constants",
- "arcbox-dns",
  "arcbox-error",
  "arcbox-fakeip",
  "arcbox-fs",
@@ -1826,15 +1855,6 @@ dependencies = [
  "blowfish",
  "pbkdf2",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -3462,9 +3482,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.13"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4346,17 +4366,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 dependencies = [
  "twox-hash",
-]
-
-[[package]]
-name = "macos-resolver"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6795e57816b6f58f4420f761c3fffc151f48f4f9f374e1cacfcb281301a46a89"
-dependencies = [
- "libc",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -7333,13 +7342,13 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf600e7036b17782571dd44fa0a5cea3c82f60db5137f774a325a76a0d6852b"
 dependencies = [
- "bincode",
  "bytes",
  "educe",
  "futures-core",
  "futures-sink",
  "pin-project",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

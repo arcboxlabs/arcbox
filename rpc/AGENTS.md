@@ -1,7 +1,7 @@
 # rpc/ — Protocol & Transport Agent Guidance
 
 Basics live in the crate READMEs — don't duplicate them:
-- Message layout & the additive-only / `buf breaking` / handshake policy:
+- Message layout, paired updates, `buf breaking`, and handshake policy:
   `rpc/arcbox-protocol/README.md`.
 - Transport usage, `VsockStream`/`VsockShutdown` and the port-1024 note:
   `rpc/arcbox-transport/README.md`. The CID (host=2, guest=3+) table is in the
@@ -60,15 +60,20 @@ This file is only the non-obvious operational knowledge.
   `app/arcbox-docker/tests/support` does as well. Since v6 the Kubernetes
   (16443) and NFS (2049) relays wrap the same framing around their raw TCP
   bytes (`kubernetes_proxy.rs` / `nfs_mount.rs` host-side, `proxy.rs` /
-  `nfs.rs` in the agent). Changing this framing is a
-  `AGENT_PROTOCOL_VERSION` bump (v4 introduced the half-close, v5 the
-  flow-control window: a header with the top bit set is a grant, not a
-  length; v6 extended it to the two relays).
+  `nfs.rs` in the agent). Update both ends together when this framing changes. A header with the top bit set is a flow-control grant, not a length.
 - The `arcbox-protocol/src/lib.rs` top-of-file doc says "ttrpc" — **stale**.
   There is no ttrpc dependency; trust this file over that comment.
 
 ## Invariants (each with a one-clause why)
 
+- `SetupStatus.phase` reports host lifecycle. `system_runtime` reports independent System admission and structured milestones. `STARTING` covers binary preparation; `VM_STARTING` and `VM_READY` delimit guest boot. Never infer Docker, Kubernetes, or sandbox readiness from host or guest boot readiness. System failure must preserve host, local HTTPS, and storage observations.
+- Machine operations and System configuration/recovery use the prepared host handle. Docker, Kubernetes, sandbox, migration, and System filesystem requests use the System handle. Directory and diagnostic reads retain the early handle. Keep existing storage write guards after runtime admission.
+
+- `ReconcileGuestTrust` carries the active host certificate or explicit guest opt-out. Reject an unset desired state and non-host peers. A missing active CA sends no request; macOS untrust does not remove guest trust. Acknowledge only a completed install or removal. The host compares the installed fingerprint with the current CA. Keep this channel separate from Web authority and HTTPS observation.
+
+- Machine web configuration uses a separate exclusive host connection on distro machines. Open fixes raw machine name, canonical hostname, and bridge IPv4. Replace carries complete policies, optional public-root PEM, and a strictly increasing positive source revision. Absence withdraws proxy authority without removing guest client trust. Validate present roots before committing any replacement state. Ack confirms stored configuration, not installed routes.
+- Instance authority uses a dedicated exclusive port-1024 connection. Open has no identity fields; Replace and Ack carry the source authority revision. Updates contain complete roots and use strictly increasing revisions within one connection. Keep this channel separate from HTTPS access observation.
+- `SystemService.WatchHttpsAccess` registers a Desktop observer independently of VM readiness. An empty `request_id` clears the pending request. `AcknowledgeHttpsAccess` ends the prompt, but native CA inspection alone establishes trust. Desktop must persist canceled or failed outcomes before acknowledging them. `ReconcileHttpsAccess` renews a three-second guest lease over either agent transport; only exact host source addresses may trigger authorization.
 - **Generated prost code is committed** (`arcbox-protocol/src/generated/*.rs`)
   and rustfmt'd by `build.rs` (writes into `src/`, not `OUT_DIR`) — a `.proto`
   edit without a rebuild+commit ships a stale/unformatted file that fails
@@ -86,13 +91,14 @@ This file is only the non-obvious operational knowledge.
   `AgentPingResponse.protocol_version` is gated against
   `MIN_AGENT_PROTOCOL_VERSION`; `.version` is informational log text only
   (`agent_client.rs::check_agent_protocol`). Don't conflate them.
-- **Bump `AGENT_PROTOCOL_VERSION` only when a change alters the *meaning* of
-  existing messages** — purely additive fields don't need a bump; unknown
-  `MessageType`s already fail cleanly (`common/arcbox-constants/src/wire.rs`).
+- **Update paired callers and decoders directly.** Keep `AGENT_PROTOCOL_VERSION` and `MIN_AGENT_PROTOCOL_VERSION` at 7 for current feature work. Do not add compatibility branches or bump versions for each message change. Unknown `MessageType`s fail cleanly (`common/arcbox-constants/src/wire.rs`).
 - **`MAX_FRAME_SIZE` (16 MiB) must stay identical** in both
   `arcbox-transport/src/vsock/blocking.rs` (HV, no tokio, `poll` deadlines) and
   `.../transport.rs` (async VZ/Linux) — the only thing keeping them equal is a
   comment; diverge and cross-backend frames silently mismatch.
+- Guest RPC decoding uses `vsock::read_framed` for the same allocation bound. Validate the complete V2 header and trace bytes inside that frame; reject short headers, out-of-frame trace lengths, and invalid UTF-8.
+- Use `BlockingVsockTransport::into_split` for independent blocking reader and writer workers. The receiver has no idle deadline. Retain a shutdown handle before splitting; cancel the socket and join both workers when the connection ends.
+- Use `vsock::SocketScope` to interrupt dedicated guest sockets during owner shutdown. Transports retain the socket leases; the scope holds only weak references. Preserve the lease through both split halves. Check the scope before connecting and register the connected socket under the same closed-state lock. Closing the scope does not join workers.
 - **`AgentClient::connect()` is a no-op on the blocking path** — the HV
   transport is connected at creation (`from_fd`); only the async path dials.
 - **Every proto in the dir is additive-only under the CI `buf breaking`
@@ -199,8 +205,7 @@ codec — `WatchReadiness`/`WatchStats`/`WatchMemoryPressure` stream too and
 keep their `rpc.rs` arms.
 
 **Change the wire contract / add a meaning-bearing field:**
-- Bump `AGENT_PROTOCOL_VERSION` (and `MIN_AGENT_PROTOCOL_VERSION` if dropping
-  old-agent support) in `wire.rs`.
+- Update every producer and consumer in the same source change. Keep both protocol versions unchanged for current feature work.
 - The handshake gate (`check_agent_protocol`) is called from **three** sites —
   update/verify all: `engine/arcbox-engine/src/machine.rs` (ready probe) and both
   boot arms in `engine/arcbox-engine/src/vm_lifecycle/boot.rs` (blocking HV +

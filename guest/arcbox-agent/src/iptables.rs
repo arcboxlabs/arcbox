@@ -8,23 +8,25 @@
 //! - [`TaggedRules`] replace or remove one container's rules as a set, with
 //!   `-C` before every insert or delete so that a rule is never doubled and
 //!   a missing one is not an error, and
-//! - [`sweep`] find an owner's rules again after an agent restart, when the
+//! - [`TaggedRules::sweep`] find an owner's rules again after an agent restart, when the
 //!   record of what the previous process installed is gone. The owner's
 //!   event reconciliation then reinstalls what still applies.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-const IPTABLES: &str = "/sbin/iptables";
+/// Static legacy tool in the System VM boot root.
+pub const SYSTEM_TOOL: &str = "/sbin/iptables";
 
 /// One agent-owned nat PREROUTING rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NatRule {
     /// Everything after the chain name: matches, the comment tag, the target.
-    spec: Vec<String>,
+    pub(crate) spec: Vec<String>,
 }
 
 impl NatRule {
@@ -49,17 +51,17 @@ impl NatRule {
     }
 
     /// Inserts the rule at the top of the chain unless it is there already.
-    async fn ensure(&self) -> Result<()> {
-        if !is_installed(&nat_prerouting("-C", &self.spec)).await? {
-            run(&nat_prerouting("-I", &self.spec)).await?;
+    async fn ensure(&self, executable: &Path) -> Result<()> {
+        if !is_installed(executable, &nat_prerouting("-C", &self.spec)).await? {
+            run(executable, &nat_prerouting("-I", &self.spec)).await?;
         }
         Ok(())
     }
 
     /// Deletes the rule if it is present.
-    async fn delete(&self) -> Result<()> {
-        if is_installed(&nat_prerouting("-C", &self.spec)).await? {
-            run(&nat_prerouting("-D", &self.spec)).await?;
+    async fn delete(&self, executable: &Path) -> Result<()> {
+        if is_installed(executable, &nat_prerouting("-C", &self.spec)).await? {
+            run(executable, &nat_prerouting("-D", &self.spec)).await?;
         }
         Ok(())
     }
@@ -68,15 +70,17 @@ impl NatRule {
 /// The rules one owner holds in the kernel, per container ID.
 pub struct TaggedRules {
     owner: &'static str,
+    executable: PathBuf,
     held: HashMap<String, Vec<NatRule>>,
 }
 
 impl TaggedRules {
-    /// An empty record for rules tagged with `owner`.
+    /// An empty record whose checks, mutations, listings, and sweeps use `executable`.
     #[must_use]
-    pub fn new(owner: &'static str) -> Self {
+    pub fn new(owner: &'static str, executable: impl Into<PathBuf>) -> Self {
         Self {
             owner,
+            executable: executable.into(),
             held: HashMap::new(),
         }
     }
@@ -91,13 +95,13 @@ impl TaggedRules {
         let mut held = Vec::with_capacity(rules.len());
         let mut failures = Vec::new();
         for rule in &rules {
-            match rule.ensure().await {
+            match rule.ensure(&self.executable).await {
                 Ok(()) => held.push(rule.clone()),
                 Err(e) => failures.push(format!("{e:#}")),
             }
         }
         for stale in previous.into_iter().filter(|rule| !rules.contains(rule)) {
-            if let Err(e) = stale.delete().await {
+            if let Err(e) = stale.delete(&self.executable).await {
                 failures.push(format!("{e:#}"));
                 held.push(stale);
             }
@@ -119,39 +123,45 @@ impl TaggedRules {
     pub async fn remove(&mut self, container_id: &str) -> Result<()> {
         self.replace(container_id, Vec::new()).await
     }
-}
-
-/// Deletes every nat PREROUTING rule tagged by `owner`, whoever installed
-/// it, and returns how many went.
-pub async fn sweep(owner: &str) -> Result<usize> {
-    let listing = Command::new(IPTABLES)
-        .args(["-t", "nat", "-w", "2", "-S", "PREROUTING"])
-        .output()
-        .await
-        .context("listing nat PREROUTING")?;
-    if !listing.status.success() {
-        bail!(
-            "iptables -t nat -S PREROUTING failed: {}",
-            String::from_utf8_lossy(&listing.stderr).trim()
-        );
-    }
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    let mut failures = Vec::new();
-    let mut removed = 0usize;
-    for args in listing.lines().filter_map(|line| sweep_args(owner, line)) {
-        match run(&args).await {
-            Ok(()) => removed += 1,
-            Err(e) => failures.push(format!("{e:#}")),
+    /// Deletes every nat PREROUTING rule with this owner tag and returns the count.
+    pub async fn sweep(&self) -> Result<usize> {
+        let owner = self.owner;
+        let listing = self.list_prerouting().await?;
+        let mut failures = Vec::new();
+        let mut removed = 0usize;
+        for args in listing.lines().filter_map(|line| sweep_args(owner, line)) {
+            match run(&self.executable, &args).await {
+                Ok(()) => removed += 1,
+                Err(e) => failures.push(format!("{e:#}")),
+            }
         }
+        if !failures.is_empty() {
+            bail!(
+                "failed to sweep {} stale {owner} rule(s): {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
+        Ok(removed)
     }
-    if !failures.is_empty() {
-        bail!(
-            "failed to sweep {} stale {owner} rule(s): {}",
-            failures.len(),
-            failures.join("; ")
-        );
+
+    /// Reads nat PREROUTING through this owner's selected executable.
+    pub async fn list_prerouting(&self) -> Result<String> {
+        let listing = Command::new(&self.executable)
+            .args(["-t", "nat", "-w", "2", "-S", "PREROUTING"])
+            .output()
+            .await
+            .with_context(|| {
+                format!("listing nat PREROUTING with {}", self.executable.display())
+            })?;
+        if !listing.status.success() {
+            bail!(
+                "iptables -t nat -S PREROUTING failed: {}",
+                String::from_utf8_lossy(&listing.stderr).trim()
+            );
+        }
+        String::from_utf8(listing.stdout).context("reading nat PREROUTING output")
     }
-    Ok(removed)
 }
 
 /// If `line` (from `iptables -S PREROUTING`) is tagged by `owner`, the argv
@@ -166,7 +176,7 @@ fn sweep_args(owner: &str, line: &str) -> Option<Vec<String>> {
 }
 
 /// `iptables -S` quotes comments; `-D` wants them bare.
-fn unquote(field: &str) -> String {
+pub fn unquote(field: &str) -> String {
     field
         .strip_prefix('"')
         .and_then(|f| f.strip_suffix('"'))
@@ -182,12 +192,12 @@ fn nat_prerouting(verb: &str, spec: &[String]) -> Vec<String> {
         .collect()
 }
 
-async fn is_installed(check_args: &[String]) -> Result<bool> {
-    let output = Command::new(IPTABLES)
+async fn is_installed(executable: &Path, check_args: &[String]) -> Result<bool> {
+    let output = Command::new(executable)
         .args(check_args)
         .output()
         .await
-        .context("failed to run iptables")?;
+        .with_context(|| format!("failed to run {}", executable.display()))?;
     classify_check(&output, check_args)
 }
 
@@ -206,12 +216,12 @@ fn classify_check(output: &Output, args: &[String]) -> Result<bool> {
     )
 }
 
-async fn run(args: &[String]) -> Result<()> {
-    let output = Command::new(IPTABLES)
+async fn run(executable: &Path, args: &[String]) -> Result<()> {
+    let output = Command::new(executable)
         .args(args)
         .output()
         .await
-        .context("failed to run iptables")?;
+        .with_context(|| format!("failed to run {}", executable.display()))?;
     if !output.status.success() {
         bail!(
             "iptables {} failed: {}",

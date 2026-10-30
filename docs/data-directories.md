@@ -13,8 +13,7 @@ launchd (macOS system).
 ## 1. `~/.arcbox/` — User Data Root
 
 Default data directory. Resolved by `dirs::home_dir().join(".arcbox")`;
-falls back to `/var/lib/arcbox` when `HOME` is unset. Overridable via
-`--data-dir` on the daemon and CLI.
+falls back to `/var/lib/arcbox` when `HOME` is unset. The daemon accepts `--data-dir`. Use `abctl boot --data-dir PATH` to select a separate directory for boot prefetch, status, list, and clear. The boot override takes precedence over the configured data directory.
 
 **Defined in**: `app/arcbox-daemon/src/startup.rs` (`resolve_data_dir`),
 `app/arcbox-core/src/config.rs`.
@@ -147,17 +146,23 @@ init through the `arcbox` VirtioFS share (`/arcbox/config/`).
 
 ### 1.10 `tls/` — Local CA for Container Domains
 
-Generated once by the daemon before the System VM boots, kept across
-restarts; the guest agent reads it through the share (`/arcbox/tls/`) to sign
-a certificate per `https://<name>.arcbox.local` name. Trust model:
+The macOS daemon keeps the CA key and certificate in the user's Keychain.
+The guest sends CSRs to the host and retains only leaf keys in memory.
+The shared directory contains the public certificate for client trust. Trust model:
 `common/arcbox-local-ca/src/lib.rs`.
 
 | Path | Purpose | Creator |
 |------|---------|---------|
-| `tls/ca.pem` | CA certificate, name-constrained to `arcbox.local`; what `abctl tls trust` adds to the login keychain | daemon |
-| `tls/ca-key.pem` | CA private key (mode 0600) | daemon |
+| `tls/ca.pem` | Public CA certificate, name-constrained to `arcbox.local`; native user-session authorization sets Admin TLS trust, and the helper stores the System Keychain copy | daemon |
+| `tls/ca-key.pem` | Legacy private key; removed before VM boot | legacy daemon |
+| `tls/identity.json` | Public root identities and durable rotation phase; contains no private key | daemon |
+| `tls/operation.lock` | Serializes identity changes, trust, repair, and revocation for this profile | daemon; CLI |
 
-Deleting `tls/` rotates the CA on the next daemon start; trust the new one again.
+Deleting only `tls/ca.pem` does not rotate the Keychain CA: the daemon exports the selected public certificate again. Preserve `tls/identity.json`; it selects the current root and retains unfinished rotation identities. If the replacement slot exists without this record, ArcBox stops CA preparation instead of choosing an identity. The primary Keychain label is `dev.arcbox.local-ca.v2:<canonical tls directory>`; the replacement label adds `:replacement`.
+
+Migration generates a new key and removes the old shared key. A login-session action revokes the old certificate's trust before replacing `ca.pem`. The old public certificate stays in place if trust removal fails, so authorization can retry. `abctl tls untrust` includes the current, pending, retired, and separately published roots. Uninstall deletes their user Keychain identities only after all trust revocations succeed.
+
+CA trust is independent of VM and Docker startup. Desktop invokes `abctl tls trust` in the login user's session after a deliberate managed HTTPS action. macOS authorizes trust changes separately from helper installation; correct existing trust needs no new prompt. Migration also removes legacy User trust for an unchanged certificate, because User settings override Admin policy. Development and isolated instances do not install trust automatically. `abctl tls status` checks Admin trust, the System Keychain copy, and absence of legacy User trust. `abctl tls untrust` revokes Admin and legacy User trust before removing that copy. Trust, repair, and revocation hold `operation.lock` through authorization, so concurrent commands for the same profile fail without opening another prompt.
 
 ### 1.11 `ssh/` — SSH Server
 
@@ -197,6 +202,7 @@ See also [helper.md](helper.md) for versioning, threat model, and ownership rule
 | `/usr/local/libexec/arcbox-helper` | Privileged helper binary | cli (`abctl _install`) |
 | `/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist` | Helper LaunchDaemon (socket-activation) | cli (`abctl _install`) |
 | `/var/run/arcbox-helper.sock` | Helper socket (created by launchd) | launchd |
+| `/var/run/arcbox-helper-install.lock` | Shared installation lock, held through the final readiness check and retained through uninstall until reboot | cli (`abctl _install`) |
 | `/var/run/docker.sock` | Symlink → `~/.arcbox/run/docker.sock` | helper |
 | `/etc/resolver/arcbox.local` | macOS DNS resolver file | helper |
 | `/var/log/arcbox/` | Privileged helper log directory | helper |
@@ -239,7 +245,7 @@ Not files under a fixed directory, but state ArcBox leaves on the Mac.
 | `~/ArcBox/`: the host mount root, a plain directory holding every guest filesystem the daemon shows the user (ADR 0003). `ARCBOX_HOST_MOUNT_DIR` moves it (test daemons keep it in their data dir). At startup the daemon force-unmounts whatever a previous daemon left under it — their servers died with it — and the pre-ADR-0003 layout (section 10) | daemon (`startup::host_mounts`) | `abctl uninstall`, when nothing but the daemon's directories is left in it |
 | `~/ArcBox/docker`: read-only NFSv4 mount of the guest's Docker data; the containerd data root is the child export at `docker/containerd`, mounted by the NFS client on its own | daemon (`nfs_mount`) | daemon on shutdown; `abctl uninstall` when a daemon left it |
 | `~/ArcBox/machines/<name>`: read-write NFSv3 mount of a running machine's root filesystem, served by the machine's agent on its bridge NIC; the mount point exists only while the machine runs | daemon (`machine_mount`) | daemon when the machine stops or is removed and on shutdown; `abctl uninstall` when a daemon left one |
-| Login keychain: the `ArcBox Local CA` certificate and its TLS trust | user (`abctl tls trust`) | `abctl tls untrust`, `abctl uninstall` |
+| Default file Keychain: per-profile CA key and public certificate; System Keychain and Admin trust: public certificate trusted for TLS servers | daemon; privileged helper | `abctl tls untrust` removes trust and the System certificate; `abctl uninstall` also removes the profile's user Keychain identity |
 | `~/.kube/config`: the `arcbox` context, cluster and user; `~/.arcbox/kube/` | user (`abctl k8s enable`) | `abctl k8s disable`, `abctl uninstall` |
 | Login Items entry for the daemon (BTM database) | desktop (SMAppService) | the Desktop app when it quits |
 
@@ -422,7 +428,7 @@ older installations. They can be safely deleted.
 
 ## 11. Uninstall
 
-`abctl uninstall` removes everything above that is ArcBox's. Run it as
+`abctl uninstall` removes ArcBox state except the retained paths listed below. Run it as
 yourself, not under `sudo`: the Docker context, shell profile, kubeconfig and
 keychain trust are the user's, and the command asks for `sudo` itself, once,
 for the privileged paths. It prints what it found before asking to continue,
@@ -430,8 +436,10 @@ then reports each step as `done`, `skipped (why)` or `FAILED: why`, and exits
 non-zero when any step failed. `--keep-data` keeps `~/.arcbox/data`
 (containers, images, volumes, machines); `--yes` skips the prompt.
 
+CA cleanup holds the profile operation lock until both trust revocation and Keychain identity deletion finish. The removal plan includes the lock directory created during cleanup, including when the profile directory was absent.
+
 ```bash
-abctl uninstall                 # everything
+abctl uninstall                 # remove ArcBox state
 abctl uninstall --keep-data     # keep ~/.arcbox/data for a reinstall
 brew uninstall --cask arcbox    # when the app came from Homebrew
 ```
@@ -447,7 +455,9 @@ What the command does, in order:
    Login Items entry), then stops the daemon: through `launchctl bootout` when
    launchd manages it, otherwise through the PID in `~/.arcbox/run/daemon.lock`.
    The daemon stops its own System VM; no other process is killed by name.
-2. Unregisters the helper LaunchDaemon, then unmounts whatever a daemon
+2. Revokes Admin and legacy User trust in the selected profile's CA, then
+   deletes its Keychain identity. A failure stops cleanup and preserves the
+   helper and data for a retry. Unregisters the helper LaunchDaemon, then unmounts whatever a daemon
    left under `~/ArcBox` — the Docker export at `docker/`, machine roots
    under `machines/`, or the export an older daemon mounted at `~/ArcBox`
    itself — and under `~/ArcBoxMachines`, removing the directories that
@@ -456,10 +466,8 @@ What the command does, in order:
 3. Removes the Docker context (restoring the previous current context), the
    shell integration (section 1.6, 1.7, 1.8, 7, and the Docker CLI plugin
    registration in section 5), the kubectl integration, the `~/.ssh/config`
-   Include, and trust in the local CA.
-4. Removes every path in sections 3, 4, 4.1, 6 and 6.1 that is ArcBox's, then
-   `~/.arcbox` (or all of it but `data/`), then `/Applications/ArcBox.app`
-   unless Homebrew installed it.
+   Include.
+4. Removes ArcBox-owned paths in sections 3, 4, 4.1, 6 and 6.1 except the shared helper installation lock. Then removes `~/.arcbox` (or all of it but `data/`) and `/Applications/ArcBox.app` unless Homebrew installed the app.
 
 Ownership is checked before anything privileged is removed, with the rules
 the helper applies when it creates them: a `/usr/local/bin` link must point
@@ -469,6 +477,8 @@ files are left alone and never listed.
 
 Not removed: `~/.config/arcbox/config.toml` and `/etc/arcbox/config.toml`
 (section 2), which the user wrote.
+
+The root-owned `/var/run/arcbox-helper-install.lock` also remains until reboot. Uninstall must not unlink the lock: an active installer and subsequent installers must use the same inode. The installer stores no PID or user data in the lock. The per-profile `tls/operation.lock` is removed after CA cleanup; the shared installation lock is retained.
 
 The list in this document is the contract behind the command
 (`app/arcbox-cli/src/commands/uninstall/inventory.rs`). A new path ArcBox

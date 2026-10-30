@@ -2,6 +2,22 @@
 
 ArcBox Engine owns machine and VM lifecycles without a daemon dependency.
 
+`VmManager::start` returns the newly started physical run identity. Pass that identity to `dup_serial_readers`. `MachineManager::start` retains the identity through readiness, address persistence, and start notification; late results cannot update a replacement run.
+
+Before stopping or removing a VM through `VmManager`, capture `run_incarnation` and pass that identity to the lifecycle operation. A stopped or created VM also has an identity; the identity does not imply readiness. Operations reject replacement runs before touching their VMM or publishing completion.
+
+Use `MachineManager::stop(name, Some(timeout))` for graceful shutdown followed by forced shutdown of the same run when graceful shutdown is unavailable or times out. Pass `None` for immediate forced shutdown. Other shutdown errors propagate to the caller.
+
+Before final host shutdown, call `MachineManager::close_agent_connections()` to reject new operational agent connections and interrupt pending guest I/O. Then join the connection and operation workers before stopping VMs. Readiness checks stop retrying when the scope closes. The scope covers both transports and split streams. The final VM shutdown request uses a separate connection. Closing the scope is permanent and does not join workers or stop VMs.
+
+One operation owns stopping each physical run. A failed forced takeover preserves a pending graceful stop; a confirmed live run restores admission through `MachineStopCancelled`.
+
+Use `host_hold_expected` to admit host work only while the named machine is running the captured physical VM. On `MachineStopping`, cancel and join the work before dropping its hold.
+
+Stop and removal wait at most ten seconds for host holds. A timeout returns an error before teardown. Removal of a created or stopped machine also waits for remaining holds; retry after the holder finishes.
+
+Removal of a running or stopping machine requires `force`. Forced removal acquires the same stop ownership and retains the captured physical run through final deletion.
+
 Use `VmLifecycleManager::force_stop` to interrupt a boot or graceful shutdown and wait for machine removal:
 
 ```rust,ignore
@@ -36,3 +52,11 @@ Dropping the async future closes the connection. The guest contract cancels offl
 Recovery owners can pass a cancellation token to `storage_check_with_cancel` and `watch_readiness_with_cancel`. After cancelling the token, await the operation to join any blocking RPC worker before stopping the VM.
 
 A successful RPC returns the guest's check results. Callers must require `StorageCheckResponse.passed` before treating verification as successful. The client does not remove storage protection or start runtime services.
+
+Use `AgentClient::list_kubernetes_load_balancers(cancelled)` to poll LoadBalancer Services. Reuse the returned client after success. Cancel the token and await the operation before retiring the VM; blocking transport cancellation closes the socket and joins its worker.
+
+Use `MachineManager::set_web_ports` to save a machine's HTTP and HTTPS backend selection. Each policy is `Auto`, `Off`, or `Port(NonZeroU16)`; an explicit HTTPS port selects native TLS. Omitted arguments preserve the saved selection. The settings survive daemon restarts, clones, and archives. Saving these settings does not apply routes.
+
+`MachinePersistence` serializes saves, removals, and updates through the same manager. Concurrent field updates preserve the latest saved configuration. Update callbacks must not call a write method on the same manager. Separate manager instances do not coordinate writes.
+
+Use `AgentClient::machine_web` on an expected machine connection to retain one fixed raw name, canonical hostname, and bridge IPv4 address. Send complete `ReplaceMachineWebRequest` policies with increasing source revisions starting at one. The matching acknowledgement confirms configuration receipt, not installed routes. Drop the session and await its coordinator before releasing the machine host hold.

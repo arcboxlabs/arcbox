@@ -6,9 +6,28 @@
 
 pub mod client;
 pub mod error;
+mod resolver_authority;
 pub mod validate;
 
 pub use error::HelperError;
+pub use resolver_authority::{
+    ResolverAuthorityRoot, ResolverAuthoritySnapshot, ResolverAuthorityState, ResolverOwner,
+};
+
+/// Complete resolver roots for one daemon instance on one helper connection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolverLease {
+    /// Must match the audit-token-verified daemon signing profile.
+    pub profile: String,
+    /// Immutable random identifier generated once per daemon startup.
+    pub nonce: [u8; 16],
+    /// Strictly increasing revision, starting at one.
+    pub revision: u64,
+    /// Bound unprivileged DNS listener port.
+    pub port: u16,
+    /// Complete exact resolver roots; the helper never broadens them.
+    pub roots: Vec<String>,
+}
 
 /// Unix socket path where the helper daemon listens.
 pub const HELPER_SOCKET: &str = arcbox_constants::paths::privileged::HELPER_SOCKET;
@@ -45,13 +64,9 @@ pub fn hosts_alias_installed(hosts_content: &str) -> bool {
 /// The tarpc service definition for privileged host mutations.
 ///
 /// All methods perform input validation server-side before executing
-/// any privileged operation. Failures use structured [`HelperError`]
-/// (bincode-stable; append variants only).
-///
-/// **Method order is append-only**: the bincode transport encodes the
-/// request enum's variant index, so inserting a method above shifts every
-/// later ordinal and an upgrade-window daemon talking to the previous
-/// helper misdecodes calls silently.
+/// any privileged operation. JSON identifies methods and structured
+/// [`HelperError`] variants by name. Invalid frames and unknown methods
+/// close the connection before dispatch.
 #[tarpc::service]
 pub trait HelperService {
     /// Adds a host route for `subnet` via `iface`.
@@ -61,15 +76,6 @@ pub trait HelperService {
     /// Removes the host route for `subnet`.
     /// Idempotent: returns Ok if the route is already absent.
     async fn route_remove(subnet: String) -> Result<(), HelperError>;
-
-    /// Installs a DNS resolver file for `domain` pointing to `127.0.0.1:port`.
-    async fn dns_install(domain: String, port: u16) -> Result<(), HelperError>;
-
-    /// Removes the DNS resolver file for `domain`.
-    async fn dns_uninstall(domain: String) -> Result<(), HelperError>;
-
-    /// Checks if a DNS resolver file is installed for `domain`.
-    async fn dns_status(domain: String) -> Result<bool, HelperError>;
 
     /// Creates `/var/run/docker.sock` symlink pointing to `target`.
     async fn socket_link(target: String) -> Result<(), HelperError>;
@@ -106,13 +112,30 @@ pub trait HelperService {
     /// Removes an exact direct route only when it still belongs to `iface`.
     /// Idempotent when the route is absent; refuses to delete a foreign route.
     async fn route_remove_if_owned(subnet: String, iface: String) -> Result<bool, HelperError>;
+
+    /// Stores a validated public ArcBox CA in the System Keychain without granting trust.
+    async fn ca_install(der: Vec<u8>) -> Result<(), HelperError>;
+
+    /// Checks exact TLS-only Admin trust and System Keychain certificate presence.
+    async fn ca_status(der: Vec<u8>) -> Result<bool, HelperError>;
+
+    /// Removes this public ArcBox CA from the System Keychain after Admin trust is revoked.
+    async fn ca_remove(der: Vec<u8>) -> Result<(), HelperError>;
+
+    /// Publishes all roots atomically per file and releases the lease at connection EOF.
+    async fn resolver_lease(update: ResolverLease) -> Result<(), HelperError>;
+
+    /// Returns complete authority immediately, after an epoch change, or after 30 seconds.
+    async fn resolver_watch(
+        after_epoch: Option<u64>,
+    ) -> Result<ResolverAuthoritySnapshot, HelperError>;
 }
 
 /// Low-level connect — use [`client::Client::connect()`] instead.
 pub(crate) async fn connect() -> Result<HelperServiceClient, std::io::Error> {
     let path = socket_path();
     let transport =
-        tarpc::serde_transport::unix::connect(&path, tarpc::tokio_serde::formats::Bincode::default)
+        tarpc::serde_transport::unix::connect(&path, tarpc::tokio_serde::formats::Json::default)
             .await?;
     Ok(HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn())
 }

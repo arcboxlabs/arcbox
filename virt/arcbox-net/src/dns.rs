@@ -5,6 +5,7 @@
 //!   configuration as it changes (network switches, VPN up/down)
 //! - Resolve local hostnames (VM names)
 //! - Cache DNS responses
+//! - Route instance namespaces to explicit loopback DNS endpoints without caching
 //!
 //! The implementation handles basic A and AAAA record queries.
 
@@ -14,10 +15,15 @@ mod upstream;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+pub use arcbox_dns::DnsRecordType;
 use arcbox_dns::LocalHostsTable;
+use arcbox_dns::{
+    NamePattern,
+    registry::{InstanceAuthority, InstanceTarget, Lookup, Registry},
+};
 
 use crate::error::{NetError, Result};
 
@@ -121,43 +127,6 @@ fn default_upstream() -> Vec<SocketAddr> {
         .collect()
 }
 
-/// DNS record type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
-pub enum DnsRecordType {
-    /// A record (IPv4 address).
-    A = 1,
-    /// AAAA record (IPv6 address).
-    Aaaa = 28,
-    /// CNAME record.
-    Cname = 5,
-    /// PTR record (reverse lookup).
-    Ptr = 12,
-    /// MX record (mail exchange).
-    Mx = 15,
-    /// TXT record.
-    Txt = 16,
-    /// SRV record (service).
-    Srv = 33,
-}
-
-impl TryFrom<u16> for DnsRecordType {
-    type Error = ();
-
-    fn try_from(value: u16) -> std::result::Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::A),
-            28 => Ok(Self::Aaaa),
-            5 => Ok(Self::Cname),
-            12 => Ok(Self::Ptr),
-            15 => Ok(Self::Mx),
-            16 => Ok(Self::Txt),
-            33 => Ok(Self::Srv),
-            _ => Err(()),
-        }
-    }
-}
-
 /// DNS query class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
@@ -184,21 +153,27 @@ pub enum DnsResponseCode {
     Refused = 5,
 }
 
+/// DNS ownership and relative-name policy shared by the host and VM datapaths.
+#[derive(Debug, Clone)]
+pub struct SharedDns {
+    /// Current resource claims and addresses.
+    pub registry: Arc<RwLock<Registry>>,
+    /// Domain appended when looking up exact relative aliases.
+    pub local_domain: Option<String>,
+}
+
 /// DNS forwarder.
 ///
 /// Forwards DNS queries to upstream servers and provides local hostname
-/// resolution for VMs. The local hosts table is behind an `Arc<RwLock<...>>`
-/// so it can be shared between the host-side DnsService and the VMM-side
-/// datapath forwarder.
+/// resolution from the same Registry on the host and in VM datapaths.
 pub struct DnsForwarder {
     /// Configuration.
     config: DnsConfig,
-    /// Shared local hostname mappings (hostname -> IP).
+    /// Concrete projection for mDNS publication, never a lookup authority.
     local_hosts: Arc<LocalHostsTable>,
-    /// Response cache. Behind a `Mutex` (interior mutability) so `handle_query`
-    /// takes only `&self`; callers then hold a *read* lock on the surrounding
-    /// `RwLock<DnsForwarder>`, so a slow upstream forward never blocks the fast
-    /// local-resolution / cache-hit path.
+    registry: Arc<RwLock<Registry>>,
+    /// Response cache. Interior mutability keeps resolver I/O independent of
+    /// the registry lock, so upstream forwarding cannot block local queries.
     cache: std::sync::Mutex<HashMap<cache::DnsCacheKey, cache::CacheEntry>>,
     /// Live upstream list; re-loaded from the system resolver file when it
     /// changes.
@@ -206,31 +181,33 @@ pub struct DnsForwarder {
 }
 
 impl DnsForwarder {
-    /// Creates a new DNS forwarder with a fresh (empty) hosts table.
+    /// Creates a new DNS forwarder with an empty registry.
     #[must_use]
     pub fn new(config: DnsConfig) -> Self {
-        Self::with_shared_hosts(config, Arc::new(LocalHostsTable::new(HashMap::new())))
+        Self::with_shared_registry(config, Arc::default())
     }
 
-    /// Creates a DNS forwarder sharing an existing hosts table.
-    ///
-    /// Used to connect the VMM-side forwarder to the same table as the
-    /// host-side `NetworkManager` forwarder, so `runtime.register_dns()`
-    /// updates both simultaneously.
+    /// Shares ownership and address changes with the host or another VM datapath.
     #[must_use]
-    pub fn with_shared_hosts(config: DnsConfig, local_hosts: Arc<LocalHostsTable>) -> Self {
+    pub fn with_shared_registry(config: DnsConfig, registry: Arc<RwLock<Registry>>) -> Self {
         let upstream = upstream::Upstreams::new(&config);
         Self {
             config,
-            local_hosts,
+            local_hosts: Arc::default(),
+            registry,
             cache: std::sync::Mutex::new(HashMap::new()),
             upstream,
         }
     }
 
-    /// Returns a clone of the shared hosts table handle.
+    /// Returns the concrete projection for mDNS publication and snapshots.
     pub fn local_hosts_table(&self) -> Arc<LocalHostsTable> {
         Arc::clone(&self.local_hosts)
+    }
+
+    /// Returns the shared source of DNS ownership and addresses.
+    pub(crate) fn registry(&self) -> Arc<RwLock<Registry>> {
+        Arc::clone(&self.registry)
     }
 
     /// Returns the configuration.
@@ -239,79 +216,63 @@ impl DnsForwarder {
         &self.config
     }
 
-    /// Adds a local hostname mapping.
-    pub fn add_local_host(&self, hostname: &str, ip: IpAddr) {
-        let hostname = hostname.to_lowercase();
-        if let Ok(mut hosts) = self.local_hosts.write() {
-            hosts.insert(hostname.clone(), ip);
-            if let Some(fqdn) = self.local_fqdn(&hostname) {
-                hosts.insert(fqdn, ip);
-            }
-        }
-        tracing::debug!("Added local host: {} -> {}", hostname, ip);
-    }
-
-    /// Removes a local hostname mapping.
-    pub fn remove_local_host(&self, hostname: &str) {
-        let hostname = hostname.to_lowercase();
-        if let Ok(mut hosts) = self.local_hosts.write() {
-            hosts.remove(&hostname);
-            if let Some(fqdn) = self.local_fqdn(&hostname) {
-                hosts.remove(&fqdn);
-            }
-        }
-    }
-
-    /// The name `hostname` is served under in the local domain
-    /// (`<hostname>.<local_domain>`, lowercased), or `None` without a
-    /// local domain.
-    #[must_use]
-    pub fn local_fqdn(&self, hostname: &str) -> Option<String> {
-        let domain = self.config.local_domain.as_ref()?;
-        Some(format!("{}.{domain}", hostname.to_lowercase()))
-    }
-
-    /// Every `(fqdn, ip)` the table holds under the local domain.
+    /// Every granted concrete `.local` record in the mDNS projection.
     #[must_use]
     pub fn local_domain_entries(&self) -> Vec<(String, IpAddr)> {
-        let Some(domain) = self.config.local_domain.as_ref() else {
-            return Vec::new();
-        };
-        let suffix = format!(".{domain}");
-        self.local_hosts.read().map_or_else(
-            |_| Vec::new(),
-            |hosts| {
-                hosts
-                    .iter()
-                    .filter(|(name, _)| name.ends_with(&suffix))
-                    .map(|(name, ip)| (name.clone(), *ip))
-                    .collect()
-            },
-        )
+        self.local_hosts
+            .read()
+            .expect("local DNS hosts lock poisoned")
+            .iter()
+            .map(|(name, ip)| (name.clone(), *ip))
+            .collect()
     }
 
     /// Resolves a local hostname.
     #[must_use]
     pub fn resolve_local(&self, hostname: &str) -> Option<IpAddr> {
-        let hostname = hostname.to_lowercase();
-        self.local_hosts.read().ok()?.get(&hostname).copied()
+        let registry = self.registry.read().expect("DNS registry lock poisoned");
+        match self.lookup(&registry, hostname) {
+            Lookup::Matched { address, .. } => Some(address),
+            _ => None,
+        }
+    }
+
+    fn lookup<'a>(&self, registry: &'a Registry, hostname: &str) -> Lookup<'a> {
+        let Ok(name) = hostname.to_ascii_lowercase().parse() else {
+            return Lookup::Unmatched;
+        };
+        let lookup = registry.resolve(&name);
+        // Only exact aliases support short names; wildcards must not capture external DNS.
+        if matches!(lookup, Lookup::Unmatched)
+            && let Some(domain) = &self.config.local_domain
+            && let Ok(relative) = format!("{name}.{domain}").parse()
+            && registry.owners().filter_map(|id| registry.get(id))
+                .filter(|entry| entry.address.is_some()).flat_map(|entry| &entry.claims)
+                .any(|claim| matches!(claim.pattern(), NamePattern::Exact(exact) if exact == &relative))
+        {
+            let relative = registry.resolve(&relative);
+            if !matches!(&relative, Lookup::Matched { claim, .. } if !matches!(claim.pattern(), NamePattern::Exact(_))) {
+                return relative;
+            }
+        }
+        lookup
     }
 
     /// Attempts to resolve a DNS query locally without any network I/O.
     ///
-    /// Returns `Some(response)` if the query was resolved from local host
-    /// mappings, or `None` if upstream forwarding is needed. Unsupported
-    /// query types (e.g. HTTPS/SVCB) gracefully return `None` instead of
-    /// failing, so the caller can forward the raw query.
+    /// Claims, conflicts, and reserved names produce terminal responses.
+    /// Delegated and unmatched names return `None` for upstream forwarding.
+    /// Known names receive NODATA for record types without local data.
     pub fn try_resolve_locally(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
-        let ip = self.resolve_local(&query.name)?;
-        self.build_local_response(&query, ip).ok()
+        self.local_response(data, &query, false)
     }
 
     /// Attempts local resolution, answering authoritatively for the local domain.
     ///
-    /// - Registered local host → `Some(A/AAAA response)`
+    /// - Registered local host → matching address response or NODATA
+    /// - Conflicted name → SERVFAIL; reserved name → NODATA
+    /// - Delegated name → `None` (caller should forward to upstream)
     /// - Unregistered `*.<local_domain>` (and the bare domain) → `Some(NODATA)`
     /// - Other domains → `None` (caller should forward to upstream)
     ///
@@ -325,15 +286,52 @@ impl DnsForwarder {
     /// Either form keeps the name from leaking upstream.
     pub fn try_resolve_locally_or_nodata(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
+        self.local_response(data, &query, true)
+    }
 
-        if let Some(ip) = self.resolve_local(&query.name) {
-            return self.build_local_response(&query, ip).ok();
+    fn local_response(&self, data: &[u8], query: &DnsQuery, local_nodata: bool) -> Option<Vec<u8>> {
+        let registry = self.registry.read().expect("DNS registry lock poisoned");
+        let lookup = self.lookup(&registry, &query.name);
+        self.lookup_response(data, query, local_nodata, lookup)
+    }
+
+    fn lookup_response(
+        &self,
+        data: &[u8],
+        query: &DnsQuery,
+        local_nodata: bool,
+        lookup: Lookup<'_>,
+    ) -> Option<Vec<u8>> {
+        match lookup {
+            Lookup::Matched { address, .. } => {
+                return self.build_local_response(query, address).ok();
+            }
+            Lookup::Conflict => return arcbox_dns::build_servfail(data).ok(),
+            Lookup::Instance { authority, .. }
+                if authority.target == InstanceTarget::Unavailable =>
+            {
+                return arcbox_dns::build_servfail(data).ok();
+            }
+            Lookup::Instance { authority, .. }
+                if matches!(authority.target, InstanceTarget::Other { .. }) =>
+            {
+                return None;
+            }
+            Lookup::Reserved(_) | Lookup::Instance { .. } => {
+                return if local_nodata {
+                    Some(Self::build_nodata_response(query))
+                } else {
+                    arcbox_dns::build_nxdomain(data).ok()
+                };
+            }
+            Lookup::Delegated(_) => return None,
+            Lookup::Unmatched => {}
         }
 
-        if let Some(ref domain) = self.config.local_domain {
+        if local_nodata && let Some(ref domain) = self.config.local_domain {
             let name_lower = query.name.to_lowercase();
             if name_lower == *domain || name_lower.ends_with(&format!(".{domain}")) {
-                return Some(Self::build_nodata_response(&query));
+                return Some(Self::build_nodata_response(query));
             }
         }
 
@@ -388,9 +386,42 @@ impl DnsForwarder {
         // Parse the query
         let query = DnsQuery::parse(data)?;
 
-        // Check for local resolution
-        if let Some(ip) = self.resolve_local(&query.name) {
-            return self.build_local_response(&query, ip);
+        let (response, remote) = {
+            let registry = self.registry.read().expect("DNS registry lock poisoned");
+            let lookup = self.lookup(&registry, &query.name);
+            let remote = match &lookup {
+                Lookup::Instance {
+                    authority:
+                        InstanceAuthority {
+                            target: InstanceTarget::Other { port },
+                            ..
+                        },
+                    revision,
+                } => Some((*port, *revision)),
+                _ => None,
+            };
+            (self.lookup_response(data, &query, false, lookup), remote)
+        };
+        if let Some(response) = response {
+            return Ok(response);
+        }
+        if let Some((port, revision)) = remote {
+            let response =
+                Self::forward_to(data, &[SocketAddr::from((Ipv4Addr::LOCALHOST, port))])?;
+            let registry = self.registry.read().expect("DNS registry lock poisoned");
+            return match self.lookup(&registry, &query.name) {
+                Lookup::Instance {
+                    authority,
+                    revision: current_revision,
+                } if authority.target == (InstanceTarget::Other { port })
+                    && current_revision == revision =>
+                {
+                    Ok(response)
+                }
+                _ => Err(NetError::Dns(
+                    "instance authority changed during DNS forwarding".into(),
+                )),
+            };
         }
 
         // Check cache
@@ -482,12 +513,20 @@ impl DnsForwarder {
     /// echo the query's — together closing the off-path cache-poisoning window
     /// an unconnected `recv_from` (which accepted any sender's bytes) left open.
     fn forward_query(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let response = Self::forward_to(data, &self.upstream())?;
+        if let Ok(query) = DnsQuery::parse(data) {
+            self.cache_response(&query, &response);
+        }
+        Ok(response)
+    }
+
+    fn forward_to(data: &[u8], upstreams: &[SocketAddr]) -> Result<Vec<u8>> {
         use std::net::UdpSocket;
 
         // The query's transaction ID; a valid reply must echo it.
         let query_id = data.get(0..2);
 
-        for upstream in self.upstream() {
+        for upstream in upstreams {
             let socket = UdpSocket::bind("0.0.0.0:0")
                 .map_err(|e| NetError::Dns(format!("failed to bind socket: {}", e)))?;
             socket
@@ -507,10 +546,6 @@ impl DnsForwarder {
                     continue;
                 }
                 let response = buf[..len].to_vec();
-
-                if let Ok(query) = DnsQuery::parse(data) {
-                    self.cache_response(&query, &response);
-                }
 
                 return Ok(response);
             }
@@ -579,8 +614,7 @@ impl DnsQuery {
         let qtype_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let qclass_raw = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-        let qtype = DnsRecordType::try_from(qtype_raw)
-            .map_err(|()| NetError::Dns(format!("unsupported query type: {}", qtype_raw)))?;
+        let qtype = DnsRecordType::from(qtype_raw);
 
         let qclass = if qclass_raw == 1 {
             DnsClass::In
@@ -635,11 +669,6 @@ impl DnsServer {
         self.listen_addr
     }
 
-    /// Adds a local hostname mapping.
-    pub fn add_host(&mut self, hostname: &str, ip: IpAddr) {
-        self.forwarder.add_local_host(hostname, ip);
-    }
-
     /// Resolves a hostname.
     ///
     /// Returns the IP address if found locally.
@@ -661,6 +690,24 @@ impl DnsServer {
 mod tests {
     use super::*;
 
+    fn register(forwarder: &DnsForwarder, hostname: &str, ip: IpAddr) {
+        let name = format!(
+            "{hostname}.{}",
+            forwarder.config.local_domain.as_ref().unwrap()
+        );
+        let claims = arcbox_dns::claims::Claim::generated(
+            name.parse().unwrap(),
+            hostname.into(),
+            "test".into(),
+        );
+        forwarder
+            .registry
+            .write()
+            .unwrap()
+            .replace(hostname.into(), claims.into(), Some(ip))
+            .unwrap();
+    }
+
     #[test]
     fn test_dns_config_default() {
         let config = DnsConfig::default();
@@ -670,9 +717,9 @@ mod tests {
 
     #[test]
     fn test_dns_record_type_conversion() {
-        assert_eq!(DnsRecordType::try_from(1), Ok(DnsRecordType::A));
-        assert_eq!(DnsRecordType::try_from(28), Ok(DnsRecordType::Aaaa));
-        assert!(DnsRecordType::try_from(999).is_err());
+        assert_eq!(DnsRecordType::from(1), DnsRecordType::A);
+        assert_eq!(DnsRecordType::from(28), DnsRecordType::Aaaa);
+        assert_eq!(DnsRecordType::from(999), DnsRecordType::Unknown(999));
     }
 
     #[test]
@@ -681,13 +728,13 @@ mod tests {
         let mut forwarder = DnsForwarder::new(config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 64, 10));
-        forwarder.add_local_host("myvm", ip);
+        register(&forwarder, "myvm", ip);
 
         assert_eq!(forwarder.resolve_local("myvm"), Some(ip));
         assert_eq!(forwarder.resolve_local("MYVM"), Some(ip)); // Case insensitive
         assert_eq!(forwarder.resolve_local("myvm.arcbox.local"), Some(ip));
 
-        forwarder.remove_local_host("myvm");
+        forwarder.registry.write().unwrap().remove("myvm");
         assert_eq!(forwarder.resolve_local("myvm"), None);
     }
 
@@ -703,6 +750,10 @@ mod tests {
 
     /// Builds a minimal DNS query packet for testing.
     fn build_test_query(name: &str) -> Vec<u8> {
+        build_test_query_type(name, 1)
+    }
+
+    fn build_test_query_type(name: &str, qtype: u16) -> Vec<u8> {
         let mut packet = Vec::with_capacity(64);
         // Header: ID=0xABCD, flags=0x0100 (RD=1), QDCOUNT=1
         packet.extend_from_slice(&[0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00]);
@@ -713,7 +764,7 @@ mod tests {
             packet.extend_from_slice(label.as_bytes());
         }
         packet.push(0x00); // root label
-        packet.extend_from_slice(&[0x00, 0x01]); // QTYPE = A
+        packet.extend_from_slice(&qtype.to_be_bytes());
         packet.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN
         packet
     }
@@ -758,6 +809,155 @@ mod tests {
             .expect("a reply echoing the txid must be accepted");
         handle.join().unwrap();
         assert_eq!(&reply[0..2], &query[0..2], "reply carries the query's txid");
+    }
+
+    #[test]
+    fn instance_forwarding_bypasses_cache_and_rechecks_authority() {
+        for changed in [false, true] {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let port = socket.local_addr().unwrap().port();
+            let forwarder = DnsForwarder::new(DnsConfig::default().with_upstream(vec![]));
+            let query = build_test_query("web.custom.local");
+            let expected =
+                arcbox_dns::build_response_a(&query, Ipv4Addr::new(10, 0, 2, 3), 300).unwrap();
+            let cached =
+                arcbox_dns::build_response_a(&query, Ipv4Addr::new(10, 0, 2, 9), 300).unwrap();
+            forwarder.cache_response(&DnsQuery::parse(&query).unwrap(), &cached);
+            let authority = |target| {
+                vec![InstanceAuthority {
+                    root: "custom.local".parse().unwrap(),
+                    target,
+                }]
+            };
+            forwarder
+                .registry
+                .write()
+                .unwrap()
+                .replace_instance_authorities(authority(InstanceTarget::Other { port }));
+            let registry = Arc::clone(&forwarder.registry);
+            let reply = expected.clone();
+            let server = std::thread::spawn(move || {
+                let mut request = [0; 512];
+                let (_, peer) = socket.recv_from(&mut request).unwrap();
+                if changed {
+                    registry
+                        .write()
+                        .unwrap()
+                        .replace_instance_authorities(authority(InstanceTarget::Unavailable));
+                }
+                socket.send_to(&reply, peer).unwrap();
+            });
+            let response = forwarder.handle_query(&query);
+            server.join().unwrap();
+            if changed {
+                assert!(
+                    response
+                        .unwrap_err()
+                        .to_string()
+                        .contains("authority changed")
+                );
+            } else {
+                assert_eq!(response.unwrap(), expected);
+            }
+            assert_eq!(
+                forwarder.check_cache(&DnsQuery::parse(&query).unwrap()),
+                Some(cached)
+            );
+        }
+    }
+
+    #[test]
+    fn instance_forwarding_failure_does_not_query_default_upstreams() {
+        let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let remote = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        remote
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let port = remote.local_addr().unwrap().port();
+        let forwarder = DnsForwarder::new(
+            DnsConfig::default().with_upstream(vec![upstream.local_addr().unwrap()]),
+        );
+        forwarder
+            .registry
+            .write()
+            .unwrap()
+            .replace_instance_authorities(vec![InstanceAuthority {
+                root: "custom.local".parse().unwrap(),
+                target: InstanceTarget::Other { port },
+            }]);
+        let server = std::thread::spawn(move || {
+            let mut request = [0; 512];
+            let (len, peer) = remote.recv_from(&mut request).unwrap();
+            let mut reply = arcbox_dns::build_servfail(&request[..len]).unwrap();
+            reply[0] ^= 0xff;
+            remote.send_to(&reply, peer).unwrap();
+        });
+        assert!(
+            forwarder
+                .handle_query(&build_test_query("web.custom.local"))
+                .is_err()
+        );
+        server.join().unwrap();
+        assert_eq!(
+            upstream.recv_from(&mut [0; 512]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn unknown_qtypes_are_forwarded_with_the_original_question() {
+        for qtype in [64, 65, 65_280] {
+            let (upstream, handle) = spawn_fake_upstream(true);
+            let forwarder = DnsForwarder::new(DnsConfig::default().with_upstream(vec![upstream]));
+            let query = build_test_query_type("Web.example.com", qtype);
+            let reply = forwarder.handle_query(&query).unwrap();
+            handle.join().unwrap();
+            assert_eq!(&reply[..2], &query[..2]);
+            assert_eq!(reply[3] & 0x0f, 0);
+            assert_eq!(&reply[12..], &query[12..]);
+        }
+    }
+
+    #[test]
+    fn unknown_qtypes_respect_local_scope_and_preserve_questions() {
+        let forwarder =
+            DnsForwarder::new(DnsConfig::default().with_local_domain("containers.test"));
+        register(&forwarder, "web", IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2)));
+        for qtype in [64, 65, 65_280] {
+            for (name, registered) in [
+                ("web", true),
+                ("WEB.containers.test", true),
+                ("missing.containers.test", false),
+                ("containers.test", false),
+            ] {
+                let query = build_test_query_type(name, qtype);
+                let response = forwarder.try_resolve_locally_or_nodata(&query).unwrap();
+                assert_eq!(&response[..4], &[0xab, 0xcd, 0x85, 0x80]);
+                assert_eq!(&response[4..6], &[0, 1]);
+                assert_eq!(&response[6..12], &[0; 6]);
+                assert_eq!(&response[12..], &query[12..]);
+                if registered {
+                    assert_eq!(
+                        forwarder.try_resolve_locally(&query),
+                        Some(response.clone())
+                    );
+                    assert_eq!(forwarder.handle_query(&query).unwrap(), response);
+                }
+            }
+            for name in [
+                "web.example.test",
+                "web.containers.test.evil",
+                "printer.local",
+            ] {
+                let query = build_test_query_type(name, qtype);
+                assert!(forwarder.try_resolve_locally(&query).is_none());
+                assert!(forwarder.try_resolve_locally_or_nodata(&query).is_none());
+            }
+        }
     }
 
     /// Regression (cache-poisoning): a reply whose transaction id does not
@@ -1017,7 +1217,7 @@ mod tests {
         let config = DnsConfig::default();
         let mut forwarder = DnsForwarder::new(config);
         let ip = IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2));
-        forwarder.add_local_host("my-nginx", ip);
+        register(&forwarder, "my-nginx", ip);
 
         let query = build_test_query("my-nginx.arcbox.local");
         let response = forwarder
@@ -1081,7 +1281,7 @@ mod tests {
         let mut forwarder = DnsForwarder::new(config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        forwarder.add_local_host("web", ip);
+        register(&forwarder, "web", ip);
 
         // Registered host under custom domain resolves.
         let query = build_test_query("web.myorg.test");
@@ -1105,5 +1305,59 @@ mod tests {
             forwarder.try_resolve_locally_or_nodata(&query).is_none(),
             "old default domain should not be handled after domain change"
         );
+    }
+
+    #[test]
+    fn instance_authority_precedes_local_records_and_external_forwarding() {
+        use arcbox_dns::registry::InstanceAuthority;
+        let forwarder = DnsForwarder::new(DnsConfig::default());
+        let claims = arcbox_dns::claims::Claim::generated(
+            "known.custom.local".parse().unwrap(),
+            "known".into(),
+            "test".into(),
+        );
+        forwarder
+            .registry
+            .write()
+            .unwrap()
+            .replace("known".into(), claims.into(), Some([10, 0, 2, 3].into()))
+            .unwrap();
+        for target in [
+            InstanceTarget::Current,
+            InstanceTarget::Other { port: 5354 },
+            InstanceTarget::Unavailable,
+        ] {
+            forwarder
+                .registry
+                .write()
+                .unwrap()
+                .replace_instance_authorities(vec![InstanceAuthority {
+                    root: "custom.local".parse().unwrap(),
+                    target,
+                }]);
+            for qtype in [1, 28, 64, 65, 65_280] {
+                let query = build_test_query_type("missing.custom.local", qtype);
+                for nodata in [false, true] {
+                    let query_parsed = DnsQuery::parse(&query).unwrap();
+                    let response = forwarder.local_response(&query, &query_parsed, nodata);
+                    if matches!(target, InstanceTarget::Other { .. }) {
+                        assert!(response.is_none());
+                        continue;
+                    }
+                    let expected = if target == InstanceTarget::Unavailable {
+                        2
+                    } else if nodata {
+                        0
+                    } else {
+                        3
+                    };
+                    assert_eq!(response.unwrap()[3] & 15, expected);
+                }
+            }
+            assert_eq!(
+                forwarder.resolve_local("known.custom.local").is_some(),
+                target == InstanceTarget::Current
+            );
+        }
     }
 }

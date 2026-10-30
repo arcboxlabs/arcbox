@@ -2,24 +2,16 @@
 
 use axum::http::Uri;
 
-/// Extracts the `{id}` token from a `/containers/{id}/...` URI, ignoring
-/// collection endpoints (`/containers/json|create|prune`).
+/// Extracts the `{id}` token from an already-routed container request.
 #[must_use]
 pub fn extract_container_id(uri: &Uri) -> Option<String> {
-    extract_id_after_segment(uri, "containers", &["json", "create", "prune"])
-}
-
-fn extract_id_after_segment(uri: &Uri, segment: &str, skip_tokens: &[&str]) -> Option<String> {
-    let segments: Vec<&str> = uri.path().split('/').filter(|s| !s.is_empty()).collect();
-    for (i, seg) in segments.iter().enumerate() {
-        if *seg == segment && i + 1 < segments.len() {
-            let id = segments[i + 1];
-            if !skip_tokens.contains(&id) {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
+    uri.path()
+        .split_once("/containers/")?
+        .1
+        .split('/')
+        .next()
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

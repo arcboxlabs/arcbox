@@ -114,7 +114,7 @@ pub async fn execute_import(args: ImportArgs) -> Result<()> {
     let label = args.name.clone().unwrap_or_else(|| archive_label(&path));
     println!("Importing machine from {}...", path.display());
     let imported = machine_client()
-        .import(ImportMachineRequest {
+        .import_machine(ImportMachineRequest {
             path: path.to_string_lossy().into_owned(),
             name: args.name.unwrap_or_default(),
             cpus: args.cpus.unwrap_or(0),

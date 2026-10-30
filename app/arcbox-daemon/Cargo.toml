@@ -33,7 +33,7 @@ arcbox-net = { workspace = true }
 axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 arcbox-docker-tools.workspace = true
 filetime = "0.2.29"
 arcbox-transport.workspace = true
@@ -48,10 +48,14 @@ arcbox-computer.workspace = true
 arcbox-engine.workspace = true
 nix.workspace = true
 libproc.workspace = true
+arcbox-local-ca.workspace = true
+futures.workspace = true
+arcbox-dns.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true
-macos-resolver = { workspace = true }
+security-framework = "3.7.0"
 
 [features]
 # `vmnet` is on by default: the bridge NIC (NIC2) for host→container L3
@@ -68,10 +72,13 @@ gic = ["arcbox-core/gic"]
 workspace = true
 
 [dev-dependencies]
+arcbox-core = { path = "../arcbox-core", features = ["test-support"] }
 arcbox-grpc.workspace = true
 arcbox-protocol.workspace = true
+buffa = "0.9.1"
 connectrpc = { package = "arcbox-connectrpc", version = "0.9.0-arcbox.1", features = ["client"] }
 serde_json.workspace = true
+tarpc.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tonic.workspace = true

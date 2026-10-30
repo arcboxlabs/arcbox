@@ -58,7 +58,8 @@ pub async fn router_with_mock_guest(
     };
     let runtime = Arc::new(
         Runtime::with_vm_lifecycle_config(config, vm_lifecycle_config)
-            .expect("Failed to create runtime"),
+            .expect("Failed to create runtime")
+            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
     );
     let connector = Arc::new(mock_guest::UnixSocketConnector::new(
         guest.socket_path.clone(),

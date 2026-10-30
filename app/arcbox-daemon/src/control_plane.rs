@@ -10,6 +10,10 @@
 //! `curl --unix-socket` posting JSON arrives over HTTP/1.1, and the same
 //! handlers answer both.
 
+mod calls;
+
+pub use calls::Calls;
+
 use anyhow::{Context, Result};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -110,7 +114,9 @@ pub fn bind(socket_path: &std::path::Path) -> Result<UnixListener> {
 /// Returns an error if the embedded descriptor set cannot be parsed, which
 /// would mean the build emitted a corrupt one.
 pub fn connect_router(
-    runtime: arcbox_api::SharedRuntime,
+    system_runtime: arcbox_api::SharedRuntime,
+    host_runtime: arcbox_api::SharedRuntime,
+    early_runtime: arcbox_api::SharedRuntime,
     system: arcbox_api::SystemServiceImpl,
 ) -> Result<connectrpc::Router> {
     let reflector = connectrpc_reflection::Reflector::from_descriptor_set_bytes(
@@ -118,7 +124,12 @@ pub fn connect_router(
     )
     .context("parsing the embedded file descriptor set for reflection")?;
     Ok(connectrpc_reflection::install(
-        arcbox_api::connect::router_with_system(runtime, system),
+        arcbox_api::connect::router_with_system(
+            system_runtime,
+            host_runtime,
+            early_runtime,
+            system,
+        ),
         reflector,
     ))
 }
@@ -128,8 +139,9 @@ pub fn connect_router(
 /// Kept separate from [`connect_router`] so tests can inspect the routing
 /// table — once it is an `axum::Router` the registered method paths are no
 /// longer visible.
-pub fn into_app(router: connectrpc::Router) -> axum::Router {
-    router.into_axum_router()
+pub fn into_app(router: connectrpc::Router, calls: Calls) -> axum::Router {
+    axum::Router::new()
+        .fallback_service(connectrpc::ConnectRpcService::new(calls.dispatcher(router)))
 }
 
 #[cfg(test)]
@@ -160,8 +172,13 @@ mod tests {
             Arc::new(arcbox_api::SetupState::new()),
             Arc::clone(&runtime),
             Arc::clone(&runtime),
+            Arc::clone(&runtime),
         );
-        let app = into_app(connect_router(runtime, system).expect("connect router"));
+        let app = into_app(
+            connect_router(runtime.clone(), runtime.clone(), runtime, system)
+                .expect("connect router"),
+            Calls::default(),
+        );
 
         let listener = bind(&socket).expect("bind temp socket");
         let shutdown = CancellationToken::new();
@@ -336,8 +353,10 @@ mod tests {
             Arc::new(arcbox_api::SetupState::new()),
             Arc::clone(&runtime),
             Arc::clone(&runtime),
+            Arc::clone(&runtime),
         );
-        let router = connect_router(runtime, system).expect("connect router");
+        let router = connect_router(runtime.clone(), runtime.clone(), runtime, system)
+            .expect("connect router");
 
         for path in [
             "arcbox.v1.IconService/GetImageIcon",
@@ -359,6 +378,194 @@ mod tests {
                 router.methods().collect::<Vec<_>>()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn web_service_queries_validate_hostname_before_runtime_access() {
+        let (_dir, socket, shutdown) = spawn_control_plane().await;
+        for (body, code) in [
+            ("{}", "unavailable"),
+            (r#"{"hostname":"API.LOCAL"}"#, "unavailable"),
+            (r#"{"hostname":"*.api.local"}"#, "invalid_argument"),
+            (r#"{"hostname":"https://api.local"}"#, "invalid_argument"),
+        ] {
+            let response = http1_request(&socket, &format!(
+                "POST /arcbox.v1.SystemService/ListWebServices HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
+            )).await;
+            let response: serde_json::Value = serde_json::from_str(&dechunk(&response)).unwrap();
+            assert_eq!(response["code"], code, "{body}");
+        }
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn prepared_host_admits_machine_updates_without_system_admission() {
+        use arcbox_connect::v1::{setup_status, system_runtime_status::State};
+        use arcbox_core::machine::MachineConfig;
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            arcbox_core::Runtime::new(arcbox_core::config::Config {
+                data_dir: directory.path().join("data"),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        runtime
+            .machine_manager()
+            .create(MachineConfig {
+                name: "web".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let system_runtime: arcbox_api::SharedRuntime = Arc::default();
+        let host_runtime: arcbox_api::SharedRuntime = Arc::default();
+        let early_runtime = Arc::new(OnceLock::from(runtime.clone()));
+        let setup = Arc::new(arcbox_api::SetupState::new());
+        let system = arcbox_api::SystemServiceImpl::new(
+            setup.clone(),
+            system_runtime.clone(),
+            host_runtime.clone(),
+            early_runtime.clone(),
+        );
+        let app = into_app(
+            connect_router(
+                system_runtime.clone(),
+                host_runtime.clone(),
+                early_runtime,
+                system,
+            )
+            .unwrap(),
+            Calls::default(),
+        );
+        let socket = directory.path().join("api.sock");
+        let listener = bind(&socket).unwrap();
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(listener, app, shutdown.clone()));
+        let set = "/arcbox.v1.MachineService/SetWebPorts";
+        let body = r#"{"id":"web","httpPort":{"port":8080}}"#;
+        assert_eq!(
+            json_request(&socket, set, body).await["code"],
+            "unavailable"
+        );
+
+        assert!(host_runtime.set(runtime.clone()).is_ok());
+        setup.set_phase(setup_status::Phase::Ready, "host ready");
+        for (state, reason) in [
+            (State::Disabled, ""),
+            (State::Starting, "waiting for System VM"),
+            (State::Failed, "storage recovery required"),
+        ] {
+            setup.set_system_runtime(state, reason);
+            let updated = json_request(&socket, set, body).await;
+            assert_eq!(updated["httpPort"]["port"], 8080);
+            let inspected = json_request(
+                &socket,
+                "/arcbox.v1.MachineService/Inspect",
+                r#"{"id":"web"}"#,
+            )
+            .await;
+            assert_eq!(inspected["webPorts"]["httpPort"]["port"], 8080);
+            let backend =
+                json_request(&socket, "/arcbox.v1.SystemService/GetSystemVmBackend", "{}").await;
+            assert!(backend.get("backend").is_some(), "{backend}");
+            for path in [
+                "/arcbox.v1.KubernetesService/Status",
+                "/arcbox.v1.MigrationService/PrepareMigration",
+                "/arcbox.v1.SystemService/ResolveContainerFs",
+                "/arcbox.sandbox.v1.SandboxService/ListExposedPorts",
+            ] {
+                assert_eq!(
+                    json_request(&socket, path, "{}").await["code"],
+                    "unavailable",
+                    "{path}"
+                );
+            }
+            assert!(system_runtime.get().is_none());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            json_request(&socket, "/arcbox.v1.MacosService/List", "{}")
+                .await
+                .get("code")
+                .is_none()
+        );
+
+        for (path, request) in [
+            ("Create", r#"{"name":"default"}"#),
+            ("CloneMachine", r#"{"id":"web","name":"default"}"#),
+            (
+                "ImportMachine",
+                r#"{"name":"default","path":"/missing.tar"}"#,
+            ),
+        ] {
+            let rejected = json_request(
+                &socket,
+                &format!("/arcbox.v1.MachineService/{path}"),
+                request,
+            )
+            .await;
+            assert_eq!(rejected["code"], "invalid_argument", "{path}: {rejected}");
+            assert!(
+                rejected["message"].as_str().unwrap().contains("reserved"),
+                "{path}: {rejected}"
+            );
+            assert!(!runtime.machine_manager().exists("default"));
+        }
+        runtime
+            .machine_manager()
+            .create(MachineConfig {
+                name: "default".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let saved = directory.path().join("data/machines/default/config.toml");
+        let before = std::fs::read(&saved).unwrap();
+        let record = runtime.machine_manager().get("default").unwrap();
+        for path in ["Start", "Stop", "Remove"] {
+            let rejected = json_request(
+                &socket,
+                &format!("/arcbox.v1.MachineService/{path}"),
+                r#"{"id":"default"}"#,
+            )
+            .await;
+            assert_eq!(rejected["code"], "invalid_argument", "{path}: {rejected}");
+            assert!(
+                rejected["message"].as_str().unwrap().contains("reserved"),
+                "{path}: {rejected}"
+            );
+            assert_eq!(std::fs::read(&saved).unwrap(), before);
+            let after = runtime.machine_manager().get("default").unwrap();
+            assert_eq!(after.state, record.state);
+            assert_eq!(after.vm_id, record.vm_id);
+        }
+
+        let hold = runtime.machine_manager().storage_hold_path();
+        std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+        std::fs::write(hold, "offline-check").unwrap();
+        let blocked = json_request(
+            &socket,
+            "/arcbox.v1.MachineService/Start",
+            r#"{"id":"default"}"#,
+        )
+        .await;
+        assert_eq!(blocked["code"], "failed_precondition");
+        assert_eq!(
+            json_request(&socket, set, body).await["httpPort"]["port"],
+            8080
+        );
+
+        shutdown.cancel();
+        server.await.unwrap();
+    }
+
+    async fn json_request(socket: &std::path::Path, path: &str, body: &str) -> serde_json::Value {
+        let response = http1_request(socket, &format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
+        )).await;
+        serde_json::from_str(&dechunk(&response)).unwrap()
     }
 
     /// Reflection has to keep answering through the real router, or

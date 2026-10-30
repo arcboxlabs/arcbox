@@ -166,8 +166,8 @@ ping 192.168.65.x                    # direct bridge connectivity
 
 ### Helper communication
 
-The helper uses tarpc (bincode over Unix socket), not plain JSON. To verify
-the helper is reachable, use the Rust client:
+The helper uses tarpc with length-delimited JSON over a Unix socket.
+Use the Rust client to verify helper connectivity:
 
 ```bash
 # Quick connectivity check via the daemon — if helper is up, self-setup

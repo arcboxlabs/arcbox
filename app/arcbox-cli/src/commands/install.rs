@@ -5,14 +5,24 @@
 //! boot assets, runtime binaries, Docker CLI tools — is handled by the
 //! daemon during startup via self-setup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
+use arcbox_constants::paths::{ArcboxProfile, privileged};
+
+mod daemon;
+mod lock;
+mod preflight;
+mod target;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
 pub struct InstallArgs {
+    /// Inspect helper readiness and selected legacy resolvers without changing state.
+    #[arg(long)]
+    pub check: bool,
+
     /// Skip the daemon launchd service registration.
     #[arg(long)]
     pub no_daemon: bool,
@@ -25,47 +35,73 @@ pub struct InstallArgs {
     /// Defaults to looking next to the current executable.
     #[arg(long)]
     pub helper_path: Option<PathBuf>,
+
+    /// Login-user ID for the selected daemon and data directory.
+    #[arg(long)]
+    pub user_uid: Option<u32>,
+
+    /// Absolute data directory for the selected daemon.
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+
+    /// Exact legacy resolver roots to migrate; replaces the profile default.
+    #[arg(long)]
+    pub resolver_root: Vec<String>,
 }
 
 /// Executes the install command.
 pub async fn execute(args: InstallArgs) -> Result<()> {
-    validate_install_scope(ArcboxProfile::from_env_or_default(), &args)?;
-
+    let profile = ArcboxProfile::from_env_or_default();
+    validate_install_scope(profile, &args)?;
+    let target = target::Target::resolve(args.user_uid, args.data_dir)?;
+    let roots = resolver_roots(profile, args.resolver_root);
+    let helper = resolve_helper_source(args.helper_path.as_deref())?;
+    if args.check {
+        let status = preflight::inspect(&helper, &roots).await?;
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
+    let installation_lock = lock::acquire()?;
+    let status = preflight::inspect(&helper, &roots).await?;
     println!("ArcBox Install");
     println!("==============");
     println!();
 
     // 1. Install helper binary (requires sudo).
     print_step(1, 3, "Installing arcbox-helper...");
-    install_helper(args.helper_path.as_deref())?;
-    print_done();
+    if status.helper_ready && status.legacy_roots.is_empty() {
+        print_skipped();
+    } else {
+        let stopped_daemon = target.hold_stopped_daemon()?;
+        install_helper(&helper, &roots)?;
+        let installed = preflight::inspect(&helper, &roots).await?;
+        ensure!(
+            installed.helper_ready && installed.legacy_roots.is_empty(),
+            "helper installation did not reach a ready state: {installed:?}"
+        );
+        drop(stopped_daemon);
+        print_done();
+    }
+
+    drop(installation_lock);
 
     // 2. Register daemon service.
     print_step(2, 3, "Registering daemon service...");
     if args.no_daemon {
         print_skipped();
     } else {
-        register_daemon_service()?;
+        daemon::register_daemon_service(&target)?;
         print_done();
     }
 
     // 3. Shell integration.
-    // Under sudo, dirs::home_dir() returns /var/root, so setup would
-    // install to root's home instead of the real user's. Skip and hint.
     print_step(3, 3, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
-    } else if std::env::var("SUDO_USER").is_ok() {
-        println!("skipped (sudo)");
+    } else {
+        println!("skipped (privileged installation)");
         println!();
         println!("  Run as your normal user: abctl setup install");
-    } else {
-        super::setup::execute(
-            super::setup::SetupCommands::Install,
-            super::OutputFormat::Quiet,
-        )
-        .await?;
-        print_done();
     }
 
     println!();
@@ -84,6 +120,14 @@ fn validate_install_scope(profile: ArcboxProfile, args: &InstallArgs) -> Result<
     Ok(())
 }
 
+fn resolver_roots(profile: ArcboxProfile, roots: Vec<String>) -> Vec<String> {
+    if roots.is_empty() && profile == ArcboxProfile::Production {
+        vec![arcbox_constants::dns::LOCAL_DOMAIN.to_owned()]
+    } else {
+        roots
+    }
+}
+
 fn print_step(n: u32, total: u32, msg: &str) {
     print!("[{n}/{total}] {msg:<40}");
 }
@@ -96,33 +140,42 @@ fn print_skipped() {
     println!("skipped");
 }
 
-// =============================================================================
-// Step 1: Install helper binary + launchd service
-// =============================================================================
-
-use arcbox_constants::paths::{ArcboxProfile, privileged};
+fn resolve_helper_source(custom_path: Option<&Path>) -> Result<PathBuf> {
+    let path = if let Some(path) = custom_path {
+        path.to_owned()
+    } else {
+        let exe = super::bundle::current_executable()?;
+        exe.parent()
+            .context("executable has no parent directory")?
+            .join("arcbox-helper")
+    };
+    path.canonicalize()
+        .with_context(|| format!("resolve helper source {}", path.display()))
+}
 
 /// Installs the arcbox-helper binary and registers it as a launchd system
 /// daemon with socket activation.
 ///
 /// launchd creates the socket at `/var/run/arcbox-helper.sock` and starts
 /// the helper on-demand when the main daemon connects.
-fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
+fn install_helper(helper_src: &Path, roots: &[String]) -> Result<()> {
     let dest = PathBuf::from(privileged::HELPER_BINARY);
 
-    // Use custom path if provided, otherwise look next to our own executable.
-    let helper_src = if let Some(path) = custom_path {
-        path.to_path_buf()
-    } else {
-        let exe = super::bundle::current_executable()?;
-        let exe_dir = exe.parent().context("executable has no parent directory")?;
-        exe_dir.join("arcbox-helper")
+    let destination_is_source = match dest.canonicalize() {
+        Ok(path) => path == helper_src,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("resolve installed helper"),
     };
-
-    if !helper_src.exists() {
+    let output = Command::new(helper_src)
+        .arg("--prepare-install")
+        .args(roots)
+        .output()
+        .context("failed to prepare helper installation")?;
+    if !output.status.success() {
         bail!(
-            "arcbox-helper not found at {}. Build it first with: cargo build -p arcbox-helper",
-            helper_src.display()
+            "helper installation preparation failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
@@ -130,13 +183,15 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
     std::fs::create_dir_all("/usr/local/libexec").context("failed to create /usr/local/libexec")?;
 
     // Copy binary.
-    std::fs::copy(&helper_src, &dest).with_context(|| {
-        format!(
-            "failed to copy {} -> {}",
-            helper_src.display(),
-            dest.display()
-        )
-    })?;
+    if !destination_is_source {
+        std::fs::copy(helper_src, &dest).with_context(|| {
+            format!(
+                "failed to copy {} -> {}",
+                helper_src.display(),
+                dest.display()
+            )
+        })?;
+    }
 
     // Ensure root ownership (macOS copyfile preserves source ownership).
     let status = Command::new("chown")
@@ -154,11 +209,6 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
     )
     .with_context(|| format!("failed to write {}", privileged::HELPER_PLIST))?;
 
-    // Bootout existing service (ignore errors if not loaded).
-    let _ = Command::new("launchctl")
-        .args(["bootout", "system", privileged::HELPER_PLIST])
-        .output();
-
     // Bootstrap the service into the system domain.
     let status = Command::new("launchctl")
         .args(["bootstrap", "system", privileged::HELPER_PLIST])
@@ -172,186 +222,66 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-// =============================================================================
-// Step 2: Daemon service
-// =============================================================================
-
-/// Registers the daemon as a launchd user agent.
-///
-/// Under `sudo`, `dirs::home_dir()` returns `/var/root` and `getuid()`
-/// returns 0. We detect this via `SUDO_USER` / `SUDO_UID` and resolve
-/// the real user's home and UID instead.
-fn register_daemon_service() -> Result<()> {
-    let (home, uid) = resolve_real_user()?;
-    let profile = ArcboxProfile::from_env_or_default();
-    let daemon_label = profile.daemon_label();
-    let data_dir = std::env::var(arcbox_constants::env::DATA_DIR)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map_or_else(
-            || match profile {
-                ArcboxProfile::Production => home.join(".arcbox"),
-                ArcboxProfile::Development => home.join(".arcbox-dev"),
-            },
-            PathBuf::from,
-        );
-    let plist_dir = home.join("Library/LaunchAgents");
-    std::fs::create_dir_all(&plist_dir).context("failed to create LaunchAgents directory")?;
-
-    // Create log directory so launchd's stdout/stderr redirection works
-    // on fresh installs where the profile log directory doesn't exist yet.
-    let log_dir = data_dir.join("log");
-    std::fs::create_dir_all(&log_dir).context("failed to create log directory")?;
-
-    // Under sudo, the directory is created as root. Chown to the real user
-    // so the daemon (running as user) can write logs.
-    let _ = Command::new("chown")
-        .args(["-R", &format!("{uid}:staff"), &data_dir.to_string_lossy()])
-        .status();
-
-    let plist_path = plist_dir.join(format!("{daemon_label}.plist"));
-
-    let daemon_path = super::bundle::locate_daemon(&data_dir)?
-        .to_string_lossy()
-        .into_owned();
-
-    // Daemon manages its own log files via tracing-appender, so we no
-    // longer set StandardOutPath / StandardErrorPath. Stdout/stderr are
-    // discarded to avoid launchd writing duplicate output.
-    let data_dir_env = arcbox_constants::env::DATA_DIR;
-    let data_dir_str = data_dir.display();
-    let plist_content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{daemon_label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{daemon_path}</string>
-        <string>--profile</string>
-        <string>{profile}</string>
-        <string>--data-dir</string>
-        <string>{data_dir_str}</string>
-    </array>
-    <!--
-      Mirror the data dir into the daemon environment: recovery's host-global
-      self-setup treats {data_dir_env} as the machine-wide canonical layout,
-      so a relocated install keeps ownership of /var/run/docker.sock (the
-      argv flag alone reads as a scoped per-instance override there).
-    -->
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>{data_dir_env}</key>
-        <string>{data_dir_str}</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <!--
-      ExitTimeOut: seconds launchd waits after SIGTERM before sending SIGKILL.
-      Daemon shutdown can use all 45s (two 5s NFS unmount attempts + 5s service
-      drain + 30s VM graceful stop). This preserves the full VM stop budget;
-      only final best-effort cleanup may run up against the deadline.
-    -->
-    <key>ExitTimeOut</key>
-    <integer>45</integer>
-</dict>
-</plist>
-"#
-    );
-
-    std::fs::write(&plist_path, plist_content)
-        .with_context(|| format!("failed to write {}", plist_path.display()))?;
-
-    let domain_target = format!("gui/{uid}");
-
-    // Bootout first to handle re-install (ignore errors if not loaded).
-    let _ = Command::new("launchctl")
-        .args(["bootout", &domain_target, &plist_path.to_string_lossy()])
-        .output();
-
-    let status = Command::new("launchctl")
-        .args(["bootstrap", &domain_target, &plist_path.to_string_lossy()])
-        .status()
-        .context("failed to run launchctl bootstrap")?;
-
-    if !status.success() {
-        bail!("launchctl bootstrap failed");
-    }
-
-    Ok(())
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-/// Resolves the real user's home directory and UID.
-///
-/// When running under `sudo`, `dirs::home_dir()` returns `/var/root` and
-/// `libc::getuid()` returns 0. We use `SUDO_USER` to look up the home
-/// directory and `SUDO_UID` for the UID. Falls back to the current process
-/// values when not running under sudo.
-fn resolve_real_user() -> Result<(PathBuf, u32)> {
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        let uid: u32 = std::env::var("SUDO_UID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .context("SUDO_USER is set but SUDO_UID is missing or invalid")?;
-
-        // Resolve home directory from the password database.
-        let home = home_for_user(&sudo_user)
-            .unwrap_or_else(|| PathBuf::from(format!("/Users/{sudo_user}")));
-
-        return Ok((home, uid));
-    }
-
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    // SAFETY: getuid() is a trivial POSIX syscall with no preconditions.
-    let uid = unsafe { libc::getuid() };
-    Ok((home, uid))
-}
-
-/// Looks up a user's home directory via the POSIX password database.
-fn home_for_user(username: &str) -> Option<PathBuf> {
-    let c_name = std::ffi::CString::new(username).ok()?;
-    // SAFETY: getpwnam is a standard POSIX function. We pass a valid
-    // null-terminated string and check the return value before
-    // dereferencing. The returned pointer is to static storage.
-    let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
-    if pw.is_null() {
-        return None;
-    }
-    // SAFETY: pw is non-null and pw_dir is a valid C string.
-    let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
-    Some(PathBuf::from(dir.to_string_lossy().into_owned()))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{InstallArgs, validate_install_scope};
+    use super::{InstallArgs, resolver_roots, validate_install_scope};
     use arcbox_constants::paths::ArcboxProfile;
+
+    pub(super) fn isolated_lock_test(test: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "isolated lock test {test} failed ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn development_install_only_allows_the_helper_path() {
         let args = InstallArgs {
+            check: false,
             no_daemon: true,
             no_shell: true,
             helper_path: None,
+            user_uid: None,
+            data_dir: None,
+            resolver_root: Vec::new(),
         };
         assert!(validate_install_scope(ArcboxProfile::Development, &args).is_ok());
 
         for (no_daemon, no_shell) in [(false, true), (true, false), (false, false)] {
             let args = InstallArgs {
+                check: false,
                 no_daemon,
                 no_shell,
                 helper_path: None,
+                user_uid: None,
+                data_dir: None,
+                resolver_root: Vec::new(),
             };
             assert!(validate_install_scope(ArcboxProfile::Development, &args).is_err());
             assert!(validate_install_scope(ArcboxProfile::Production, &args).is_ok());
+        }
+    }
+
+    #[test]
+    fn explicit_roots_replace_the_profile_migration_defaults() {
+        assert_eq!(
+            resolver_roots(ArcboxProfile::Production, Vec::new()),
+            ["arcbox.local"]
+        );
+        assert_eq!(
+            resolver_roots(ArcboxProfile::Development, Vec::new()),
+            Vec::<String>::new()
+        );
+        for profile in [ArcboxProfile::Production, ArcboxProfile::Development] {
+            let roots = vec!["custom.local".to_owned(), "other.local".to_owned()];
+            assert_eq!(resolver_roots(profile, roots.clone()), roots);
         }
     }
 }

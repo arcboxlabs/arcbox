@@ -1,94 +1,215 @@
-//! Trusting the local CA behind `https://<name>.arcbox.local`.
+//! Authorize the profile's public CA through the current macOS user session.
 //!
-//! The daemon creates the CA as `tls/ca.pem` in its data directory on first
-//! start, and the guest agent signs a certificate per container domain with
-//! it. Browsers and `curl` accept those once the user trusts the CA:
-//!
-//! - `abctl tls trust`   — add it to the login keychain, trusted for TLS
-//!   servers only (`security add-trusted-cert -p ssl`); macOS asks for the
-//!   user's password.
-//! - `abctl tls untrust` — remove that trust (`security remove-trusted-cert`);
-//!   the certificate stays in the keychain, trusted for nothing.
-//!
-//! Trust is the user's, per data directory: a development profile has its
-//! own CA. The CA is name-constrained to `arcbox.local`, so trusting it
-//! vouches for no other name (trust model: `arcbox-local-ca`).
+//! The helper stores only the public certificate in System Keychain. Native
+//! trust changes run in this process so macOS can request authorization.
+//! The daemon owns the private key. This process publishes public bytes after
+//! revoking a previous root. Explicit commands also work for development profiles.
+//! Repair restores the current public root without creating a key or changing trust.
+//! Rotation authorizes the replacement before revoking the old root and committing in the daemon.
+//! A supplied fingerprint pins the public certificate before any write or trust change.
+//! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use arcbox_constants::dns::LOCAL_DOMAIN;
 use arcbox_constants::paths::{HostLayout, guest};
+use arcbox_helper::client::Client;
+use arcbox_local_ca::{KeychainAuthority, PublicAuthority, lock_profile};
 use clap::Subcommand;
 
-const SECURITY: &str = "/usr/bin/security";
+mod rotation;
 
 /// Local CA commands.
 #[derive(Debug, Subcommand)]
 pub enum TlsCommands {
-    /// Trust the local CA for HTTPS on *.arcbox.local (asks for your password)
-    Trust,
-    /// Stop trusting the local CA
+    /// Authorize the profile's CA for system HTTPS through the macOS prompt
+    Trust {
+        /// Authorize only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
+    /// Restore the current Keychain CA's public file without changing trust
+    Repair {
+        /// Restore only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
+    /// Replace the profile's CA and migrate system HTTPS trust
+    Rotate {
+        /// Replace only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
+    /// Revoke CA trust without stopping containers
     Untrust,
+    /// Check whether this profile's CA is ready for system HTTPS
+    Status {
+        /// Print public CA metadata and trust status as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Executes the tls subcommand.
 pub async fn execute(cmd: TlsCommands) -> Result<()> {
     // SAFETY: geteuid has no preconditions and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
-        bail!("run `abctl tls` as yourself, not root: trust goes into your login keychain");
+        bail!("run `abctl tls` as yourself, not root: the CA belongs to your profile's Keychain");
     }
-    let ca = ca_path(&HostLayout::from_env_or_default())?;
-    let home = dirs::home_dir().context("cannot resolve the home directory")?;
-    let argv = security_argv(&cmd, &ca, &home);
-    let status = Command::new(SECURITY)
-        .args(&argv)
-        .status()
-        .with_context(|| format!("running {SECURITY}"))?;
-    if !status.success() {
-        bail!("{SECURITY} {} failed ({status})", argv[0].display());
-    }
-    match cmd {
-        TlsCommands::Trust => println!(
-            "Trusted the ArcBox local CA ({}) for HTTPS on *.{LOCAL_DOMAIN}.",
-            ca.display()
-        ),
-        TlsCommands::Untrust => {
-            println!("Removed trust for the ArcBox local CA ({}).", ca.display());
+    let tls_dir = HostLayout::from_env_or_default().data_dir.join(guest::TLS);
+    if let TlsCommands::Status { json } = cmd {
+        let status = arcbox_core::local_https::Status::inspect(&tls_dir).await?;
+        if json {
+            println!("{}", serde_json::to_string(&status)?);
+        } else {
+            println!("{}", status.message);
+            if !status.certificate_sha256.is_empty() {
+                println!("CA SHA-256: {}", status.certificate_sha256);
+                println!(
+                    "Valid until (UTC Unix seconds): {}",
+                    status.certificate_not_after_unix_seconds
+                );
+            }
         }
+        return Ok(());
+    }
+    if matches!(cmd, TlsCommands::Untrust) {
+        remove_trust(&tls_dir).await?;
+        println!(
+            "Removed ArcBox CA trust for {}. Containers can run without HTTPS trust.",
+            tls_dir.display()
+        );
+        return Ok(());
+    }
+    if matches!(cmd, TlsCommands::Rotate { .. }) {
+        return rotation::execute(&tls_dir, &cmd).await;
+    }
+    let _operation = lock_profile(&tls_dir)?;
+
+    let authority = current_authority(&tls_dir)?;
+    check_fingerprint(&cmd, &authority.fingerprint_sha256())?;
+    if matches!(cmd, TlsCommands::Repair { .. }) {
+        authority.repair_publication(&tls_dir)?;
+        println!(
+            "Restored the current profile's public CA file: {}",
+            tls_dir.join(guest::TLS_CA_CERT).display()
+        );
+        println!("CA SHA-256: {}", authority.fingerprint_sha256());
+        return Ok(());
+    }
+    require_valid(&authority)?;
+    let client = Client::connect().await?;
+    if let Some(previous) = published_authority(&tls_dir)?
+        && previous.der() != authority.der()
+    {
+        revoke(&client, &previous).await?;
+    }
+    authorize(&client, &authority).await?;
+    ensure!(
+        authority.publish(&tls_dir)? == arcbox_local_ca::Publication::Published,
+        "the previous local CA still has trust; revoke it before publishing this CA"
+    );
+    println!(
+        "System HTTPS trust for *.{LOCAL_DOMAIN} ({}): installed.",
+        tls_dir.display(),
+    );
+    Ok(())
+}
+
+fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
+    if let TlsCommands::Trust {
+        expected_fingerprint: Some(expected),
+    }
+    | TlsCommands::Repair {
+        expected_fingerprint: Some(expected),
+    }
+    | TlsCommands::Rotate {
+        expected_fingerprint: Some(expected),
+    } = cmd
+    {
+        ensure!(
+            actual.eq_ignore_ascii_case(expected),
+            "the local CA changed since HTTPS was requested; refresh its status and try again"
+        );
     }
     Ok(())
 }
 
-/// The CA certificate of the data directory, which the daemon creates.
-fn ca_path(layout: &HostLayout) -> Result<PathBuf> {
-    let ca = layout.data_dir.join(guest::TLS).join(guest::TLS_CA_CERT);
-    if !ca.is_file() {
-        bail!(
-            "no local CA at {}: start the ArcBox daemon once to create it",
-            ca.display()
-        );
-    }
-    Ok(ca)
+fn current_authority(tls_dir: &Path) -> Result<PublicAuthority> {
+    let der = KeychainAuthority::existing_certificate(tls_dir)?
+        .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
+    Ok(PublicAuthority::try_from(der)?)
 }
 
-/// The `security` arguments that carry out `cmd` for the CA at `ca`.
-fn security_argv(cmd: &TlsCommands, ca: &Path, home: &Path) -> Vec<OsString> {
-    match cmd {
-        // The user's trust settings (no -d: not the admin domain), limited
-        // to TLS servers, with the certificate added to the login keychain.
-        TlsCommands::Trust => ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k"]
-            .into_iter()
-            .map(OsString::from)
-            .chain([
-                home.join("Library/Keychains/login.keychain-db").into(),
-                ca.into(),
-            ])
-            .collect(),
-        TlsCommands::Untrust => vec!["remove-trusted-cert".into(), ca.into()],
+fn require_valid(authority: &PublicAuthority) -> Result<()> {
+    ensure!(
+        authority
+            .validity()
+            .is_valid_at(std::time::SystemTime::now().into()),
+        "the local CA is outside its validity period; rotate the CA before authorizing HTTPS"
+    );
+    Ok(())
+}
+
+async fn authorize(client: &Client, authority: &PublicAuthority) -> Result<()> {
+    client.ca_install(authority.der()).await?;
+    arcbox_local_ca::remove_user_trust_der(authority.der())
+        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    authority
+        .trust_admin()
+        .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
+    let trusted = authority.admin_trusted()?
+        && !authority.has_user_trust()?
+        && client.ca_status(authority.der()).await?;
+    ensure!(trusted, "system HTTPS trust was not installed");
+    Ok(())
+}
+
+/// Revoke current, pending, retired, and separately published roots.
+/// Keep the public file and private identity available until every removal succeeds.
+pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
+    let _operation = lock_profile(tls_dir)?;
+    remove_trust_locked(tls_dir).await
+}
+
+/// The caller must hold the profile lock through this call and any subsequent identity deletion.
+pub(super) async fn remove_trust_locked(tls_dir: &Path) -> Result<()> {
+    let mut authorities = KeychainAuthority::owned_certificates(tls_dir)?;
+    if let Some(published) = published_authority(tls_dir)?
+        && !authorities.iter().any(|ca| ca.der() == published.der())
+    {
+        authorities.push(published);
     }
+    if authorities.is_empty() {
+        return Ok(());
+    }
+    let client = Client::connect().await?;
+    for authority in &authorities {
+        revoke(&client, authority).await?;
+    }
+    Ok(())
+}
+
+fn published_authority(tls_dir: &Path) -> Result<Option<PublicAuthority>> {
+    let path = tls_dir.join(guest::TLS_CA_CERT);
+    match std::fs::read(&path) {
+        Ok(pem) => Ok(Some(PublicAuthority::from_pem(&pem).context(
+            "invalid public CA file; run `abctl tls repair` to check whether the public file can be restored",
+        )?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+async fn revoke(client: &Client, authority: &PublicAuthority) -> Result<()> {
+    authority
+        .remove_admin_trust()
+        .context("revoking system HTTPS trust; approve the macOS prompt to continue")?;
+    arcbox_local_ca::remove_user_trust_der(authority.der())
+        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    client.ca_remove(authority.der()).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -96,39 +217,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trust_is_the_users_and_for_tls_servers_only() {
-        let argv = security_argv(
-            &TlsCommands::Trust,
-            Path::new("/data/tls/ca.pem"),
-            Path::new("/Users/me"),
-        );
-        let argv: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(
-            argv,
-            [
-                "add-trusted-cert",
-                "-r",
-                "trustRoot",
-                "-p",
-                "ssl",
-                "-k",
-                "/Users/me/Library/Keychains/login.keychain-db",
-                "/data/tls/ca.pem",
-            ]
-        );
-        assert!(!argv.contains(&"-d"), "never the admin trust domain");
-    }
-
-    #[test]
-    fn a_data_directory_without_a_ca_is_reported() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = HostLayout::new(dir.path().to_path_buf());
-        let err = ca_path(&layout).unwrap_err().to_string();
-        assert!(err.contains("start the ArcBox daemon"), "{err}");
-
-        let tls = dir.path().join(guest::TLS);
-        std::fs::create_dir_all(&tls).unwrap();
-        std::fs::write(tls.join(guest::TLS_CA_CERT), "pem").unwrap();
-        assert_eq!(ca_path(&layout).unwrap(), tls.join(guest::TLS_CA_CERT));
+    fn trust_repair_and_rotate_reject_stale_or_partial_fingerprints() {
+        let current = "AB:CD:".repeat(10) + "EF:01";
+        for expected in [
+            "",
+            "AB:CD",
+            &("AB:CD:".repeat(10) + "EF:02"),
+            &current.to_ascii_lowercase(),
+        ] {
+            for cmd in [
+                TlsCommands::Trust {
+                    expected_fingerprint: Some(expected.into()),
+                },
+                TlsCommands::Repair {
+                    expected_fingerprint: Some(expected.into()),
+                },
+                TlsCommands::Rotate {
+                    expected_fingerprint: Some(expected.into()),
+                },
+            ] {
+                let result = check_fingerprint(&cmd, &current);
+                if expected.eq_ignore_ascii_case(&current) {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("refresh its status")
+                    );
+                }
+            }
+        }
     }
 }

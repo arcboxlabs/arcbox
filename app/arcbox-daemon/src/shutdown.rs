@@ -22,7 +22,7 @@ use arcbox_docker::DockerContextManager;
 use tokio::signal;
 use tracing::{info, warn};
 
-use crate::context::{DaemonContext, ServiceHandles, StartupHandles};
+use crate::context::{DaemonContext, ServiceHandles, StartupHandles, SystemServiceHandles};
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,14 +33,15 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_ABORT_GRACE: Duration = Duration::from_secs(10);
 
 /// Waits for a shutdown signal, drains services, and cleans up.
-pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> {
+pub async fn run(ctx: Arc<DaemonContext>, mut handles: ServiceHandles) -> Result<()> {
     tokio::select! {
         () = wait_for_signal() => {}
         () = ctx.shutdown.cancelled() => {
             warn!("internal safety condition requested daemon shutdown");
         }
     }
-    println!("Shutting down guest VM... (press Ctrl+C again to force quit)");
+    ctx.rpc_calls.close();
+    println!("Finishing active operations before stopping VMs...");
     info!("Shutdown signal received, draining connections...");
 
     // Keep the NFS proxy and guest alive until macOS has detached the mount.
@@ -49,11 +50,40 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     // the machines `stop_runtime` is about to stop.
     crate::nfs_mount::cleanup(&ctx).await;
     crate::machine_mount::cleanup().await;
+    let disconnected = close_guest_connections(&ctx.early_runtime);
     ctx.shutdown.cancel();
+    if let Err(error) = ctx.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
+    if let Err(error) = ctx.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed");
+    }
+    if let Err(error) = ctx.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed");
+    }
+    if let Err(error) = ctx.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed");
+    }
+    if let Err(error) = ctx.web_index_service.join().await {
+        warn!(%error, "web index service cleanup failed");
+    }
+    if let Err(error) = ctx.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed");
+    }
+    if let Err(error) = ctx.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed");
+    }
+    if let Err(error) = ctx.https_access_service.join().await {
+        warn!(%error, "HTTPS access service cleanup failed");
+    }
+    if let Err(error) = ctx.kubernetes_lb_service.join().await {
+        warn!(%error, "Kubernetes LoadBalancer service cleanup failed");
+    }
 
     drain(&mut handles).await;
+    ctx.rpc_calls.wait().await;
 
-    let stopped = match ctx.shared_runtime.get() {
+    let stopped = match ctx.early_runtime.get() {
         Some(runtime) => stop_runtime(Arc::clone(runtime), None).await,
         None => RuntimeStop::Graceful(Ok(())),
     };
@@ -61,7 +91,18 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     cleanup(&ctx).await;
     info!("ArcBox daemon stopped");
 
-    stopped.finish()
+    stopped.finish()?;
+    disconnected
+}
+
+fn close_guest_connections(runtime: &arcbox_api::SharedRuntime) -> Result<()> {
+    if let Some(runtime) = runtime.get() {
+        runtime
+            .machine_manager()
+            .close_agent_connections()
+            .context("Failed to interrupt guest agent connections")?;
+    }
+    Ok(())
 }
 
 enum RuntimeStop {
@@ -99,6 +140,7 @@ impl RuntimeStop {
 /// Retains shutdown errors and task panics until daemon cleanup completes.
 /// A forced result must exit directly because the graceful task can remain blocked.
 async fn stop_runtime(runtime: Arc<Runtime>, grace: Option<Duration>) -> RuntimeStop {
+    println!("Stopping VMs... (press Ctrl+C again to force shutdown)");
     let graceful_runtime = Arc::clone(&runtime);
     stop_runtime_with(
         async move { graceful_runtime.shutdown().await.map_err(Into::into) },
@@ -207,7 +249,8 @@ fn remove_sockets(ctx: &DaemonContext) {
 /// [`STARTUP_ABORT_GRACE`] (or cut short by a second signal), then the VM
 /// is force-killed.
 pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
-    println!("Shutting down... (press Ctrl+C again to force quit)");
+    handles.rpc_calls.close();
+    println!("Finishing startup cleanup before stopping VMs...");
     info!("Shutdown signal received during startup, aborting");
 
     // Publish the cause on the setup stream, then give already-connected
@@ -217,7 +260,37 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
         .setup_state
         .set_failed("startup interrupted by shutdown signal");
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let disconnected = close_guest_connections(&handles.early_runtime);
     handles.shutdown.cancel();
+    if let Err(error) = handles.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
+    if let Err(error) = handles.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.web_index_service.join().await {
+        warn!(%error, "web index service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.https_access_service.join().await {
+        warn!(%error, "HTTPS access service cleanup failed during startup cancellation");
+    }
+    if let Err(error) = handles.kubernetes_lb_service.join().await {
+        warn!(%error, "Kubernetes LoadBalancer service cleanup failed during startup cancellation");
+    }
+
+    handles.rpc_calls.wait().await;
 
     // `early_runtime` is filled before the VM boots, so it covers every
     // window in which a VM can exist; empty means nothing to tear down.
@@ -231,7 +304,8 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
 
     info!("ArcBox daemon stopped");
 
-    stopped.finish()
+    stopped.finish()?;
+    disconnected
 }
 
 /// Force-cleans a runtime after the startup pipeline itself returns an error.
@@ -240,7 +314,39 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
 /// leaving Virtualization.framework helpers or disk holders behind while still
 /// letting the original startup error reach the caller.
 pub async fn abort_failed_startup(handles: &StartupHandles) {
+    handles.rpc_calls.close();
+    if let Err(error) = close_guest_connections(&handles.early_runtime) {
+        warn!(%error, "guest agent connection cleanup failed after startup error");
+    }
     handles.shutdown.cancel();
+    if let Err(error) = handles.system_service.join().await {
+        warn!(%error, "System startup service cleanup failed");
+    }
+    if let Err(error) = handles.resolver_service.join().await {
+        warn!(%error, "resolver service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.dns_service.join().await {
+        warn!(%error, "DNS service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.web_index_service.join().await {
+        warn!(%error, "web index service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed after startup error");
+    }
+    if let Err(error) = handles.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.https_access_service.join().await {
+        warn!(%error, "HTTPS access service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.kubernetes_lb_service.join().await {
+        warn!(%error, "Kubernetes LoadBalancer service cleanup failed after startup error");
+    }
+    handles.rpc_calls.wait().await;
     if let Some(runtime) = handles.early_runtime.get() {
         if let Err(error) = runtime.shutdown_force().await {
             warn!(%error, "failed to force-clean runtime after startup error");
@@ -274,19 +380,25 @@ pub async fn wait_for_signal() {
 }
 
 async fn drain(handles: &mut ServiceHandles) {
+    let tasks = std::iter::once(&mut handles.grpc).chain(handles.ssh.as_mut());
+    drain_servers(tasks).await;
+}
+
+/// Drains System listeners before dependent services and Runtime stop.
+pub async fn drain_system(handles: &mut SystemServiceHandles) {
+    let tasks = handles
+        .docker
+        .iter_mut()
+        .chain(handles.kubernetes_proxy.iter_mut())
+        .chain(handles.route_guard.iter_mut());
+    drain_servers(tasks).await;
+}
+
+async fn drain_servers<'a>(tasks: impl Iterator<Item = &'a mut tokio::task::JoinHandle<()>>) {
+    let mut tasks: Vec<_> = tasks.collect();
     if tokio::time::timeout(DRAIN_TIMEOUT, async {
-        let _ = tokio::join!(&mut handles.dns, &mut handles.grpc);
-        if let Some(h) = handles.docker.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.kubernetes_proxy.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.ssh.as_mut() {
-            let _ = h.await;
-        }
-        if let Some(h) = handles.route_guard.as_mut() {
-            let _ = h.await;
+        for task in &mut tasks {
+            let _ = (&mut **task).await;
         }
     })
     .await
@@ -296,19 +408,13 @@ async fn drain(handles: &mut ServiceHandles) {
             "Server drain timed out after {}s, aborting remaining tasks",
             DRAIN_TIMEOUT.as_secs()
         );
-        handles.dns.abort();
-        handles.grpc.abort();
-        if let Some(h) = handles.docker.as_mut() {
-            h.abort();
+        for task in &tasks {
+            task.abort();
         }
-        if let Some(h) = handles.kubernetes_proxy.as_mut() {
-            h.abort();
-        }
-        if let Some(h) = handles.ssh.as_mut() {
-            h.abort();
-        }
-        if let Some(h) = handles.route_guard.as_mut() {
-            h.abort();
+        for task in tasks {
+            if !task.is_finished() {
+                let _ = task.await;
+            }
         }
     }
 }

@@ -22,6 +22,53 @@
 //! Implementation uses the `security-framework` crate's code-signing bindings
 //! (`GuestAttributes`, `SecCode`, `SecRequirement`).
 
+use arcbox_constants::paths::ArcboxProfile;
+
+/// Authentication evidence retained for the lifetime of one accepted connection.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct VerifiedPeer {
+    uid: u32,
+    identifier: Option<&'static str>,
+    audit_token: bool,
+}
+
+impl VerifiedPeer {
+    #[cfg(test)]
+    pub(super) fn test_daemon(uid: u32, signed: bool) -> Self {
+        Self {
+            uid,
+            identifier: signed.then_some("com.arcboxlabs.desktop.daemon"),
+            audit_token: signed,
+        }
+    }
+
+    pub(super) fn uid(self) -> u32 {
+        self.uid
+    }
+
+    /// PID lookup and debug bypass cannot establish a resolver lease owner.
+    pub(super) fn resolver_profile(self) -> Option<ArcboxProfile> {
+        if !self.audit_token {
+            return None;
+        }
+        match self.identifier {
+            Some("com.arcboxlabs.desktop.daemon") => Some(ArcboxProfile::Production),
+            Some("com.arcboxlabs.desktop.dev.daemon") => Some(ArcboxProfile::Development),
+            _ => None,
+        }
+    }
+}
+
+fn peer_uid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    match stream.peer_cred() {
+        Ok(credentials) => Some(credentials.uid()),
+        Err(error) => {
+            tracing::warn!(%error, "peer auth: failed to read connection credentials");
+            None
+        }
+    }
+}
+
 /// ArcBox Team ID (Apple Developer Portal).
 #[cfg(any(test, not(debug_assertions)))]
 const TEAM_ID: &str = "422ACSY6Y5";
@@ -42,23 +89,32 @@ const LOCAL_PEERPID: libc::c_int = 0x002;
 #[cfg(not(debug_assertions))]
 const LOCAL_PEERTOKEN: libc::c_int = 0x006;
 
-/// Returns `true` if the peer on `stream` is allowed to call privileged RPCs.
+/// Returns the accepted connection's kernel credentials and authentication evidence.
 ///
-/// Debug builds always return `true`. Release builds require a matching
-/// code signature; failures are logged and the connection is dropped.
+/// Debug builds retain an unsigned identity. Release builds require a matching code signature.
+/// Authentication failures are logged and the connection is dropped.
 #[cfg(debug_assertions)]
-pub fn verify(_stream: &tokio::net::UnixStream) -> bool {
-    true
+pub(super) fn verify(stream: &tokio::net::UnixStream) -> Option<VerifiedPeer> {
+    Some(VerifiedPeer {
+        uid: peer_uid(stream)?,
+        identifier: None,
+        audit_token: false,
+    })
 }
 
 /// Release: prefer audit-token binding; fall back to PID if the sockopt fails.
 #[cfg(not(debug_assertions))]
-pub fn verify(stream: &tokio::net::UnixStream) -> bool {
+pub(super) fn verify(stream: &tokio::net::UnixStream) -> Option<VerifiedPeer> {
+    let uid = peer_uid(stream)?;
     if let Some(token) = peer_audit_token(stream) {
-        for identifier in ALLOWED_IDENTIFIERS {
+        for &identifier in ALLOWED_IDENTIFIERS {
             if check_code_signature_audit(&token, identifier, TEAM_ID) {
                 tracing::debug!(identifier, source = "audit_token", "peer auth: accepted");
-                return true;
+                return Some(VerifiedPeer {
+                    uid,
+                    identifier: Some(identifier),
+                    audit_token: true,
+                });
             }
         }
         tracing::warn!(
@@ -66,7 +122,7 @@ pub fn verify(stream: &tokio::net::UnixStream) -> bool {
             stage = "code_signature",
             "peer auth: rejected (no matching code signature)"
         );
-        return false;
+        return None;
     }
 
     let Some(pid) = peer_pid(stream) else {
@@ -75,13 +131,17 @@ pub fn verify(stream: &tokio::net::UnixStream) -> bool {
             stage = "peer_identity",
             "peer auth: failed to get peer PID or audit token"
         );
-        return false;
+        return None;
     };
 
-    for identifier in ALLOWED_IDENTIFIERS {
+    for &identifier in ALLOWED_IDENTIFIERS {
         if check_code_signature_pid(pid, identifier, TEAM_ID) {
             tracing::debug!(pid, identifier, source = "pid", "peer auth: accepted");
-            return true;
+            return Some(VerifiedPeer {
+                uid,
+                identifier: Some(identifier),
+                audit_token: false,
+            });
         }
     }
 
@@ -91,7 +151,7 @@ pub fn verify(stream: &tokio::net::UnixStream) -> bool {
         stage = "code_signature",
         "peer auth: rejected (no matching code signature)"
     );
-    false
+    None
 }
 
 /// Peer PID via `LOCAL_PEERPID`.
@@ -223,6 +283,49 @@ fn check_code_signature_audit(token: &AuditToken, identifier: &str, team_id: &st
 
 #[cfg(test)]
 mod tests {
+    use arcbox_constants::paths::ArcboxProfile;
+
+    use super::VerifiedPeer;
+
+    #[test]
+    fn resolver_identity_requires_an_audit_verified_daemon() {
+        for (identifier, profile) in [
+            ("com.arcboxlabs.desktop.daemon", ArcboxProfile::Production),
+            (
+                "com.arcboxlabs.desktop.dev.daemon",
+                ArcboxProfile::Development,
+            ),
+        ] {
+            let peer = VerifiedPeer {
+                uid: 501,
+                identifier: Some(identifier),
+                audit_token: true,
+            };
+            assert_eq!(peer.resolver_profile(), Some(profile));
+            assert_eq!(
+                VerifiedPeer {
+                    audit_token: false,
+                    ..peer
+                }
+                .resolver_profile(),
+                None
+            );
+        }
+        for identifier in [
+            None,
+            Some("com.arcboxlabs.desktop.cli"),
+            Some("com.arcboxlabs.desktop"),
+            Some("com.arcboxlabs.desktop.dev"),
+        ] {
+            let peer = VerifiedPeer {
+                uid: 501,
+                identifier,
+                audit_token: true,
+            };
+            assert_eq!(peer.resolver_profile(), None);
+        }
+    }
+
     #[test]
     fn allowed_identifiers_are_nonempty_and_arcbox() {
         for id in super::ALLOWED_IDENTIFIERS {

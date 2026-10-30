@@ -456,7 +456,7 @@ impl InboundListenerManager {
         protocol: InboundProtocol,
     ) {
         let key = (host_ip, host_port, protocol);
-        if let Some((handle, cancel, bound)) = self.listeners.remove(&key) {
+        if let Some((handle, cancel, bound)) = self.listeners.get_mut(&key) {
             cancel.cancel();
             handle.abort();
             let _ = handle.await;
@@ -466,6 +466,7 @@ impl InboundListenerManager {
                 host_ip,
                 bound
             );
+            self.listeners.remove(&key);
         }
     }
 
@@ -475,6 +476,14 @@ impl InboundListenerManager {
         for (ip, port, protocol) in keys {
             self.remove_rule(ip, port, protocol).await;
         }
+    }
+
+    /// Whether the requested binding still has an active listener task.
+    #[must_use]
+    pub fn has_rule(&self, host_ip: Ipv4Addr, host_port: u16, protocol: InboundProtocol) -> bool {
+        self.listeners
+            .get(&(host_ip, host_port, protocol))
+            .is_some_and(|(handle, cancel, _)| !cancel.is_cancelled() && !handle.is_finished())
     }
 
     /// How many listeners are live.

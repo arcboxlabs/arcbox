@@ -2,9 +2,8 @@
 //!
 //! Readiness comes from the daemon's own `WatchSetupStatus` gRPC stream
 //! instead of log grepping: the harness connects to the gRPC socket as
-//! soon as it appears, then follows the phase progression until READY —
-//! failing fast on a FAILED phase or a daemon exit, with the log tail
-//! attached to the error.
+//! soon as it appears, then waits for host and System runtime readiness.
+//! Host or System startup failure and daemon exit fail the wait with diagnostics.
 //!
 //! Every handle gets an isolated `--data-dir`, so lock file, sockets, and
 //! logs never collide with a developer's `~/.arcbox` daemon and multiple
@@ -21,7 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use arcbox_constants::paths::{ArcboxProfile, HostMountLayout};
 use arcbox_grpc::v1::system_service_client::SystemServiceClient;
-use arcbox_protocol::v1::{Empty, setup_status};
+use arcbox_protocol::v1::{Empty, SetupStatus, setup_status, system_runtime_status};
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -69,15 +68,23 @@ pub struct DaemonConfig {
 /// missing mark as "unknown", never as zero.
 #[derive(Debug, Default)]
 pub struct PhaseMarks {
-    marks: Vec<(setup_status::Phase, Duration)>,
+    marks: Vec<(&'static str, Duration)>,
 }
 
 impl PhaseMarks {
     fn mark(&mut self, phase: setup_status::Phase, elapsed: Duration) {
-        if self.marks.iter().any(|(seen, _)| *seen == phase) {
+        self.record(phase.as_str_name(), elapsed);
+    }
+
+    fn mark_system(&mut self, state: system_runtime_status::State, elapsed: Duration) {
+        self.record(system_mark(state), elapsed);
+    }
+
+    fn record(&mut self, name: &'static str, elapsed: Duration) {
+        if self.marks.iter().any(|(seen, _)| *seen == name) {
             return;
         }
-        self.marks.push((phase, elapsed));
+        self.marks.push((name, elapsed));
     }
 
     /// When `phase` was first observed, if it was.
@@ -85,8 +92,27 @@ impl PhaseMarks {
     pub fn at(&self, phase: setup_status::Phase) -> Option<Duration> {
         self.marks
             .iter()
-            .find(|(seen, _)| *seen == phase)
+            .find(|(seen, _)| *seen == phase.as_str_name())
             .map(|(_, at)| *at)
+    }
+
+    /// When the independent System runtime first reported `state`.
+    #[must_use]
+    pub fn system_at(&self, state: system_runtime_status::State) -> Option<Duration> {
+        self.marks
+            .iter()
+            .find(|(seen, _)| *seen == system_mark(state))
+            .map(|(_, at)| *at)
+    }
+
+    /// Elapsed time between two observed System runtime states.
+    #[must_use]
+    pub fn system_span(
+        &self,
+        from: system_runtime_status::State,
+        to: system_runtime_status::State,
+    ) -> Option<Duration> {
+        self.system_at(to)?.checked_sub(self.system_at(from)?)
     }
 
     /// Elapsed time between two observed phases.
@@ -102,8 +128,47 @@ impl PhaseMarks {
     /// Observed phases in sighting order, as `(name, elapsed)` — suitable
     /// for recording into `metrics.json`.
     pub fn timeline(&self) -> impl Iterator<Item = (&'static str, Duration)> + '_ {
-        self.marks.iter().map(|(p, at)| (p.as_str_name(), *at))
+        self.marks.iter().copied()
     }
+}
+
+fn system_mark(state: system_runtime_status::State) -> &'static str {
+    use system_runtime_status::State;
+    match state {
+        State::Unspecified => "SYSTEM_UNSPECIFIED",
+        State::Disabled => "SYSTEM_DISABLED",
+        State::Starting => "SYSTEM_STARTING",
+        State::Ready => "SYSTEM_READY",
+        State::Failed => "SYSTEM_FAILED",
+        State::VmStarting => "VM_STARTING",
+        State::VmReady => "VM_READY",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Readiness {
+    System,
+    WithoutSystem,
+    StorageStartup,
+}
+
+fn readiness(status: &SetupStatus, target: Readiness) -> Result<bool> {
+    use system_runtime_status::State;
+    if status.phase() == setup_status::Phase::Failed {
+        bail!("daemon startup failed: {}", status.error);
+    }
+    let Some(system) = &status.system_runtime else {
+        return Ok(false);
+    };
+    let complete = match system.state() {
+        State::Ready => true,
+        State::Disabled if matches!(target, Readiness::WithoutSystem) => true,
+        State::Disabled => bail!("System runtime is disabled; this scenario requires Docker"),
+        State::Failed if matches!(target, Readiness::StorageStartup) => true,
+        State::Failed => bail!("daemon startup failed (System runtime): {}", system.reason),
+        _ => false,
+    };
+    Ok(complete && status.phase() == setup_status::Phase::Ready)
 }
 
 /// A running daemon owned by the harness. Dropping the handle terminates
@@ -113,6 +178,7 @@ pub struct DaemonHandle {
     data_dir: PathBuf,
     log_path: PathBuf,
     phase_marks: PhaseMarks,
+    no_linux_vm: bool,
 }
 
 impl DaemonHandle {
@@ -176,15 +242,14 @@ impl DaemonHandle {
             data_dir: config.data_dir,
             log_path,
             phase_marks: PhaseMarks::default(),
+            no_linux_vm: config.args.iter().any(|arg| arg == "--no-linux-vm"),
         })
     }
 
     /// Setup-phase timings observed during [`Self::wait_ready`].
     ///
-    /// Empty before a readiness wait. The span most callers want is
-    /// `VmStarting → VmReady`: guest binaries are already staged when the
-    /// daemon publishes `VmStarting`, and the guest agent has answered by
-    /// `VmReady`, so it isolates the guest boot itself (CORE-67).
+    /// Empty before a readiness wait. System runtime `VmStarting → VmReady`
+    /// isolates guest boot after binary staging.
     #[must_use]
     pub fn phase_marks(&self) -> &PhaseMarks {
         &self.phase_marks
@@ -224,11 +289,26 @@ impl DaemonHandle {
             .block_on(self.wait_ready(timeout))
     }
 
-    /// Follows `WatchSetupStatus` until the daemon reports READY.
+    /// Waits for host and System runtime readiness through `WatchSetupStatus`.
     ///
     /// Fails fast when the daemon publishes FAILED (with the reported
     /// error), exits (with its status and log tail), or `timeout` passes.
     pub async fn wait_ready(&mut self, timeout: Duration) -> Result<()> {
+        let target = if self.no_linux_vm {
+            Readiness::WithoutSystem
+        } else {
+            Readiness::System
+        };
+        self.wait_startup(timeout, target).await
+    }
+
+    /// Waits for host readiness and a completed System startup attempt.
+    /// Storage scenarios must validate the resulting protection and stopped state.
+    pub async fn wait_storage_startup(&mut self, timeout: Duration) -> Result<()> {
+        self.wait_startup(timeout, Readiness::StorageStartup).await
+    }
+
+    async fn wait_startup(&mut self, timeout: Duration, target: Readiness) -> Result<()> {
         let deadline = Instant::now() + timeout;
         let socket = self.grpc_socket();
 
@@ -269,7 +349,7 @@ impl DaemonHandle {
             self.check_alive()?;
             if Instant::now() >= deadline {
                 bail!(
-                    "timed out after {timeout:?} waiting for READY (log: {})",
+                    "timed out after {timeout:?} waiting for host and System startup (log: {})",
                     self.log_path.display()
                 );
             }
@@ -279,20 +359,17 @@ impl DaemonHandle {
                 Ok(Ok(Some(status))) => {
                     let phase = status.phase();
                     self.phase_marks.mark(phase, stream_start.elapsed());
-                    match phase {
-                        setup_status::Phase::Ready => {
-                            info!("daemon reported READY");
-                            return Ok(());
-                        }
-                        setup_status::Phase::Failed => {
-                            bail!(
-                                "daemon startup failed: {} (log: {})",
-                                status.error,
-                                self.log_path.display()
-                            );
-                        }
-                        phase => info!(?phase, message = %status.message, "setup phase"),
+                    if let Some(system) = &status.system_runtime {
+                        self.phase_marks
+                            .mark_system(system.state(), stream_start.elapsed());
                     }
+                    if readiness(&status, target).with_context(|| {
+                        format!("startup readiness (log: {})", self.log_path.display())
+                    })? {
+                        info!("daemon reached requested readiness");
+                        return Ok(());
+                    }
+                    info!(?phase, message = %status.message, "setup phase");
                 }
                 // Stream ended or errored — the daemon is going away; the
                 // next liveness check reports its exit status and log tail.
@@ -464,6 +541,82 @@ impl Service<Uri> for UnixConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setup(state: system_runtime_status::State) -> SetupStatus {
+        SetupStatus {
+            phase: setup_status::Phase::Ready.into(),
+            system_runtime: Some(arcbox_protocol::v1::SystemRuntimeStatus {
+                state: state.into(),
+                reason: "guest runtime failed".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn host_ready_waits_for_system_runtime_ready() {
+        use system_runtime_status::State;
+        for state in [
+            State::Unspecified,
+            State::Starting,
+            State::VmStarting,
+            State::VmReady,
+        ] {
+            assert!(!readiness(&setup(state), Readiness::System).unwrap());
+        }
+        assert!(readiness(&setup(State::Ready), Readiness::System).unwrap());
+        let mut status = setup(State::Ready);
+        status.phase = setup_status::Phase::NetworkReady.into();
+        assert!(!readiness(&status, Readiness::System).unwrap());
+        status.system_runtime = None;
+        assert!(!readiness(&status, Readiness::System).unwrap());
+    }
+
+    #[test]
+    fn system_failure_and_disabled_runtime_require_explicit_scenarios() {
+        use system_runtime_status::State;
+        let failed = setup(State::Failed);
+        let error = readiness(&failed, Readiness::System).unwrap_err();
+        assert!(error.to_string().contains("guest runtime failed"));
+        assert!(readiness(&failed, Readiness::StorageStartup).unwrap());
+        let disabled = setup(State::Disabled);
+        assert!(readiness(&disabled, Readiness::System).is_err());
+        assert!(readiness(&disabled, Readiness::StorageStartup).is_err());
+        assert!(readiness(&disabled, Readiness::WithoutSystem).unwrap());
+        let mut host_failed = setup(State::Ready);
+        host_failed.phase = setup_status::Phase::Failed.into();
+        host_failed.error = "host setup failed".into();
+        assert!(
+            readiness(&host_failed, Readiness::StorageStartup)
+                .unwrap_err()
+                .to_string()
+                .contains("host setup failed")
+        );
+    }
+
+    #[test]
+    fn system_boot_marks_keep_the_guest_span_separate_from_host_ready() {
+        use system_runtime_status::State;
+        let mut marks = PhaseMarks::default();
+        marks.mark(setup_status::Phase::Ready, Duration::from_secs(1));
+        marks.mark_system(State::VmStarting, Duration::from_secs(3));
+        marks.mark_system(State::VmStarting, Duration::from_secs(8));
+        marks.mark_system(State::VmReady, Duration::from_secs(5));
+        marks.mark_system(State::Ready, Duration::from_secs(9));
+        assert_eq!(
+            marks.system_span(State::VmStarting, State::VmReady),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            marks.at(setup_status::Phase::Ready),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(marks.system_at(State::Ready), Some(Duration::from_secs(9)));
+        assert_eq!(
+            marks.timeline().map(|(name, _)| name).collect::<Vec<_>>(),
+            ["READY", "VM_STARTING", "VM_READY", "SYSTEM_READY"]
+        );
+    }
 
     #[test]
     fn default_profile_roots_are_rejected() {

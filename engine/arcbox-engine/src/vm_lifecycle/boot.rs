@@ -14,11 +14,12 @@ use crate::error::{EngineError, Result};
 use crate::event::Event;
 use crate::machine::MachineConfig;
 use arcbox_constants::cmdline::{
-    CONTAINER_NETWORK_KEY, DEBUG_CONSOLE_KEY, DOCKER_METADATA_DEVICE_KEY,
+    CONTAINER_NETWORK_KEY, DEBUG_CONSOLE_KEY, DNS_DOMAIN_KEY, DOCKER_METADATA_DEVICE_KEY,
     GUEST_DOCKER_VSOCK_PORT_KEY, HV_EARLYCON_DIRECTIVE, RUNTIME_GENERATION_KEY,
 };
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::devices::DOCKER_METADATA_BLOCK_DEVICE;
+use arcbox_constants::dns::Domain;
 use arcbox_error::CommonError;
 
 use super::actor::{Completion, InternalEvent, LifecycleShared};
@@ -50,9 +51,19 @@ impl LifecycleShared {
             self.spawn_route_reconciler();
             self.wait_for_storage_agent(timeout, &cancelled).await?;
             // The readiness handshake already synchronizes the guest clock through Ping.
-            if let Err(error) = Arc::clone(&self.machine_manager)
-                .record_bridge_address_with_cancel(self.machine_name.clone(), &cancelled)
-                .await
+            if let Err(error) = async {
+                let expected = self
+                    .machine_manager
+                    .network_incarnation(&self.machine_name)?;
+                Arc::clone(&self.machine_manager)
+                    .record_bridge_address_with_cancel(
+                        self.machine_name.clone(),
+                        expected,
+                        &cancelled,
+                    )
+                    .await
+            }
+            .await
             {
                 if cancelled.is_cancelled() {
                     return Err(error);
@@ -146,30 +157,14 @@ impl LifecycleShared {
 
         let mm = Arc::clone(&self.machine_manager);
         let name = self.machine_name.clone();
-        // `graceful_stop` and `stop` are synchronous VM calls that can block up
-        // to the host shutdown timeout; keep them off the async workers.
+        // Shutdown waits for host release and guest teardown; keep the wait off async workers.
         let stop_result = tokio::task::spawn_blocking(move || {
-            match mm.graceful_stop(
+            mm.stop(
                 &name,
-                Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
-            ) {
-                Ok(true) => Ok(()),
-                Ok(false) => {
-                    tracing::warn!(
-                        "Graceful stop timed out for '{}', falling back to force stop",
-                        name
-                    );
-                    mm.stop(&name)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Graceful stop failed for '{}': {}, falling back to force stop",
-                        name,
-                        e
-                    );
-                    mm.stop(&name)
-                }
-            }
+                Some(Duration::from_secs(
+                    arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                )),
+            )
         })
         .await
         .map_err(|e| EngineError::Vm(format!("stop task panicked: {e}")))
@@ -317,7 +312,7 @@ impl LifecycleShared {
     }
 
     /// Records the guest's bridge NIC address on the machine record, which
-    /// is what publishes the System VM as `default.arcbox.local`. Runs
+    /// is what publishes the System VM as `default.machine.arcbox.local`. Runs
     /// before the actor hears `AgentReady`, so the `MachineStarted` it then
     /// publishes finds the address already on the record. Best effort: a
     /// VM without a bridge NIC simply has no name on the Mac.
@@ -483,6 +478,7 @@ impl LifecycleShared {
             block_devices,
             rootfs: None,
             mounts: Vec::new(),
+            web_ports: Default::default(),
             distro: None,
             distro_version: None,
             backend: self.backend(),
@@ -558,7 +554,11 @@ impl LifecycleShared {
             }
         }
 
-        cmdline = with_container_network(cmdline, self.config.container_network);
+        cmdline = with_network_config(
+            cmdline,
+            self.config.container_network,
+            &self.config.dns_domain,
+        );
 
         let guest_manifest = arcbox_storage::manifest_path(
             &std::path::Path::new("/arcbox/data").join(&self.data_image_filename),
@@ -806,11 +806,17 @@ impl LifecycleShared {
     }
 }
 
-/// Replaces any container-network token with the validated lifecycle value.
-pub(super) fn with_container_network(cmdline: String, network: ContainerNetwork) -> String {
+/// Replaces network tokens with the validated lifecycle values.
+pub(super) fn with_network_config(
+    cmdline: String,
+    network: ContainerNetwork,
+    domain: &Domain,
+) -> String {
     let mut cmdline = cmdline
         .split_whitespace()
-        .filter(|token| !token.starts_with(CONTAINER_NETWORK_KEY))
+        .filter(|token| {
+            !token.starts_with(CONTAINER_NETWORK_KEY) && !token.starts_with(DNS_DOMAIN_KEY)
+        })
         .collect::<Vec<_>>()
         .join(" ");
     if !cmdline.is_empty() {
@@ -818,6 +824,9 @@ pub(super) fn with_container_network(cmdline: String, network: ContainerNetwork)
     }
     cmdline.push_str(CONTAINER_NETWORK_KEY);
     cmdline.push_str(&network.to_string());
+    cmdline.push(' ');
+    cmdline.push_str(DNS_DOMAIN_KEY);
+    cmdline.push_str(domain.as_str());
     cmdline
 }
 

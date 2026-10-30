@@ -10,7 +10,7 @@ use arcbox_helper::client::Client;
 use arcbox_helper::validate;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
-use tarpc::tokio_serde::formats::Bincode;
+use tarpc::tokio_serde::formats::Json;
 
 #[derive(Clone)]
 pub struct MockHelperServer {
@@ -18,6 +18,26 @@ pub struct MockHelperServer {
 }
 
 impl HelperService for MockHelperServer {
+    async fn resolver_watch(
+        self,
+        _: tarpc::context::Context,
+        _: Option<u64>,
+    ) -> Result<arcbox_helper::ResolverAuthoritySnapshot, HelperError> {
+        Err(HelperError::validation(
+            "mock has no verified daemon identity",
+        ))
+    }
+
+    async fn resolver_lease(
+        self,
+        _: tarpc::context::Context,
+        _: arcbox_helper::ResolverLease,
+    ) -> Result<(), HelperError> {
+        Err(HelperError::validation(
+            "mock has no verified daemon identity",
+        ))
+    }
+
     async fn route_add(
         self,
         _: tarpc::context::Context,
@@ -47,35 +67,6 @@ impl HelperService for MockHelperServer {
         validate::validate_subnet(&subnet).map_err(HelperError::validation)?;
         validate::validate_iface(&iface).map_err(HelperError::validation)?;
         Ok(true)
-    }
-
-    async fn dns_install(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-        port: u16,
-    ) -> Result<(), HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        validate::validate_port(port).map_err(HelperError::validation)?;
-        Ok(())
-    }
-
-    async fn dns_uninstall(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<(), HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        Ok(())
-    }
-
-    async fn dns_status(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<bool, HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        Ok(false)
     }
 
     async fn hosts_alias_install(self, _: tarpc::context::Context) -> Result<(), HelperError> {
@@ -122,6 +113,28 @@ impl HelperService for MockHelperServer {
     async fn version(self, _: tarpc::context::Context) -> String {
         self.version
     }
+
+    async fn ca_install(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn ca_status(
+        self,
+        _: tarpc::context::Context,
+        der: Vec<u8>,
+    ) -> Result<bool, HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(false)
+    }
+
+    async fn ca_remove(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Starts a mock server on a temp socket and returns a connected `Client`.
@@ -153,7 +166,7 @@ pub async fn setup_with_version(
             let Ok((conn, _)) = listener.accept().await else {
                 break;
             };
-            let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
+            let transport = tarpc::serde_transport::new(codec.new_framed(conn), Json::default());
             tokio::spawn(
                 BaseChannel::with_defaults(transport)
                     .execute(server.clone().serve())

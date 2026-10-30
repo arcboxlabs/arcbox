@@ -78,9 +78,8 @@ pub struct VmInfo {
 /// it and hands the same context to every VM it boots.
 #[derive(Debug, Clone, Default)]
 pub struct HostNetwork {
-    /// Hostname table shared with the host-side DNS service, so names
-    /// registered on the host resolve inside the guest too.
-    pub dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// DNS ownership and relative-name policy shared with the host-side DNS service.
+    pub dns: Option<arcbox_net::dns::SharedDns>,
     /// Proxy the guest's TCP and UDP egress is tunnelled through; `None`
     /// connects directly.
     pub proxy: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,

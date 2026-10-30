@@ -5,7 +5,7 @@
 
 use crate::error::{EngineError, Result};
 use crate::persistence::MachinePersistence;
-use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmManager};
+use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmIncarnation, VmManager};
 use arcbox_connect::v1::{EnsureMachineExportRequest, EnsureMachineExportResponse};
 // Only the macOS `connect_agent` dials the agent port — the vsock helper it
 // rides is macOS-only.
@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 #[cfg(target_os = "macos")]
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// Default machine name used for container operations.
@@ -45,14 +45,17 @@ mod host_hold;
 mod maintenance;
 #[cfg(target_os = "macos")]
 mod serial;
+mod stop_owner;
 #[cfg(test)]
 mod tests;
 mod transfer;
+mod web_ports;
 
 pub use clone::clone_file;
 pub use host_hold::HostHold;
 pub use maintenance::StorageMaintenance;
 use transfer::DataDisk;
+pub use web_ports::{MachineWebPorts, WebPortPolicy};
 
 /// How long a stop waits for the host to release what it holds of the
 /// machine before touching the VM. The release takes well under a second
@@ -94,7 +97,7 @@ pub struct MachineInfo {
     /// Guest IP address (reported by agent via vsock).
     pub ip_address: Option<String>,
     /// Address of the guest's bridge NIC, the one the Mac reaches directly
-    /// and `<name>.arcbox.local` resolves to. Reported by the agent at
+    /// and `<name>.machine.arcbox.local` resolves to. Reported by the agent at
     /// readiness; `None` while stopped or when the guest has no bridge NIC.
     pub bridge_ip_address: Option<String>,
     /// macOS hypervisor backend this machine boots on.
@@ -107,6 +110,8 @@ pub struct MachineInfo {
     pub started_at: Option<DateTime<Utc>>,
     /// Host directories shared into the machine (shim machines).
     pub mounts: Vec<MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    pub web_ports: MachineWebPorts,
 }
 
 /// The outcome of [`MachineManager::set_resources`].
@@ -183,6 +188,8 @@ pub struct MachineConfig {
     /// shares. Honored on shim machines (the shim mounts them into the new
     /// root); ignored elsewhere.
     pub mounts: Vec<MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    pub web_ports: MachineWebPorts,
     /// Distribution name (e.g., "alpine", "ubuntu").
     pub distro: Option<String>,
     /// Distribution version (e.g., "3.21", "24.04").
@@ -219,6 +226,7 @@ impl Default for MachineConfig {
             block_devices: Vec::new(),
             rootfs: None,
             mounts: Vec::new(),
+            web_ports: MachineWebPorts::default(),
             distro: None,
             distro_version: None,
             backend: arcbox_vmm::VmBackend::default(),
@@ -347,7 +355,7 @@ fn vm_shared_dirs(data_dir: &std::path::Path, mounts: &[MachineMount]) -> Vec<Sh
 /// get.
 ///
 /// The hostname is a key too: `my_box` and `my-box` would answer to one
-/// `my-box.arcbox.local`, and the DNS table keeps whichever started last,
+/// `my-box.machine.arcbox.local`, and the DNS table keeps whichever started last,
 /// so a user's `ssh` lands on the wrong machine with nothing to say why.
 /// The second name is refused instead.
 fn reserve_hostname(machines: &HashMap<String, MachineInfo>, name: &str) -> Result<String> {
@@ -368,7 +376,7 @@ fn reserve_hostname(machines: &HashMap<String, MachineInfo>, name: &str) -> Resu
 }
 
 /// The hostname a machine named `name` gets, which is also the label of
-/// its `<hostname>.arcbox.local` record and what the shim is handed on the
+/// its `<hostname>.machine.arcbox.local` record and what the shim is handed on the
 /// kernel command line.
 ///
 /// A machine name may carry `_` and `.`, which a DNS label may not; both
@@ -428,8 +436,10 @@ fn validate_mount(mount: &MachineMount) -> Result<()> {
 
 /// Machine manager.
 pub struct MachineManager {
+    agent_connections: arcbox_transport::vsock::SocketScope,
     storage_maintenance: RwLock<bool>,
     machines: RwLock<HashMap<String, MachineInfo>>,
+    stop_operations: Mutex<HashMap<String, stop_owner::StopOperation>>,
     vm_manager: Arc<VmManager>,
     persistence: MachinePersistence,
     /// Data directory for `VirtioFS` sharing.
@@ -445,6 +455,7 @@ pub struct MachineManager {
     /// What the host holds of each running machine; every stop waits for
     /// these to clear before it touches the VM (see [`HostHold`]).
     host_holds: host_hold::HostHolds,
+    host_release_timeout: Duration,
     /// The serial drain of every running machine, by name (see [`serial`]).
     /// Dropping an entry stops its drain.
     #[cfg(target_os = "macos")]
@@ -514,6 +525,7 @@ impl MachineManager {
                     created_at: persisted.created_at,
                     started_at: persisted.started_at,
                     mounts: persisted.mounts.clone(),
+                    web_ports: persisted.web_ports,
                 };
                 machines.insert(persisted.name.clone(), info);
             }
@@ -534,8 +546,10 @@ impl MachineManager {
         tracing::info!("Loaded {} persisted machines", machines.len());
 
         Self {
+            agent_connections: arcbox_transport::vsock::SocketScope::default(),
             storage_maintenance: RwLock::new(false),
             machines: RwLock::new(machines),
+            stop_operations: Mutex::new(HashMap::new()),
             vm_manager,
             persistence,
             data_dir,
@@ -543,29 +557,67 @@ impl MachineManager {
             host_network,
             event_bus,
             host_holds: host_hold::HostHolds::default(),
+            host_release_timeout: HOST_RELEASE_TIMEOUT,
             #[cfg(target_os = "macos")]
             serial_drains: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Registers a host-side dependency on machine `name` — a mount served
-    /// by the machine, say — that every stop waits for before it touches
-    /// the VM. Release it, by dropping the hold, on `MachineStopping`.
-    #[must_use]
-    pub fn host_hold(&self, name: &str) -> HostHold {
-        self.host_holds.hold(name)
+    /// Holds a running machine while host work drains before shutdown.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is stopping, unavailable, or no longer names the expected run.
+    pub fn host_hold_expected(&self, name: &str, expected: &VmIncarnation) -> Result<HostHold> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || self.host_holds.hold(name))
     }
 
-    /// Waits for the host to release what it holds of `name`, within
-    /// [`HOST_RELEASE_TIMEOUT`]; a hold that outlives the wait is logged
-    /// and the stop goes ahead.
-    fn await_host_release(&self, name: &str) {
-        if !self.host_holds.wait_released(name, HOST_RELEASE_TIMEOUT) {
-            tracing::warn!(
-                machine = name,
-                "the host did not release the machine within {HOST_RELEASE_TIMEOUT:?}; stopping it anyway"
-            );
+    /// Waits for host resources within the stop deadline.
+    /// A timeout fails an active stop before teardown, or leaves an inactive VM registered.
+    fn await_host_release(
+        &self,
+        name: &str,
+        owner: Option<(&Arc<stop_owner::StopRun>, bool)>,
+    ) -> Result<()> {
+        if self
+            .host_holds
+            .wait_released(name, self.host_release_timeout)
+        {
+            return Ok(());
         }
+        let timeout_error = || {
+            EngineError::from(arcbox_error::CommonError::timeout(format!(
+                "host resources for machine '{name}' did not drain within {:?}; no teardown was attempted",
+                self.host_release_timeout
+            )))
+        };
+        if let Some((run, graceful)) = owner {
+            let completion = if graceful {
+                stop_owner::Completion::Graceful(Err(timeout_error()))
+            } else {
+                stop_owner::Completion::Forced(Err(timeout_error()))
+            };
+            // A stopped predecessor does not permit removal while host resources remain held.
+            match self.finish_stop(name, run, completion) {
+                Ok(_) | Err(EngineError::Common(arcbox_error::CommonError::Timeout(_))) => {}
+                Err(error) => {
+                    tracing::warn!(machine = name, %error, "Failed to finish a stop after host drain timed out");
+                }
+            }
+        }
+        Err(timeout_error())
     }
 
     /// Publish a lifecycle event for user machine `name`. The default System VM
@@ -746,6 +798,7 @@ impl MachineManager {
             created_at: Utc::now(),
             started_at: None,
             mounts: config.mounts,
+            web_ports: config.web_ports,
         };
         self.register(&mut machines, info)
     }
@@ -782,80 +835,85 @@ impl MachineManager {
     /// guest's console pipes empty for as long as it runs; see [`serial`] for
     /// why a VM cannot go without one.
     pub async fn start(self: &Arc<Self>, name: &str) -> Result<()> {
-        let is_machine_vm = self.start_process(name)?;
+        let (is_machine_vm, expected) = self.start_process(name)?;
 
         if is_machine_vm {
-            self.wait_for_machine_ready(name).await.map_err(|e| {
-                EngineError::Machine(format!(
-                    "Machine '{name}' started but readiness check failed: {e}"
-                ))
-            })?;
+            self.wait_for_machine_ready(name, &expected)
+                .await
+                .map_err(|e| {
+                    EngineError::Machine(format!(
+                        "Machine '{name}' started but readiness check failed: {e}"
+                    ))
+                })?;
         }
 
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStarted {
-                name: name.to_string(),
-            },
-        );
-        Ok(())
+        self.with_network_incarnation(name, &expected, |machine| {
+            if machine.state != MachineState::Running {
+                return Err(EngineError::invalid_state(format!(
+                    "machine '{name}' is not running"
+                )));
+            }
+            self.publish_event(
+                name,
+                crate::event::Event::MachineStarted {
+                    name: name.to_string(),
+                },
+            );
+            Ok(())
+        })?
     }
 
-    fn start_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+    fn start_process(self: &Arc<Self>, name: &str) -> Result<(bool, VmIncarnation)> {
         // The reservation cannot overtake a start before its running state is published.
         let _storage = self.storage_permit(name)?;
         self.start_reserved_process(name)
     }
 
-    fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+    fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<(bool, VmIncarnation)> {
         self.verify_storage_pair(name)?;
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
+        let expected = self.vm_manager.start(&vm_id, self.host_network.clone())?;
+        let is_machine_vm = self.publish_running(name, &expected, cid)?;
+        Ok((is_machine_vm, expected))
+    }
 
-        // Check if this is a distro-based machine VM.
-        let is_machine_vm = self
-            .machines
-            .read()
-            .map_err(|_| EngineError::LockPoisoned)?
-            .get(name)
-            .and_then(|m| m.distro.as_ref())
-            .is_some();
-
-        // Start underlying VM
-        self.vm_manager.start(&vm_id, self.host_network.clone())?;
-
-        // Update machine state
+    fn publish_running(&self, name: &str, expected: &VmIncarnation, cid: u32) -> Result<bool> {
         let started_at = Utc::now();
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-
-            if let Some(machine) = machines.get_mut(name) {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get_mut(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if !matches!(machine.state, MachineState::Created | MachineState::Stopped) {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' cannot publish a start"
+            )));
+        }
+        // Capture readers before the publication guard to avoid a nested VM registry read.
+        #[cfg(target_os = "macos")]
+        let readers = self.vm_manager.dup_serial_readers(&machine.vm_id, expected);
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || {
                 machine.state = MachineState::Running;
                 machine.cid = Some(cid);
                 machine.ip_address = None;
                 machine.bridge_ip_address = None;
                 machine.started_at = Some(started_at);
-
+                #[cfg(target_os = "macos")]
+                self.start_serial_drain(name, readers);
+                if let Err(error) = self.persistence.update(name, |saved| {
+                    saved.state = MachineState::Running.into();
+                    saved.ip_address = None;
+                    saved.bridge_ip_address = None;
+                    saved.started_at = Some(started_at);
+                }) {
+                    tracing::warn!(machine = name, %error, "Failed to persist running state");
+                }
                 tracing::info!("Machine '{}' started with CID {}", name, cid);
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        self.start_serial_drain(name, &vm_id);
-
-        // Update persisted state (single read-modify-write)
-        if let Err(e) = self.persistence.update(name, |m| {
-            m.state = MachineState::Running.into();
-            m.ip_address = None;
-            m.bridge_ip_address = None;
-            m.started_at = Some(started_at);
-        }) {
-            tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
-        }
-
-        Ok(is_machine_vm)
+                machine.distro.is_some()
+            })
     }
 
     /// Waits for the guest agent to become ready and discovers the IP address.
@@ -871,7 +929,7 @@ impl MachineManager {
     /// Probe before the first sleep: failed probes are ~1ms (vsock RST via
     /// the event-driven RX path), while sleeping first puts a full backoff
     /// interval on every start even when the agent is already up.
-    async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
+    async fn wait_for_machine_ready(&self, name: &str, expected: &VmIncarnation) -> Result<()> {
         const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         const INITIAL_DELAY_MS: u64 = 50;
         const MAX_DELAY_MS: u64 = 500;
@@ -882,22 +940,35 @@ impl MachineManager {
         let mut delay_ms = INITIAL_DELAY_MS;
         let mut attempt: u32 = 0;
 
-        let addresses = loop {
+        let (_hold, addresses) = loop {
+            self.agent_connections.check_open()?;
             attempt += 1;
-
-            let probed = match self.connect_agent(name) {
+            let hold = self.host_hold_expected(name, expected)?;
+            let probed = match self.connect_agent_expected(name, expected) {
                 Ok(agent) if agent.is_blocking() => {
                     tokio::task::block_in_place(|| probe_ip_blocking(agent, name, attempt))?
                 }
-                Ok(agent) => probe_ip_async(agent, name, attempt).await?,
+                Ok(agent) => {
+                    let budget = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_secs(5));
+                    match tokio::time::timeout(budget, probe_ip_async(agent, name, attempt)).await {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            tracing::trace!(machine = name, attempt, "readiness probe timed out");
+                            None
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::trace!("Machine '{}' connect failed (attempt {attempt}): {e}", name);
                     None
                 }
             };
             if let Some(addresses) = probed {
-                break addresses;
+                break (hold, addresses);
             }
+            drop(hold);
 
             if std::time::Instant::now() >= deadline {
                 self.log_console_tail(name);
@@ -909,23 +980,13 @@ impl MachineManager {
             delay_ms = (delay_ms * 3 / 2).min(MAX_DELAY_MS);
         };
 
-        // Back on async context — update state.
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-            if let Some(machine) = machines.get_mut(name) {
-                machine.ip_address = Some(addresses.ip.clone());
-                machine.bridge_ip_address.clone_from(&addresses.bridge_ip);
-            }
-        }
-        if let Err(e) = self.persistence.update(name, |m| {
-            m.ip_address = Some(addresses.ip.clone());
-            m.bridge_ip_address.clone_from(&addresses.bridge_ip);
-        }) {
-            tracing::warn!("Failed to persist IP for machine '{}': {}", name, e);
-        }
+        self.publish_addresses(
+            name,
+            expected,
+            Some(&addresses.ip),
+            addresses.bridge_ip.as_deref(),
+            &tokio_util::sync::CancellationToken::new(),
+        )?;
         tracing::info!(
             machine = name,
             ip = %addresses.ip,
@@ -1017,6 +1078,7 @@ impl MachineManager {
     #[cfg(target_os = "macos")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
+        self.agent_connections.check_open()?;
         let (cid, vm_id) = {
             let machines = self
                 .machines
@@ -1042,10 +1104,11 @@ impl MachineManager {
         // socketpair needs the blocking transport (tokio/kqueue stalls on
         // rapid connect/teardown cycles), and only the async transport
         // supports the streaming sandbox RPCs VZ clients rely on.
-        match backend {
+        let client = match backend {
             arcbox_vmm::VmBackend::Hv => AgentClient::from_fd_blocking(cid, fd),
             arcbox_vmm::VmBackend::Vz => AgentClient::from_fd_async(cid, fd),
-        }
+        }?;
+        client.with_scope(&self.agent_connections)
     }
 
     /// Connects to a vsock port on a running machine (macOS).
@@ -1075,6 +1138,7 @@ impl MachineManager {
     #[cfg(target_os = "linux")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
+        self.agent_connections.check_open()?;
 
         let machines = self
             .machines
@@ -1097,7 +1161,7 @@ impl MachineManager {
             .ok_or_else(|| EngineError::invalid_state("CID not assigned"))?;
 
         // On Linux, AgentClient connects directly via AF_VSOCK
-        Ok(AgentClient::new(cid))
+        AgentClient::new(cid).with_scope(&self.agent_connections)
     }
 
     /// Connects to a vsock port on a running machine (Linux).
@@ -1120,6 +1184,68 @@ impl MachineManager {
         }
 
         self.vm_manager.connect_vsock(&machine.vm_id, port)
+    }
+
+    /// Opens a vsock connection only for the expected physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is unavailable, replaced, or cannot connect.
+    pub fn connect_vsock_port_expected(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+        port: u32,
+    ) -> Result<std::os::fd::RawFd> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .connect_vsock_expected(&machine.vm_id, expected, port)
+    }
+
+    /// Opens an agent connection only for the expected physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is unavailable, replaced, or cannot connect.
+    pub fn connect_agent_expected(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+    ) -> Result<crate::agent_client::AgentClient> {
+        self.agent_connections.check_open()?;
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+        let cid = machine
+            .cid
+            .ok_or_else(|| EngineError::invalid_state("CID not assigned"))?;
+        self.vm_manager
+            .connect_agent_expected(&machine.vm_id, expected, cid)?
+            .with_scope(&self.agent_connections)
+    }
+
+    /// Rejects agent connections and interrupts current guest I/O.
+    ///
+    /// The caller must join operation workers before stopping their VMs.
+    /// Final VM shutdown uses a separate connection outside this scope.
+    ///
+    /// # Errors
+    /// Returns an error if a live socket cannot be shut down.
+    pub fn close_agent_connections(&self) -> Result<()> {
+        self.agent_connections.close().map_err(EngineError::from)
     }
 
     /// Connects to the machine's agent and pings it once.
@@ -1160,19 +1286,20 @@ impl MachineManager {
     ///
     /// Distro machines record it in their own readiness probe; the System
     /// VM's readiness lives in the lifecycle actor, which calls this once
-    /// the agent answers so `default.arcbox.local` can be published from
-    /// the same record as every other machine. Same transport dispatch as
-    /// [`Self::ping_agent`].
+    /// the agent answers so `default.machine.arcbox.local` can be published from
+    /// the same record as every other machine. The query holds one physical VM run
+    /// through native connection, RPC cancellation, and guarded publication.
     ///
     /// # Errors
-    /// Returns an error if the machine is not running or the agent is
-    /// unreachable.
+    /// Returns an error if the machine stops, is replaced, or its agent is unreachable.
     pub async fn record_bridge_address(
         self: Arc<Self>,
         machine_name: String,
     ) -> Result<Option<String>> {
+        let expected = self.network_incarnation(&machine_name)?;
         self.record_bridge_address_with_cancel(
             machine_name,
+            expected,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -1181,34 +1308,71 @@ impl MachineManager {
     pub(crate) async fn record_bridge_address_with_cancel(
         self: Arc<Self>,
         machine_name: String,
+        expected: VmIncarnation,
         cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>> {
+        let hold = self.host_hold_expected(&machine_name, &expected)?;
         let manager = Arc::clone(&self);
         let name = machine_name.clone();
-        let agent = tokio::task::spawn_blocking(move || manager.connect_agent(&name))
-            .await
-            .map_err(|error| EngineError::Vm(format!("agent connect task panicked: {error}")))??;
-        let info = agent.get_system_info_with_cancel(cancelled).await?;
+        let connecting_run = expected.clone();
+        let (_hold, info) = query_bridge_info(hold, cancelled, move || {
+            manager.connect_agent_expected(&name, &connecting_run)
+        })
+        .await?;
         let bridge_ip = Some(info.bridge_ip_address).filter(|ip| !ip.is_empty());
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-            if let Some(machine) = machines.get_mut(&machine_name) {
-                machine.bridge_ip_address.clone_from(&bridge_ip);
-            }
-        }
-        if let Err(e) = self.persistence.update(&machine_name, |m| {
-            m.bridge_ip_address.clone_from(&bridge_ip);
-        }) {
-            tracing::warn!(
-                "Failed to persist bridge address for machine '{}': {}",
-                machine_name,
-                e
-            );
-        }
+        self.publish_addresses(
+            &machine_name,
+            &expected,
+            None,
+            bridge_ip.as_deref(),
+            cancelled,
+        )?;
         Ok(bridge_ip)
+    }
+
+    fn publish_addresses(
+        &self,
+        machine_name: &str,
+        expected: &VmIncarnation,
+        ip: Option<&str>,
+        bridge_ip: Option<&str>,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get_mut(machine_name)
+            .ok_or_else(|| EngineError::not_found(machine_name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{machine_name}' is not running"
+            )));
+        }
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || {
+                if cancelled.is_cancelled() {
+                    return Err(EngineError::Machine("address query cancelled".into()));
+                }
+                if let Some(ip) = ip {
+                    machine.ip_address = Some(ip.to_owned());
+                }
+                machine.bridge_ip_address = bridge_ip.map(str::to_owned);
+                if let Err(error) = self.persistence.update(machine_name, |saved| {
+                    saved.ip_address.clone_from(&machine.ip_address);
+                    saved
+                        .bridge_ip_address
+                        .clone_from(&machine.bridge_ip_address);
+                }) {
+                    tracing::warn!(
+                        machine = machine_name,
+                        %error,
+                        "failed to persist machine addresses"
+                    );
+                }
+                Ok(())
+            })?
     }
 
     /// Asks a running distro machine's agent to serve the machine's root
@@ -1282,8 +1446,8 @@ impl MachineManager {
     /// Starts the serial drain for a machine that just entered `Running`,
     /// replacing (and thereby stopping) any earlier one under the same name.
     #[cfg(target_os = "macos")]
-    fn start_serial_drain(&self, name: &str, vm_id: &VmId) {
-        let handle = match self.vm_manager.dup_serial_readers(vm_id) {
+    fn start_serial_drain(&self, name: &str, readers: Result<Option<arcbox_vmm::SerialReaders>>) {
+        let handle = match readers {
             Ok(Some(readers)) => serial::spawn(name, readers),
             Ok(None) => {
                 tracing::debug!(machine = name, "no host console pipes to drain");
@@ -1386,85 +1550,61 @@ impl MachineManager {
         self.vm_manager.debug_snapshot(&machine.vm_id)
     }
 
-    /// Stops a machine (force).
+    /// Stops one machine run, with an optional graceful shutdown deadline.
     ///
-    /// Accepts `Stopping` as well as `Running` so a force stop can preempt
-    /// an in-flight graceful stop instead of erroring for up to the whole
-    /// graceful-shutdown window. The VM dies the moment it is stopped, so
-    /// `MachineStopping` goes out first and the host gets
-    /// [`HOST_RELEASE_TIMEOUT`] to release what it holds of the machine.
+    /// A timeout forces the same run. `None` skips graceful shutdown.
+    ///
+    /// Force admission accepts `Running` or `Stopping`. A graceful shutdown
+    /// that owns the VMM can temporarily prevent forced teardown.
+    /// `MachineStopping` is published while the run identity is locked.
+    /// The host then gets [`HOST_RELEASE_TIMEOUT`] to release its holds.
+    /// A hold timeout cancels this stop before guest shutdown or teardown.
     ///
     /// # Errors
     ///
     /// Returns an error if the machine cannot be stopped.
-    pub fn stop(&self, name: &str) -> Result<()> {
-        let stoppable =
-            |state: MachineState| matches!(state, MachineState::Running | MachineState::Stopping);
-        {
+    pub fn stop(&self, name: &str, graceful_timeout: Option<Duration>) -> Result<()> {
+        let expected = {
             let machines = self
                 .machines
                 .read()
                 .map_err(|_| EngineError::LockPoisoned)?;
             let machine = machines
                 .get(name)
-                .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-            if !stoppable(machine.state) {
-                return Err(EngineError::invalid_state(format!(
-                    "machine '{name}' is not running"
-                )));
+                .ok_or_else(|| EngineError::not_found(name))?;
+            self.vm_manager.run_incarnation(&machine.vm_id)?
+        };
+        let operation = self.admit_stop(name, &expected, graceful_timeout.is_some())?;
+        self.await_host_release(name, Some((&operation, graceful_timeout.is_some())))?;
+        if let Some(timeout) = graceful_timeout {
+            let result =
+                self.vm_manager
+                    .graceful_stop(&operation.vm_id, &operation.expected, timeout);
+            if self.finish_stop(name, &operation, stop_owner::Completion::Graceful(result))? {
+                return Ok(());
             }
-        }
-
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopping {
-                name: name.to_string(),
-            },
-        );
-        // Not under the registry lock: the holders read the registry too.
-        self.await_host_release(name);
-
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| EngineError::LockPoisoned)?;
-        let machine = machines
-            .get_mut(name)
-            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-        // A concurrent stop may have finished during the wait.
-        if !stoppable(machine.state) {
-            return Err(EngineError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
-        // Stop underlying VM
-        #[cfg(target_os = "macos")]
-        self.vm_manager
-            .force_stop_without_hypervisor(&machine.vm_id)?;
-        #[cfg(not(target_os = "macos"))]
-        self.vm_manager.stop(&machine.vm_id)?;
-
-        machine.state = MachineState::Stopped;
-        machine.cid = None;
-        machine.bridge_ip_address = None;
-        self.stop_serial_drain(name);
-
-        if let Err(e) = self.persist_stopped(name) {
             tracing::warn!(
-                "Failed to persist stopped state for machine '{}': {}",
-                name,
-                e
+                machine = name,
+                "Graceful shutdown unavailable or timed out; force stopping the same run"
             );
         }
+        self.force_stop_expected(name, &operation)
+    }
 
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopped {
-                name: name.to_string(),
-            },
-        );
-        Ok(())
+    fn force_stop_expected(&self, name: &str, operation: &Arc<stop_owner::StopRun>) -> Result<()> {
+        let result = {
+            let machines = self
+                .machines
+                .read()
+                .map_err(|_| EngineError::LockPoisoned)?;
+            let machine = machines
+                .get(name)
+                .ok_or_else(|| EngineError::not_found(name))?;
+            self.require_force_owner(name, operation)?;
+            self.force_stop_vm(&machine.vm_id, &operation.expected)
+        };
+        self.finish_stop(name, operation, stop_owner::Completion::Forced(result))
+            .map(|_| ())
     }
 
     /// Reports whether a machine's VM stopped on its own (guest-driven), and if
@@ -1629,81 +1769,45 @@ impl MachineManager {
         Ok(())
     }
 
-    /// Attempts graceful machine shutdown via guest ACPI stop request.
-    ///
-    /// Returns `Ok(true)` if the machine stopped, `Ok(false)` if graceful
-    /// shutdown timed out or is unavailable.
-    pub fn graceful_stop(&self, name: &str, timeout: Duration) -> Result<bool> {
-        let vm_id = {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-
-            let machine = machines
-                .get_mut(name)
-                .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-
-            if machine.state != MachineState::Running {
-                return Err(EngineError::invalid_state(format!(
-                    "machine '{name}' is not running"
-                )));
-            }
-
-            machine.state = MachineState::Stopping;
-            machine.vm_id.clone()
-        };
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopping {
-                name: name.to_string(),
-            },
-        );
-        // The guest's shutdown kills the machine's export within moments
-        // of the RPC below — before the unmount it races has finished
-        // (alpine, 2026-10-04) — so the host's release goes first here too.
-        self.await_host_release(name);
-
-        match self.vm_manager.graceful_stop(&vm_id, timeout) {
-            Ok(true) => {
-                let mut machines = self
-                    .machines
-                    .write()
-                    .map_err(|_| EngineError::LockPoisoned)?;
-
-                let machine = machines
-                    .get_mut(name)
-                    .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-                machine.state = MachineState::Stopped;
-                machine.cid = None;
-                machine.bridge_ip_address = None;
-                self.stop_serial_drain(name);
-
-                if let Err(e) = self.persist_stopped(name) {
-                    tracing::warn!(
-                        "Failed to persist stopped state for machine '{}': {}",
-                        name,
-                        e
-                    );
-                }
-                drop(machines);
-                self.publish_event(
-                    name,
-                    crate::event::Event::MachineStopped {
-                        name: name.to_string(),
-                    },
-                );
-                Ok(true)
-            }
-            Ok(false) => {
-                self.rollback_stopping(name);
-                Ok(false)
-            }
-            Err(e) => {
-                self.rollback_stopping(name);
-                Err(e)
-            }
+    fn force_stop_vm(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.vm_manager.force_stop_without_hypervisor(id, expected)
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.vm_manager.stop(id, expected)
+        }
+    }
+
+    fn publish_stopped(
+        &self,
+        name: &str,
+        machine: &mut MachineInfo,
+        expected: &VmIncarnation,
+    ) -> Result<()> {
+        let id = machine.vm_id.clone();
+        self.vm_manager.with_run_incarnation(&id, expected, || {
+            machine.state = MachineState::Stopped;
+            machine.cid = None;
+            machine.bridge_ip_address = None;
+            self.stop_serial_drain(name);
+
+            if let Err(e) = self.persist_stopped(name) {
+                tracing::warn!(
+                    "Failed to persist stopped state for machine '{}': {}",
+                    name,
+                    e
+                );
+            }
+
+            self.publish_event(
+                name,
+                crate::event::Event::MachineStopped {
+                    name: name.to_string(),
+                },
+            );
+        })
     }
 
     /// Records a stop: the state, and the bridge address, which is only
@@ -1714,19 +1818,6 @@ impl MachineManager {
             m.state = MachineState::Stopped.into();
             m.bridge_ip_address = None;
         })
-    }
-
-    /// Rolls a failed graceful stop back to `Running` — but only if the
-    /// machine is still `Stopping`: a concurrent force [`Self::stop`] may
-    /// have already stopped it, and its `Stopped` must not be overwritten.
-    fn rollback_stopping(&self, name: &str) {
-        if let Ok(mut machines) = self.machines.write() {
-            if let Some(machine) = machines.get_mut(name) {
-                if machine.state == MachineState::Stopping {
-                    machine.state = MachineState::Running;
-                }
-            }
-        }
     }
 
     /// Gets machine information.
@@ -1782,33 +1873,32 @@ impl MachineManager {
             return Ok(false);
         };
 
-        // Check if machine is running
-        if machine.state == MachineState::Running && !force {
-            return Err(EngineError::invalid_state(
-                "cannot remove running machine (use --force)".to_string(),
-            ));
-        }
-
-        // Stop if running and force is set
-        if machine.state == MachineState::Running {
-            let vm_id = machine.vm_id.clone();
-            drop(machines); // Release lock before stopping
-            self.publish_event(
-                name,
-                crate::event::Event::MachineStopping {
-                    name: name.to_string(),
-                },
-            );
-            // The VM dies below; what the host holds of the machine (its
-            // root mount) must be released while the machine still answers.
-            self.await_host_release(name);
-            self.vm_manager.stop(&vm_id)?;
-            self.stop_serial_drain(name);
+        let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
+        if matches!(
+            machine.state,
+            MachineState::Running | MachineState::Stopping
+        ) {
+            if !force {
+                return Err(EngineError::invalid_state(
+                    "cannot remove running or stopping machine (use --force)",
+                ));
+            }
+            drop(machines);
+            let operation = self.admit_stop(name, &expected, false)?;
+            self.await_host_release(name, Some((&operation, false)))?;
+            self.force_stop_expected(name, &operation)?;
             machines = self
                 .machines
                 .write()
                 .map_err(|_| EngineError::LockPoisoned)?;
         }
+
+        drop(machines);
+        self.await_host_release(name, None)?;
+        machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
 
         // Get VM ID before removing from map.
         let vm_id = {
@@ -1819,7 +1909,8 @@ impl MachineManager {
         };
 
         // Remove from VM manager
-        self.vm_manager.remove(&vm_id)?;
+        self.vm_manager.remove(&vm_id, &expected)?;
+        self.stop_serial_drain(name);
 
         // Remove from machines map
         machines.remove(name);
@@ -1829,35 +1920,73 @@ impl MachineManager {
         // restart even though VM and in-memory state are already gone.
         self.persistence.remove(name)?;
 
-        drop(machines);
         self.publish_event(
             name,
             crate::event::Event::MachineRemoved {
                 name: name.to_string(),
             },
         );
+        drop(machines);
         tracing::info!("Removed machine '{}'", name);
         Ok(true)
     }
 
-    /// Takes the inbound listener manager from a running machine's VM (Darwin only).
+    /// Captures a machine's current live datapath identity.
     ///
-    /// Returns `None` if the machine is not found, not running, or the manager
-    /// has already been taken.
+    /// # Errors
+    /// Returns an error if the machine or its live VM is unavailable.
+    pub fn network_incarnation(&self, name: &str) -> Result<VmIncarnation> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager.network_incarnation(&machine.vm_id)
+    }
+
+    /// Keeps the canonical machine record and physical VM stable during synchronous publication.
+    /// The callback must not acquire another machine or VM registry lock.
+    ///
+    /// # Errors
+    /// Returns an error if the expected live VM is unavailable.
+    pub fn with_network_incarnation<T>(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+        publish: impl FnOnce(&MachineInfo) -> T,
+    ) -> Result<T> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || publish(machine))
+    }
+
+    /// Takes a manager only while the machine still names the expected live VM.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable or replaced VM. `None` means already taken.
     #[cfg(target_os = "macos")]
     pub fn take_inbound_listener_manager(
         &self,
         name: &str,
-    ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        let vm_id = {
-            let machines = self.machines.read().ok()?;
-            let machine = machines.get(name)?;
-            if machine.state != MachineState::Running {
-                return None;
-            }
-            machine.vm_id.clone()
-        };
-        self.vm_manager.take_inbound_listener_manager(&vm_id)
+        expected: &VmIncarnation,
+    ) -> Result<Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .take_inbound_listener_manager(&machine.vm_id, expected)
     }
 
     /// Registers a mock machine for testing purposes.
@@ -1899,12 +2028,37 @@ impl MachineManager {
             created_at: Utc::now(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: MachineWebPorts::default(),
         };
 
         machines.insert(name.to_string(), info);
         tracing::debug!("Registered mock machine '{}' with CID {}", name, cid);
         Ok(())
     }
+}
+
+async fn query_bridge_info(
+    hold: HostHold,
+    cancelled: &tokio_util::sync::CancellationToken,
+    connect: impl FnOnce() -> Result<crate::agent_client::AgentClient> + Send + 'static,
+) -> Result<(HostHold, arcbox_connect::v1::SystemInfo)> {
+    if cancelled.is_cancelled() {
+        return Err(EngineError::Machine(
+            "bridge address query cancelled".into(),
+        ));
+    }
+    let cancelled = cancelled.child_token();
+    let _cancel_on_drop = cancelled.clone().drop_guard();
+    // Boot can abort the caller; this task retains the hold until native workers finish.
+    tokio::spawn(async move {
+        let agent = tokio::task::spawn_blocking(connect)
+            .await
+            .map_err(|error| EngineError::Vm(format!("agent connect task panicked: {error}")))??;
+        let info = agent.get_system_info_with_cancel(&cancelled).await?;
+        Ok((hold, info))
+    })
+    .await
+    .map_err(|error| EngineError::Vm(format!("bridge address task panicked: {error}")))?
 }
 
 /// The addresses a ready machine reported.

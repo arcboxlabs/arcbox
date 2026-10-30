@@ -7,6 +7,7 @@ mod host_mounts;
 mod lock;
 mod pipeline;
 mod resource_cleanup;
+mod system;
 
 pub use assets::find_bundle_contents;
 pub use container_network_lease::ContainerNetworkLease;
@@ -18,15 +19,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_api::SetupPhase;
+use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
-use arcbox_core::{Config, InitProgress, Runtime};
-use arcbox_helper::validate::Domain;
+use arcbox_core::{Config, Runtime};
 use tracing::info;
 
 use crate::DaemonArgs;
 use crate::context::{DaemonContext, EarlyContext, StartupHandles, VmArgs};
 
-pub const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
+pub const DEFAULT_DNS_DOMAIN: &str = arcbox_constants::dns::LOCAL_DOMAIN;
 
 /// Phase 1: directories, config, sockets. No runtime, no lock yet.
 ///
@@ -48,7 +49,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
     }
 
     let dns_domain = dns_domain(args.dns_domain)?;
-    validate_explicit_dns_resolver(profile, args.install_dns_resolver, &dns_domain)?;
+    validate_explicit_dns_resolver(profile, args.install_dns_resolver, dns_domain.as_str())?;
 
     std::fs::create_dir_all(&layout.data_dir).context("Failed to create data directory")?;
     std::fs::create_dir_all(&layout.run_dir).context("Failed to create run directory")?;
@@ -78,11 +79,22 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         profile,
         layout,
         shared_runtime: handles.shared_runtime,
+        host_runtime: handles.host_runtime,
         early_runtime: handles.early_runtime,
         setup_state: handles.setup_state,
         shutdown: handles.shutdown,
+        rpc_calls: handles.rpc_calls,
         daemon_lock_slot: handles.daemon_lock,
         container_network_lease_slot: handles.container_network_lease,
+        system_service: handles.system_service,
+        resolver_service: handles.resolver_service,
+        dns_service: handles.dns_service,
+        guest_trust_service: handles.guest_trust_service,
+        web_index_service: handles.web_index_service,
+        tls_signer: handles.tls_signer,
+        machine_web_service: handles.machine_web_service,
+        https_access_service: handles.https_access_service,
+        kubernetes_lb_service: handles.kubernetes_lb_service,
         dns_domain,
         dns_port,
         install_dns_resolver: args.install_dns_resolver,
@@ -139,10 +151,23 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         layout: early.layout,
         daemon_lock: lock,
         shared_runtime: early.shared_runtime,
+        host_runtime: early.host_runtime,
         early_runtime: early.early_runtime,
         setup_state: early.setup_state,
+        #[cfg(target_os = "macos")]
+        local_ca: tokio::sync::watch::channel(None).0,
         shutdown: early.shutdown,
+        rpc_calls: early.rpc_calls,
         container_network_lease_slot: early.container_network_lease_slot,
+        system_service: early.system_service,
+        resolver_service: early.resolver_service,
+        dns_service: early.dns_service,
+        guest_trust_service: early.guest_trust_service,
+        web_index_service: early.web_index_service,
+        tls_signer: early.tls_signer,
+        machine_web_service: early.machine_web_service,
+        https_access_service: early.https_access_service,
+        kubernetes_lb_service: early.kubernetes_lb_service,
         dns_domain: early.dns_domain,
         dns_port: early.dns_port,
         install_dns_resolver: early.install_dns_resolver,
@@ -232,35 +257,29 @@ async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 /// for the launched app version.
 async fn prepare_assets(ctx: &DaemonContext) -> Result<assets::PreparedAssets> {
     let config = effective_config(ctx)?;
-    let prepared = assets::prepare(&config, &ctx.setup_state).await?;
+    let prepared = assets::prepare(&config).await?;
     ctx.setup_state
-        .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
+        .set_phase(SetupPhase::AssetsReady, "Host assets prepared");
     Ok(prepared)
 }
 
-/// Phase 2: seed/download boot assets, build runtime, start VM.
-///
-/// Called after gRPC SystemService is already listening so clients
-/// can observe DOWNLOADING_ASSETS → ASSETS_READY progression, and
-/// publishes VM_STARTING → VM_READY around the guest boot itself.
-/// Returns the initialized runtime.
+/// Constructs Runtime and completes the shared-directory security barrier.
 async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let config = effective_config(ctx)?;
-    if config.vm.autostart
-        && let Some(lease) = ContainerNetworkLease::acquire(config.container.cidr)?
-    {
-        ctx.container_network_lease_slot
-            .set(lease)
-            .map_err(|_| anyhow::anyhow!("container network lease already configured"))?;
-    }
-    let selected_guest_docker_port = config.container.guest_docker_vsock_port;
+    #[cfg(target_os = "macos")]
+    crate::self_setup::tls::prepare(ctx);
     let runtime = Arc::new(Runtime::new(config).context("Failed to create runtime")?);
-    // Publish the diagnostics handle before the VM boots: a stuck boot
-    // must stay observable via GetVirtioDebug while `shared_runtime`
-    // (the general RPC gate) is still empty.
+    // A stuck boot must preserve diagnostics and read-only directory access
+    // while `shared_runtime` still gates operations.
     ctx.early_runtime
         .set(Arc::clone(&runtime))
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
+    #[cfg(target_os = "macos")]
+    crate::guest_trust::start(ctx, &runtime).await;
+    #[cfg(target_os = "macos")]
+    crate::machine_web::start(ctx, &runtime).await;
+    #[cfg(target_os = "macos")]
+    crate::https_access::start(ctx, &runtime).await;
     // Armed before `init` for the same reason `early_runtime` is published
     // here: the VM reaches its ready state partway through the call below, so
     // a mirror started after it returns would report the VM down across the
@@ -271,54 +290,10 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     // Armed here for the same reason: a host sleep can land during the boot
     // below, and the wake that follows must still re-sync the guest clock.
     crate::power::spawn_wake_clock_sync(&runtime, &ctx.shutdown);
-    // The guest boot is the longest stretch of startup and the only one a
-    // client cannot infer from anything else, so the runtime reports its
-    // milestones from inside and they are published as they arrive.
     runtime
-        .init(|milestone| match milestone {
-            InitProgress::SystemVmStarting => ctx
-                .setup_state
-                .set_phase(SetupPhase::VmStarting, "Starting the Linux VM…"),
-            InitProgress::SystemVmReady => ctx.setup_state.set_phase(
-                SetupPhase::VmReady,
-                "Linux VM ready; waiting for the container runtime…",
-            ),
-        })
+        .prepare_host()
         .await
-        .context("Failed to initialize runtime")?;
-    info!(
-        data_dir = %ctx.layout.data_dir.display(),
-        guest_docker_vsock_port = selected_guest_docker_port,
-        container_cidr = %runtime.config().container.cidr,
-        "Runtime initialized"
-    );
-
-    if ctx.dns_domain != DEFAULT_DNS_DOMAIN {
-        runtime.network_manager().set_dns_domain(&ctx.dns_domain);
-    }
-
-    // Replay the startup cleanup before the runtime is published, so no
-    // sandbox state from a previous daemon outlives it. The stream is a
-    // streaming RPC, which the HV backend's blocking agent transport cannot
-    // carry; HV runs no sandboxes, so there is nothing to replay there. The
-    // same gate, re-evaluated per VM incarnation, keeps the long-lived watch
-    // (`sandbox_cleanup::spawn`) off backends that cannot carry it.
-    let backend = runtime.system_vm_backend();
-    if !runtime.config().vm.autostart || runtime.machine_manager().storage_is_held()? {
-        // No guest, nothing to clean.
-    } else if backend.supports_nested_virt() {
-        let replayed = arcbox_computer::cleanup::initialize(runtime.as_ref())
-            .await
-            .context("Failed to initialize sandbox cleanup")?;
-        if !replayed {
-            info!("sandbox cleanup skipped: the guest runs no sandboxes");
-        }
-    } else {
-        info!(
-            backend = backend.as_str(),
-            "sandbox cleanup skipped: the backend does not run sandboxes"
-        );
-    }
+        .context("Failed to prepare Machine host")?;
     Ok(runtime)
 }
 
@@ -327,6 +302,7 @@ fn effective_config(ctx: &DaemonContext) -> Result<Config> {
     // The daemon's layout (sockets, lock file) was already resolved from
     // --profile/--data-dir/--socket, so it must win over config files.
     config.data_dir.clone_from(&ctx.layout.data_dir);
+    config.network.dns_domain.clone_from(&ctx.dns_domain);
     config
         .docker
         .socket_path
@@ -373,15 +349,12 @@ fn dns_port(cli_port: Option<u16>) -> Option<u16> {
     })
 }
 
-fn dns_domain(cli_domain: Option<Domain>) -> Result<String> {
+fn dns_domain(cli_domain: Option<Domain>) -> Result<Domain> {
     if let Some(domain) = cli_domain {
-        return Ok(domain.to_string());
+        return Ok(domain);
     }
     std::env::var("ARCBOX_DNS_DOMAIN")
-        .map_or_else(
-            |_| Ok(DEFAULT_DNS_DOMAIN.to_string()),
-            |domain| domain.parse::<Domain>().map(|domain| domain.to_string()),
-        )
+        .map_or_else(|_| Ok(Domain::default()), |domain| domain.parse::<Domain>())
         .map_err(anyhow::Error::msg)
         .context("Invalid DNS domain")
 }

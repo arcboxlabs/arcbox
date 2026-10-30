@@ -74,20 +74,15 @@ non-obvious invariants and failure signatures.
 
 ## Invariants (each with WHY)
 
-- **Protocol is additive-only.** Never remove/renumber proto fields; proto3
-  field skew is silent (an old agent decodes new fields as defaults and
-  misbehaves with zero diagnostics). Bump `AGENT_PROTOCOL_VERSION`
-  (`common/arcbox-constants/src/wire.rs`) only when the *meaning* of an existing
-  message changes; the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`
-  (currently 7 for all business APIs, including observation). `Ping` is the one
-  message every agent generation understands and carries `protocol_version`.
+- **Update the host and agent together.** Change paired callers and decoders in the same source change. Keep `AGENT_PROTOCOL_VERSION` and `MIN_AGENT_PROTOCOL_VERSION` at 7 for current feature work. Do not add compatibility branches or bump versions for each message change. Preserve existing field numbers. The connection handshake still rejects agents below the minimum version.
+- Machine web sessions validate optional public-root PEM before changing policies. Keep the parsed root in session memory. An absent root withdraws proxy authority; guest client trust uses its separate reconciliation channel. Clear proxy authority before awaiting stream shutdown. Reject invalid replacements without changing the accepted configuration. Transfer the stream to an owned connection task. Caller cancellation must withdraw authority synchronously without canceling stream shutdown or releasing admission early.
+- `iptables::TaggedRules` owns the executable path for checks, inserts, deletes, listings, and sweeps. Pass the tool explicitly when constructing routes. System VM owners use `/sbin/iptables`; machine routing requires the boot-owned `/usr/lib/arcbox/iptables`. Do not select a tool through PATH or fall back to a distro package. Preserve the selected path through shutdown cleanup.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
   guest's `/arcbox/bin/arcbox-agent` (the agent is NOT baked into the EROFS rootfs — the
-  rootfs only wires that path into inittab). Pairing a new daemon with a stale
-  agent trips the handshake above: boot fails with the intentional, actionable
-  "staged agent binary is stale" error (`check_agent_protocol`, `agent_client.rs`)
-  rather than a silent misdecode — do not treat it as a regression. The
+  rootfs only wires that path into inittab). Stage paired daemon and agent builds
+  together. `check_agent_protocol` rejects agents below the minimum protocol
+  version; the handshake does not detect different builds at protocol 7. The
   rootfs/kernel/FEX half is a SEPARATE, tag-driven release from the sibling repo
   `../boot-assets`: pushing a `vX.Y.Z` tag there builds the EROFS rootfs for both
   arches and publishes a merged `manifest.json` to `boot.arcboxcdn.com`
@@ -96,6 +91,7 @@ non-obvious invariants and failure signatures.
   `include_str!`-embedded into the daemon at COMPILE time
   (`engine/arcbox-image/src/boot_assets/lockfile.rs`) — editing `assets.lock`
   without rebuilding the daemon changes nothing.
+- `ReconcileGuestTrust` requires the host CID before request decoding. Recovery guests reject the request. System VM services serialize installation into `/etc/ssl/certs/ca-certificates.crt`. Distro machines use `agent/guest_trust/machine.rs` for Debian, Ubuntu, or Alpine with an existing regular system bundle and `update-ca-certificates`. Atomically update only the owned source anchor, await the updater and its hooks, verify the rebuilt ArcBox section, then sync the bundle before acknowledging. Reject other distributions and missing prerequisites. Do not use shim roots or enable machine DNS/Docker watchers. Replays must repair an anchor update whose bundle refresh failed. Assign trust connection order before Ping and only for the actual host CID. Reject an older connection after a newer update is accepted. Acquire an owned async guard before scheduling each blocking writer. Carry that guard through cancellation until installation finishes. Acknowledge only completed durable installation or explicit removal. Do not import roots from the writable guest share.
 - **Guest wall clock comes from the Ping handler.** HV exposes no RTC (ABX-416),
   so `handle_ping` calls `sync_clock_from_host(req.timestamp_secs)` →
   `clock_settime(CLOCK_REALTIME)` (`agent/linux/rpc.rs`). Before that
@@ -166,8 +162,8 @@ non-obvious invariants and failure signatures.
   every running machine hourly; the agent issues the ioctl
   (`agent/linux/disk.rs`) and runs no loop of its own. The rootfs ships no
   `fstrim` binary — never shell out to it.
-  The one service a distro machine's agent does run is its root export,
-  and only on request: `EnsureMachineExport` starts an `nfs3_server` on
+  A distro machine also serves its root export on request:
+  `EnsureMachineExport` starts an `nfs3_server` on
   `127.0.0.1:0` and a relay on `<bridge ip>:0` that admits the host
   addresses named in the request and drops every other peer
   (`machine_export/server.rs`). It takes no well-known port and no file a
@@ -175,6 +171,7 @@ non-obvious invariants and failure signatures.
   `/etc/exports`); the System VM answers the RPC with `EINVAL`, and a
   machine whose bridge NIC has no address yet answers `EAGAIN` so the host
   retries.
+- Machine web configuration uses an exclusive host-only connection in `agent/machine_web.rs`. Reject other peers and guest kinds before decoding. Compare the supplied IPv4 with the live bridge interface before admission. Trust the host-assigned exact canonical hostname; Core derives and checks its exact DNS claim. Store the fixed identity and complete validated policy as EndpointFacts. Keep the exact claim in a private Registry. Publish the claim and acknowledge Open only after the owned-rule sweep and frontend/signing listener binds succeed. Use `/usr/lib/arcbox/iptables`; do not start System VM DNS, Docker watchers, or the index. Require positive, increasing source revisions. Await route tracking replacement before Ack; Ack does not confirm installed NAT. Withdraw configuration, ownership, public-root authority, and publication on EOF or caller cancellation. Retain admission until both real stream shutdown and actor cleanup finish. Never abort in-flight iptables or the route actor. Initialization failures must also finish asynchronous cleanup and propagate errors.
 - **A distro machine's identity and second NIC are `machine-init`'s, set up
   before the distro's init runs** (`init.rs`, `machine_identity.rs`,
   `boot_done.rs`). The hostname arrives as `arcbox.machine_name=` on the
@@ -199,7 +196,8 @@ non-obvious invariants and failure signatures.
 - **Container domains ride nat PREROUTING, and bridged siblings reach them
   only through the kernel's built-in `br_netfilter`.** `domains/` DNATs
   `<ip>:80` to the container's HTTP port and REDIRECTs `<ip>:443` to the
-  agent's TLS proxy on 61443 (`domains/https.rs`, CA from `/arcbox/tls/`),
+  agent's bound TLS proxy port (`domains/https.rs`, leaf CSRs signed by the
+  host through vsock port 2202; the CA key stays in the macOS Keychain),
   tagged `arcbox-domain:<id>`, removed on `die`/`destroy`, swept at agent
   start. The rules match the destination only; switched sibling traffic meets
   them because the System VM kernel builds `br_netfilter` in and
@@ -210,8 +208,56 @@ non-obvious invariants and failure signatures.
   startup. A container's listeners are read through its init pid only while
   that pid is in the container's netns (`SandboxKey`): an `nsenter -t 1 -n`
   container otherwise reports the VM's own sockets as its own. The design
-  lives in `domains/mod.rs`. Regression signature: siblings get RST on
-  `<name>.arcbox.local:80` while the Mac works — check
+  lives in `domains/mod.rs`.
+  Automatic HTTP discovery requires a real HTTP response to a bounded `HEAD /`
+  probe with the container domain in `Host`. An exposed or listening TCP port
+  alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
+  Prefer cleartext HTTP/2 on a separate bounded connection, then probe HTTP/1.1. Retain the verified protocol with the selected port. An explicit unverified port remains selected with an unknown protocol; failed discovery must not invent HTTP/1.1 support.
+  Resolve an unknown pinned protocol before forwarding application requests. Never replay an application request to discover a protocol.
+  Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Store canonical claims in `arcbox_dns::registry::Registry`, keyed by complete container ID. Check the actual SNI name against the `.local` CA namespace before observation and certificate generation. The configured suffix must not disable a custom `.local` claim; foreign names retain HTTP and native TLS only.
+  Native HTTPS discovery checks 443 then 8443 and takes precedence over the
+  TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
+  managed HTTPS routing. Native TLS preserves the application's certificate.
+  Native discovery follows ALPN for HTTP/2 or HTTP/1.1 and requires a response. An explicit native port bypasses discovery for mTLS services.
+  `domains/http_relay.rs` forwards managed HTTP/1.1 and HTTP/2. Use Hyper for HTTP/1 and direct `h2` stream ownership for both HTTP/2 endpoints. Share the HTTP/2 upstream connection. Use one HTTP/1 upstream connection per HTTP/2 stream. Recheck the pinned route before and after each additional connection and after HTTP/2 sender readiness. Preserve native gRPC DATA, metadata, compression, and trailers without buffering complete bodies. Retain reset ownership after response EOS until the request upload completes. Preserve HTTP/1 WebSocket upgrades when discovery selected HTTP/2. Replace forwarded scheme after removing hop-by-hop fields.
+  When converting an HTTP/2 body to HTTP/1.1, use chunked framing and require trailer names in the initial `Trailer` header. HTTP/1 clients must send `TE: trailers` to receive response trailers. Fail the HTTP/1 message on undeclared, forbidden, or unaccepted trailers. Arbitrary HTTP/2 trailer sets are not supported across the HTTP/1 boundary.
+  `domains/http_tasks.rs` retains connection and stream tasks for each managed connection, including Hyper's internal tasks. Cancel the connection operation, then join its internal tasks before releasing the frontend owner. Child task scopes are limited to bounded discovery before application forwarding.
+  Listener scans continue every five seconds after startup backoff. Socket inode
+  changes and failed proxy upstream connections invalidate successful probes.
+  Failed discovery probes retry; unchanged successful probes do not repeat.
+  Network connect/disconnect events trigger a fresh container inspect. Use shared
+  `ContainerMetadata` for identity, aliases, and addresses. DNS, discovery, and
+  published-port mirrors select the first valid IPv4 address in network-name order.
+  Domain NAT retains every distinct container IPv4 address. Disconnecting the
+  last addressed network removes that container's DNS ownership and routes.
+  Confirm the Docker event subscription before listing running containers so snapshot-time changes remain buffered.
+  A failed listing or rejected subscription must enter the existing reconnect path.
+  Validate every inspect response before applying a reconnect snapshot. Await route-task acknowledgement before publishing snapshot or event DNS changes; an active scan may finish before consuming the update. Retain unavailable owners until rule and mirror cleanup succeeds.
+  Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
+  Construct guest DNS with the shared builtin reservations. Forward exact system/index names and the machine tree to the existing gateway. Inject the same DNS server through `agent::Services` into `SandboxService`; register exact sandbox names as `sandbox:<id>` owners in the shared Registry. Docker snapshots must reconcile Docker owners only. Validate DNS IDs before provisioning and propagate invalid nonempty addresses; an empty address withdraws the sandbox name. Do not restore global, flat, or bare sandbox fallback.
+  Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before local resource lookup. Preserve internal resource lookup when no instance root matches.
+  System VM `agent::Services` shares that Registry with the exclusive host authority connection. Its unique session guard revokes known roots synchronously before releasing the connection slot. Every later source revision creates a lifetime barrier, including identical root snapshots.
+  Keep DnsRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
+  Keep readiness streaming in `agent/linux/rpc/readiness.rs`; the dispatcher owns connection routing and preserves the recovery guest restrictions.
+  Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
+  `ListGuestWebServices` reports installed routes, not raw listeners. The
+  snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.
+  Keep the Docker directory unavailable until subscription and complete reconciliation succeed. The watcher owns directory availability for one subscription lifetime. Hide container directory entries after disconnect or cancellation. Retain installed forwarding routes independently of directory availability.
+  Serve the browser index from `domains/index/` only for the current exact `system:index` registration and original gateway destination. Require one matching HTTP Host. Select directory URLs under the same Registry read lock. Keep endpoint readiness independent from Docker directory availability.
+  Serve managed TLS for the same exact index registration without an upstream. Pin its revision across host authorization, certificate configuration, and handshake. Report the typed index route even when the Docker directory is unavailable.
+  Publish `system:index` only after the shared frontend binds and both gateway redirects precede Docker's PREROUTING jump. `domains/index/publisher.rs` owns only `arcbox-index:` rules. Withdraw the registration before repair or frontend shutdown. Join the frontend before sweeping redirects. Retry failed publication without requiring a container.
+  Domain actor shutdown must withdraw installed routes and index ownership before cancellation. Join the frontend before sweeping domain and index redirects, attempt both cleanups, and propagate every failure. Drop must also invalidate installed routes. Preserve Docker-owned DNS registrations.
+  Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
+  The host must use this snapshot to build URLs instead of guessing from ports.
+  The HTTPS proxy checks SNI against the same DNS registry before requesting a
+  certificate. The selected owner must have an installed managed route at the connection's original destination IP.
+  Pin the owner, DNS resolution revision, and installed route identity across authorization, certificate configuration, TLS handshake, and upstream connection. Remove a failed upstream route only while its pinned identity still matches. Identical route publication preserves identity; removal and reinstallation replace it.
+  `domains/certificates/cache.rs` bounds leaf reuse by the certificate's actual
+  validity and serializes signing per name. Never evict an active signing slot.
+  Read the active root before cache reuse. System frontends read `/arcbox/tls/ca.pem`; machine frontends use only their session's in-memory public root. A missing session root must fail without a file fallback. Bind each leaf to its verified
+  root DER and reject a signing result if the public root changes before caching.
+  `ReconcileHttpsAccess` leases observation for three seconds and requires the host CID. The host renews the lease only while Desktop can offer trust authorization. Only exact host source addresses report access or wait; siblings and unobserved handshakes proceed immediately. Record access after SNI ownership validation and before certificate cache lookup. Authorization waiting ends after 30 seconds, observer disable, or lease expiry. Recheck the pinned TLS route after waiting. Lease renewal must not wake every waiting handshake or replace the first access in an observation.
+  Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.
 - **k3s runs servicelb (traefik stays disabled), and `KubernetesLoadBalancers`
@@ -236,8 +282,9 @@ non-obvious invariants and failure signatures.
   then `file <newest>`. `stage_dev_boot_assets` (`tests/e2e/src/boot_assets.rs`)
   copies the **newest-mtime** agent across those three locations, so a fresh
   build that wasn't re-staged loses to an old binary from another tree (ABX-385
-  field-skew class). Wrong-version agents now surface as the handshake rejection
-  (`engine/arcbox-engine/src/agent_client.rs`).
+  field-skew class). The handshake rejects protocols below its minimum
+  (`engine/arcbox-engine/src/agent_client.rs`). Stage paired daemon and agent
+  builds together; the handshake does not detect different builds at protocol 7.
 - **"engine ready" then intermittent 500/EOF on first API calls** →
   read `~/.arcbox/log/agent.log`, grep for `DockerProbe` / `/_ping`. Cause:
   readiness gated on socket rather than the `/_ping` probe (ABX-408 regression).
@@ -300,9 +347,7 @@ alone does not waive step 3 — `WatchReadiness`/`WatchStats`/
 `WatchMemoryPressure` stream too and keep their codec arms (step 4's
 `handle_watch_readiness` pattern).
 
-Then run the `buf` breaking check, decide whether the change alters existing
-message *meaning* (if so, bump `AGENT_PROTOCOL_VERSION`), and add a test on the
-real request path — not just a leaf helper.
+Then run the `buf` breaking check. Update both message producers and consumers directly, and add a test on the real request path. Keep the protocol versions unchanged for current feature work.
 
 ## Guest-controlled input hygiene
 

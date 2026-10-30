@@ -48,18 +48,22 @@ mod half_close;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 mod listener;
+mod socket_scope;
 pub(crate) mod stream;
 mod transport;
 
 pub use addr::{DEFAULT_AGENT_PORT, VsockAddr};
-pub use blocking::{BlockingVsockShutdown, BlockingVsockTransport};
+pub use blocking::{
+    BlockingVsockReceiver, BlockingVsockSender, BlockingVsockShutdown, BlockingVsockTransport,
+};
 #[cfg(target_os = "macos")]
 pub use darwin::IncomingVsockConnection;
 pub use flow::Credit;
 pub use half_close::{HalfCloseStream, MAX_FRAME_PAYLOAD, WINDOW};
 pub use listener::VsockListener;
+pub use socket_scope::SocketScope;
 pub use stream::{VsockShutdown, VsockStream};
-pub use transport::{VsockReceiver, VsockSender, VsockTransport};
+pub use transport::{VsockReceiver, VsockSender, VsockTransport, read_framed};
 
 #[cfg(test)]
 mod tests {

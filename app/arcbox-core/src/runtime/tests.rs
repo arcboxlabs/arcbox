@@ -114,9 +114,22 @@ fn test_check_executable_not_executable() {
 
 fn networking_test_runtime() -> (Runtime, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let runtime =
-        Runtime::new(Config::for_test(temp_dir.path())).expect("runtime init should succeed");
+    let runtime = Runtime::new(Config::for_test(temp_dir.path()))
+        .expect("runtime init should succeed")
+        .with_network_fixture(super::NetworkFixture::default());
     (runtime, temp_dir)
+}
+
+fn dns_address(runtime: &Runtime, name: &str) -> Option<std::net::IpAddr> {
+    match runtime
+        .dns_registry
+        .read()
+        .unwrap()
+        .resolve(&name.parse().unwrap())
+    {
+        arcbox_dns::registry::Lookup::Matched { address, .. } => Some(address),
+        _ => None,
+    }
 }
 
 /// VM-host-only mode reports no milestones, because no VM starts.
@@ -137,10 +150,68 @@ async fn init_reports_no_milestones_without_a_linux_vm() {
     runtime
         .init(|milestone| reported.lock().unwrap().push(milestone))
         .await
-        .expect("VM-host-only init only creates data directories");
+        .expect("VM-host-only preparation succeeds");
 
     let reported = reported.into_inner().unwrap();
     assert!(reported.is_empty(), "expected silence, got {reported:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn vm_host_init_removes_shared_ca_key_and_preserves_public_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let tls = directory.path().join(arcbox_constants::paths::guest::TLS);
+    std::fs::create_dir_all(&tls).unwrap();
+    let key = tls.join(arcbox_constants::paths::guest::TLS_CA_KEY);
+    std::fs::write(&key, b"legacy private key").unwrap();
+    let certificate = tls.join(arcbox_constants::paths::guest::TLS_CA_CERT);
+    std::fs::write(&certificate, b"published public root").unwrap();
+    let unrelated = tls.join("application-key.pem");
+    std::fs::write(&unrelated, b"application key").unwrap();
+    let mut config = Config {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.vm.autostart = false;
+    let runtime = Runtime::new(config).unwrap();
+
+    runtime
+        .init(|_| panic!("unexpected VM startup"))
+        .await
+        .unwrap();
+
+    assert!(!key.try_exists().unwrap());
+    assert_eq!(
+        std::fs::read(certificate).unwrap(),
+        b"published public root"
+    );
+    assert_eq!(std::fs::read(unrelated).unwrap(), b"application key");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn vm_host_init_rejects_shared_ca_key_cleanup_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let key = directory
+        .path()
+        .join(arcbox_constants::paths::guest::TLS)
+        .join(arcbox_constants::paths::guest::TLS_CA_KEY);
+    std::fs::create_dir_all(&key).unwrap();
+    let mut config = Config {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.vm.autostart = false;
+    let runtime = Runtime::new(config).unwrap();
+
+    let error = runtime
+        .init(|_| panic!("unexpected VM startup"))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("ca-key.pem"), "{error}");
+    assert!(key.is_dir());
+    assert!(!directory.path().join("runtime").try_exists().unwrap());
 }
 
 #[tokio::test]
@@ -148,8 +219,11 @@ async fn resolve_registered_container_by_id_alias_and_prefix() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     let id = "0a1b2c3d4e5f00112233445566778899";
-    runtime.register_dns(id, &["web.local".into()], ip).await;
-    runtime.register_container_alias("web", id).await;
+    runtime
+        .register_dns(id, &["web.local".into()], ip)
+        .await
+        .unwrap();
+    runtime.register_container_alias("web", id).await.unwrap();
 
     // Exact canonical ID.
     assert_eq!(
@@ -179,10 +253,12 @@ async fn resolve_registered_container_rejects_ambiguous_prefix() {
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     runtime
         .register_dns("abcd1111", &["a.local".into()], ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("abcd2222", &["b.local".into()], ip)
-        .await;
+        .await
+        .unwrap();
 
     // Prefix matching two registered IDs must not guess.
     assert_eq!(runtime.resolve_registered_container("abcd").await, None);
@@ -197,22 +273,59 @@ async fn resolve_registered_container_rejects_ambiguous_prefix() {
 }
 
 #[tokio::test]
-async fn container_names_invert_aliases_and_prefer_the_shortest() {
+async fn container_names_replace_old_aliases_without_changing_other_containers() {
     let (runtime, _tmp) = networking_test_runtime();
     let id = "0a1b2c3d4e5f00112233445566778899";
-    // A container accreting two names: the short primary and a longer alias.
-    runtime.register_container_alias("db", id).await;
+    // A rename withdraws the previous name even when the new name is longer.
+    runtime.register_container_alias("db", id).await.unwrap();
     runtime
         .register_container_alias("arcbox-postgres-1", id)
-        .await;
+        .await
+        .unwrap();
     // A second container with a single name.
-    runtime.register_container_alias("cache", "beef5678").await;
+    runtime
+        .register_container_alias("cache", "beef5678")
+        .await
+        .unwrap();
 
     let names = runtime.container_names().await;
-    assert_eq!(names.get(id).map(String::as_str), Some("db"));
+    assert_eq!(names.get(id).map(String::as_str), Some("arcbox-postgres-1"));
     assert_eq!(names.get("beef5678").map(String::as_str), Some("cache"));
+    assert_eq!(runtime.resolve_registered_container("db").await, None);
+    assert_eq!(
+        runtime
+            .resolve_registered_container("arcbox-postgres-1")
+            .await
+            .as_deref(),
+        Some(id)
+    );
     // Unknown IDs have no name (the consumer falls back to the short ID).
     assert!(!names.contains_key("unknown"));
+}
+
+#[tokio::test]
+async fn container_lifecycles_serialize_per_id_and_release_unused_locks() {
+    use std::future::Future as _;
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let first = runtime.lock_container_lifecycle("first").await;
+    let second = runtime.lock_container_lifecycle("first");
+    tokio::pin!(second);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(second.as_mut().poll(cx).is_pending())
+        })
+        .await
+    );
+    let unrelated = runtime.lock_container_lifecycle("unrelated").await;
+    drop(first);
+    let second = second.await;
+    drop(second);
+    drop(unrelated);
+    let _next = runtime.lock_container_lifecycle("next").await;
+    let locks = runtime.container_lifecycle.lock().unwrap();
+    assert_eq!(locks.len(), 1);
+    assert!(locks.contains_key("next"));
 }
 
 #[tokio::test]
@@ -221,7 +334,8 @@ async fn deregister_dns_clears_aliases_even_without_dns_entry() {
     // Alias registered without any DNS entry (e.g. port forwarding only).
     runtime
         .register_container_alias("ports-only", "feed1234")
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         runtime
             .resolve_registered_container("ports-only")
@@ -238,40 +352,50 @@ async fn deregister_dns_clears_aliases_even_without_dns_entry() {
 }
 
 #[tokio::test]
-async fn sandbox_dns_cleanup_restores_same_named_container() {
+async fn sandbox_dns_has_a_separate_namespace_from_the_same_named_container() {
     let (runtime, _tmp) = networking_test_runtime();
     let container_ip = "172.17.0.2".parse().unwrap();
     let sandbox_ip = "172.31.0.2".parse().unwrap();
     runtime
         .register_dns("container", &["same".into()], container_ip)
-        .await;
-    runtime.register_sandbox_dns("SAME", sandbox_ip).await;
+        .await
+        .unwrap();
+    runtime
+        .register_sandbox_dns("SAME", sandbox_ip)
+        .await
+        .unwrap();
 
-    let entries = runtime.dns_entries.read().await;
-    assert!(entries.contains_key("container"));
-    assert!(entries.contains_key("sandbox:SAME"));
-    drop(entries);
+    {
+        let entries = runtime.dns_registry.read().unwrap();
+        assert!(entries.get("container").is_some());
+        assert!(entries.get("sandbox:SAME").is_some());
+    }
     assert_eq!(
         runtime.registered_container_ids().await,
         std::collections::HashSet::from(["container".to_string()])
     );
-    let hosts = runtime.network_manager.local_hosts_table();
-    assert_eq!(hosts.read().unwrap().get("same"), Some(&sandbox_ip));
+    assert_eq!(dns_address(&runtime, "same"), Some(container_ip));
     assert_eq!(
-        hosts.read().unwrap().get("same.arcbox.local"),
-        Some(&sandbox_ip)
+        dns_address(&runtime, "same.arcbox.local"),
+        Some(container_ip)
+    );
+    assert_eq!(
+        dns_address(&runtime, "same.sandbox.arcbox.local"),
+        Some(sandbox_ip)
     );
 
     runtime.deregister_sandbox_dns("SAME").await;
-    let entries = runtime.dns_entries.read().await;
-    assert!(entries.contains_key("container"));
-    assert!(!entries.contains_key("sandbox:SAME"));
-    drop(entries);
-    assert_eq!(hosts.read().unwrap().get("same"), Some(&container_ip));
+    {
+        let entries = runtime.dns_registry.read().unwrap();
+        assert!(entries.get("container").is_some());
+        assert!(entries.get("sandbox:SAME").is_none());
+    }
+    assert_eq!(dns_address(&runtime, "same"), Some(container_ip));
     assert_eq!(
-        hosts.read().unwrap().get("same.arcbox.local"),
-        Some(&container_ip)
+        dns_address(&runtime, "same.arcbox.local"),
+        Some(container_ip)
     );
+    assert_eq!(dns_address(&runtime, "same.sandbox.arcbox.local"), None);
 }
 
 #[tokio::test]
@@ -279,45 +403,52 @@ async fn sandbox_dns_cleanup_restores_host_alias() {
     let (runtime, _tmp) = networking_test_runtime();
     let host_ip = "10.0.2.1".parse().unwrap();
     let sandbox_ip = "172.31.0.2".parse().unwrap();
-    runtime.register_host_dns(&["host".into()], host_ip).await;
-    runtime.register_sandbox_dns("host", sandbox_ip).await;
+    runtime
+        .register_host_dns(&["host".into()], host_ip)
+        .await
+        .unwrap();
+    runtime
+        .register_sandbox_dns("host", sandbox_ip)
+        .await
+        .unwrap();
 
     assert!(runtime.registered_container_ids().await.is_empty());
     runtime.deregister_sandbox_dns("host").await;
 
-    let hosts = runtime.network_manager.local_hosts_table();
-    assert_eq!(hosts.read().unwrap().get("host"), Some(&host_ip));
+    assert_eq!(dns_address(&runtime, "host"), Some(host_ip));
 }
 
 #[tokio::test]
-async fn shared_dns_restores_the_latest_live_owner_and_drops_old_aliases() {
+async fn conflicting_dns_restores_the_only_live_owner_and_drops_old_aliases() {
     let (runtime, _tmp) = networking_test_runtime();
     let first_ip = "172.17.0.2".parse().unwrap();
     let second_ip = "172.17.0.3".parse().unwrap();
     let latest_ip = "172.17.0.4".parse().unwrap();
     runtime
         .register_dns("first", &["shared".into(), "old".into()], first_ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("second", &["shared".into()], second_ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("latest", &["shared".into()], latest_ip)
-        .await;
-    let hosts = runtime.network_manager.local_hosts_table();
-
+        .await
+        .unwrap();
     runtime.deregister_dns_by_id("first").await;
-    assert_eq!(hosts.read().unwrap().get("shared"), Some(&latest_ip));
-    assert!(!hosts.read().unwrap().contains_key("old"));
+    assert_eq!(dns_address(&runtime, "shared"), None);
+    assert_eq!(dns_address(&runtime, "old"), None);
 
     runtime.deregister_dns_by_id("latest").await;
-    assert_eq!(hosts.read().unwrap().get("shared"), Some(&second_ip));
+    assert_eq!(dns_address(&runtime, "shared"), Some(second_ip));
 
     runtime
         .register_dns("second", &["replacement".into()], second_ip)
-        .await;
-    assert!(!hosts.read().unwrap().contains_key("shared"));
-    assert_eq!(hosts.read().unwrap().get("replacement"), Some(&second_ip));
+        .await
+        .unwrap();
+    assert_eq!(dns_address(&runtime, "shared"), None);
+    assert_eq!(dns_address(&runtime, "replacement"), Some(second_ip));
 }
 
 #[cfg(target_os = "macos")]
@@ -332,28 +463,30 @@ async fn sandbox_cleanup_discovers_authority_without_secondary_indexes() {
             vec![(
                 std::net::Ipv4Addr::LOCALHOST,
                 45_678,
+                80,
                 super::InboundProtocol::Tcp,
             )],
         ),
     );
-    runtime.dns_entries.write().await.insert(
-        "sandbox:orphan".into(),
-        super::DnsRegistration {
-            hostnames: vec!["orphan".into()],
-            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            revision: 0,
-        },
-    );
+    runtime
+        .register_dns(
+            "sandbox:orphan",
+            &["orphan".into()],
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )
+        .await
+        .unwrap();
 
     runtime.clear_sandbox_host_state().await;
 
     assert!(!runtime.inbound_rules.read().await.contains_key(&key));
     assert!(
-        !runtime
-            .dns_entries
+        runtime
+            .dns_registry
             .read()
-            .await
-            .contains_key("sandbox:orphan")
+            .unwrap()
+            .get("sandbox:orphan")
+            .is_none()
     );
 }
 
@@ -406,21 +539,36 @@ async fn sandbox_port_mappings_filter_sort_and_fence_cleanup() {
             Runtime::sandbox_port_key("target", 8080, "tcp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_001, super::InboundProtocol::Tcp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_001,
+                    8080,
+                    super::InboundProtocol::Tcp,
+                )],
             ),
         );
         rules.insert(
             Runtime::sandbox_port_key("target", 5353, "udp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_002, super::InboundProtocol::Udp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_002,
+                    5353,
+                    super::InboundProtocol::Udp,
+                )],
             ),
         );
         rules.insert(
             Runtime::sandbox_port_key("target", 8080, "udp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_000, super::InboundProtocol::Udp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_000,
+                    8080,
+                    super::InboundProtocol::Udp,
+                )],
             ),
         );
         rules.insert(
@@ -526,19 +674,18 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     drop(reservation);
 
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
-    runtime.inbound_listeners.write().await.insert(
-        "test-machine".into(),
-        InboundListenerManager::new(command_tx),
-    );
+    runtime
+        .adopt_test_manager("test-machine", InboundListenerManager::new(command_tx))
+        .await;
     let first = [("127.0.0.1".to_owned(), host_port, 80, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "sandbox:first", &first)
+        .start_test_port_forwarding("test-machine", "sandbox:first", &first)
         .await
         .unwrap();
 
     let conflicting = [("127.0.0.1".to_owned(), host_port, 81, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "sandbox:second", &conflicting)
+        .start_test_port_forwarding("test-machine", "sandbox:second", &conflicting)
         .await
         .expect_err("a second owner must not reuse the first owner's listener");
     runtime.stop_port_forwarding_by_id("sandbox:second").await;
@@ -572,6 +719,92 @@ async fn accepting(port: u16) -> bool {
     .is_ok_and(|connected| connected.is_ok())
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bindings() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (mut runtime, _tmp) = networking_test_runtime();
+    runtime.config.docker.expose_ports_to_lan = false;
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let mut manager = InboundListenerManager::new(command_tx);
+    let host_port = manager
+        .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    manager
+        .add_rule(localhost, 0, 53, InboundProtocol::Udp)
+        .await
+        .unwrap();
+    runtime.adopt_test_manager("test-machine", manager).await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test-machine".into(),
+            vec![
+                (localhost, 0, 80, InboundProtocol::Tcp),
+                (localhost, 0, 53, InboundProtocol::Udp),
+            ],
+        ),
+    );
+
+    let equivalent = [
+        ("0.0.0.0".into(), 0, 53, "UDP".into()),
+        (String::new(), 0, 80, "TCP".into()),
+        ("127.0.0.1".into(), 0, 80, "tcp".into()),
+    ];
+    runtime
+        .start_test_port_forwarding("test-machine", "web", &equivalent)
+        .await
+        .unwrap();
+    assert!(
+        accepting(host_port).await,
+        "equivalent bindings must keep the original ephemeral listener"
+    );
+
+    runtime
+        .start_test_port_forwarding("test-machine", "web", &[])
+        .await
+        .unwrap();
+    assert!(!accepting(host_port).await);
+    assert!(!runtime.inbound_rules.read().await.contains_key("web"));
+    assert!(
+        runtime.inbound_listeners.read().await["test-machine"]
+            .current
+            .is_empty()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn forwarding_refresh_does_not_trust_ownership_without_a_listener() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+    let blocker = std::net::TcpListener::bind((localhost, 0)).unwrap();
+    let host_port = blocker.local_addr().unwrap().port();
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    runtime
+        .adopt_test_manager("test-machine", InboundListenerManager::new(command_tx))
+        .await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test-machine".into(),
+            vec![(localhost, host_port, 80, InboundProtocol::Tcp)],
+        ),
+    );
+
+    let bindings = [(localhost.to_string(), host_port, 80, "tcp".into())];
+    runtime
+        .start_test_port_forwarding("test-machine", "web", &bindings)
+        .await
+        .expect_err("a stale ownership record must not hide the occupied port");
+    assert!(!runtime.inbound_rules.read().await.contains_key("web"));
+}
+
 /// A VM restart (resize, backend switch) hands the runtime a fresh listener
 /// manager. The previous incarnation's listeners must go with it: they
 /// inject into a datapath that is gone, and they hold the very host ports
@@ -591,14 +824,12 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
         .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
         .await
         .unwrap();
-    runtime
-        .adopt_inbound_listener_manager("test-machine", previous)
-        .await;
+    runtime.adopt_test_manager("test-machine", previous).await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),
         (
             "test-machine".to_owned(),
-            vec![(localhost, 0, InboundProtocol::Tcp)],
+            vec![(localhost, 0, 80, InboundProtocol::Tcp)],
         ),
     );
     assert!(accepting(host_port).await);
@@ -606,7 +837,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
     // The VM comes back: its new VMM hands over a manager of its own.
     let (fresh_tx, _fresh_rx) = tokio::sync::mpsc::channel(4);
     runtime
-        .adopt_inbound_listener_manager("test-machine", InboundListenerManager::new(fresh_tx))
+        .adopt_test_manager("test-machine", InboundListenerManager::new(fresh_tx))
         .await;
 
     assert!(
@@ -621,7 +852,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
     // And publishing binds again, on the new VM.
     let publish = [("127.0.0.1".to_owned(), 0u16, 80, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "web", &publish)
+        .start_test_port_forwarding("test-machine", "web", &publish)
         .await
         .expect("a publish binds on the new incarnation");
     runtime.stop_port_forwarding_by_id("web").await;
@@ -637,6 +868,8 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
 
     let _children = crate::test_support::CHILD_PROCESSES.read().await;
     let (runtime, _tmp) = networking_test_runtime();
+    let fixture = super::NetworkFixture::default();
+    let runtime = runtime.with_network_fixture(fixture.clone());
     let localhost = std::net::Ipv4Addr::LOCALHOST;
     let (commands_tx, _commands_rx) = tokio::sync::mpsc::channel(4);
     let mut manager = InboundListenerManager::new(commands_tx);
@@ -645,22 +878,32 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
         .await
         .unwrap();
     runtime
-        .adopt_inbound_listener_manager(super::DEFAULT_MACHINE_NAME, manager)
+        .adopt_test_manager(super::DEFAULT_MACHINE_NAME, manager)
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),
         (
             super::DEFAULT_MACHINE_NAME.to_owned(),
-            vec![(localhost, 0, InboundProtocol::Tcp)],
+            vec![(localhost, 0, 80, InboundProtocol::Tcp)],
         ),
     );
     runtime
         .register_dns("web", &["web.local".to_owned()], localhost.into())
-        .await;
-    runtime.register_container_alias("web-name", "web").await;
+        .await
+        .unwrap();
+    runtime
+        .register_container_alias("web-name", "web")
+        .await
+        .unwrap();
     assert!(accepting(host_port).await);
 
-    runtime.retire_system_vm_container_networking().await;
+    fixture.stop();
+    assert!(
+        runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
 
     assert!(
         !accepting(host_port).await,
@@ -750,16 +993,16 @@ fn resolve_bind_ip_defaults_and_loopback() {
 async fn machine_dns_is_published_under_the_local_domain_and_owned_apart_from_containers() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("dev", ip).await;
+    runtime.register_machine_dns("dev", ip).await.unwrap();
 
-    let hosts = runtime.network_manager.local_hosts_table();
-    assert_eq!(hosts.read().unwrap().get("dev"), Some(&ip));
-    assert_eq!(hosts.read().unwrap().get("dev.arcbox.local"), Some(&ip));
+    assert_eq!(dns_address(&runtime, "dev"), None);
+    assert_eq!(dns_address(&runtime, "dev.arcbox.local"), None);
+    assert_eq!(dns_address(&runtime, "dev.machine.arcbox.local"), Some(ip));
     assert!(runtime.registered_container_ids().await.is_empty());
     assert_eq!(runtime.registered_machine_dns_names().await, vec!["dev"]);
 
     runtime.deregister_machine_dns("dev").await;
-    assert!(hosts.read().unwrap().get("dev.arcbox.local").is_none());
+    assert_eq!(dns_address(&runtime, "dev.machine.arcbox.local"), None);
     assert_eq!(
         runtime.registered_machine_dns_names().await,
         Vec::<String>::new()
@@ -773,22 +1016,33 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
     let (runtime, _tmp) = networking_test_runtime();
     assert_eq!(
         runtime.machine_dns_name("dev").as_deref(),
-        Some("dev.arcbox.local")
+        Some("dev.machine.arcbox.local")
     );
     assert_eq!(
         runtime.machine_dns_name("my_box.v2").as_deref(),
-        Some("my-box-v2.arcbox.local")
+        Some("my-box-v2.machine.arcbox.local")
     );
-    runtime.network_manager().set_dns_domain("test.local");
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = Runtime::new(Config {
+        data_dir: directory.path().to_owned(),
+        network: crate::config::NetworkConfig {
+            dns_domain: "test.local".parse().unwrap(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
     assert_eq!(
         runtime.machine_dns_name("dev").as_deref(),
-        Some("dev.test.local")
+        Some("dev.machine.test.local")
     );
 
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("my_box.v2", ip).await;
-    let hosts = runtime.network_manager.local_hosts_table();
-    assert_eq!(hosts.read().unwrap().get("my-box-v2.test.local"), Some(&ip));
+    runtime.register_machine_dns("my_box.v2", ip).await.unwrap();
+    assert_eq!(
+        dns_address(&runtime, "my-box-v2.machine.test.local"),
+        Some(ip)
+    );
     assert_eq!(
         runtime.registered_machine_dns_names().await,
         vec!["my_box.v2"]
@@ -803,8 +1057,11 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
 async fn a_machine_sharing_a_hostname_with_another_machine_is_detected() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("my_box", ip).await;
-    runtime.register_dns("c0ffee", &["my-box".into()], ip).await;
+    runtime.register_machine_dns("my_box", ip).await.unwrap();
+    runtime
+        .register_dns("c0ffee", &["my-box".into()], ip)
+        .await
+        .unwrap();
 
     assert_eq!(
         runtime.machine_holding_hostname("my-box", "my-box").await,

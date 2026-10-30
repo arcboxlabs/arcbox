@@ -52,6 +52,35 @@ pub struct PortBinding {
     #[prost(string, tag = "4")]
     pub host_ip: ::prost::alloc::string::String,
 }
+/// Selection for one machine web protocol.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WebPortPolicy {
+    #[prost(oneof = "web_port_policy::Selection", tags = "1, 2, 3")]
+    pub selection: ::core::option::Option<web_port_policy::Selection>,
+}
+/// Nested message and enum types in `WebPortPolicy`.
+pub mod web_port_policy {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Selection {
+        /// Discover a backend automatically.
+        #[prost(message, tag = "1")]
+        Auto(super::Empty),
+        /// Disable the protocol.
+        #[prost(message, tag = "2")]
+        Off(super::Empty),
+        /// Backend port, 1 through 65535. HTTPS expects native TLS on this port.
+        #[prost(uint32, tag = "3")]
+        Port(u32),
+    }
+}
+/// Complete backend policies; these fields do not report installed routes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebPorts {
+    #[prost(message, optional, tag = "1")]
+    pub http_port: ::core::option::Option<WebPortPolicy>,
+    #[prost(message, optional, tag = "2")]
+    pub https_port: ::core::option::Option<WebPortPolicy>,
+}
 /// Resource limits for containers.
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ResourceLimits {
@@ -1341,12 +1370,12 @@ pub struct TerminalSize {
     #[prost(uint32, tag = "2")]
     pub height: u32,
 }
-/// Daemon startup progress and infrastructure health.
+/// Host startup progress and independent infrastructure health.
 /// Allows the desktop app (or any gRPC client) to observe daemon readiness
 /// without managing its lifecycle.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupStatus {
-    /// Current daemon phase.
+    /// Current host phase. READY does not imply System runtime readiness.
     #[prost(enumeration = "setup_status::Phase", tag = "1")]
     pub phase: i32,
     /// Whether the DNS resolver file is installed.
@@ -1385,22 +1414,25 @@ pub struct SetupStatus {
     /// Current or most recent recovery operation, including terminal results.
     #[prost(message, optional, tag = "10")]
     pub storage_recovery: ::core::option::Option<StorageRecoveryProgress>,
+    /// Local HTTPS trust does not gate VM or Docker readiness.
+    #[prost(message, optional, tag = "11")]
+    pub local_https: ::core::option::Option<LocalHttpsStatus>,
+    /// System runtime admission is independent of host and local HTTPS readiness.
+    #[prost(message, optional, tag = "12")]
+    pub system_runtime: ::core::option::Option<SystemRuntimeStatus>,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
-    /// Daemon startup phases.
+    /// Host startup phases. System runtime state is reported separately.
     ///
-    /// Numbers follow the order phases were introduced, NOT the order they
-    /// occur in (DOWNLOADING_ASSETS = 8 precedes READY = 6), so match on the
-    /// value and never compare ordinals. The happy path is:
+    /// Numbers follow the order phases were introduced, not startup order.
+    /// Match on the enum; never compare numeric values. Happy-path sequence:
     ///
-    ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> \[DOWNLOADING_ASSETS\]
-    ///    -> ASSETS_READY -> \[VM_STARTING -> VM_READY\] -> NETWORK_READY -> READY
+    ///    INITIALIZING -> \[CLEANING_UP -> INITIALIZING\] -> ASSETS_READY
+    ///    -> NETWORK_READY -> READY
     ///
-    /// Bracketed steps are conditional: CLEANING_UP only when a displaced
-    /// daemon's resources must be released, DOWNLOADING_ASSETS only when boot
-    /// assets are missing, and the VM pair only when the Linux VM is enabled
-    /// (a --no-linux-vm daemon boots no guest and publishes neither). FAILED
+    /// CLEANING_UP applies when a displaced daemon's resources must be released.
+    /// System asset downloads and VM phases are not published here. FAILED
     /// can replace any of them. A phase already passed before a client
     /// subscribes is simply never seen, so treat an unobserved phase as
     /// unknown rather than waiting for it.
@@ -1410,24 +1442,19 @@ pub mod setup_status {
         Unspecified = 0,
         /// Host directories, config, and sockets are being prepared.
         Initializing = 1,
-        /// Kernel, rootfs, and guest binaries are present and verified.
+        /// Available bundle and cached assets are staged for host admission.
         AssetsReady = 2,
-        /// The System VM is booting. Guest binaries are already staged by
-        /// this point, so the phase covers the guest boot and nothing else.
+        /// Unused. Observe system_runtime for System VM startup.
         VmStarting = 3,
-        /// The System VM booted and its guest agent answered, so the VM
-        /// accepts commands. Its container runtime may still be starting.
+        /// Unused. Observe system_runtime for System VM readiness.
         VmReady = 4,
-        /// The host services this daemon promises are up: DNS and, with a Linux
-        /// VM, Docker plus any explicitly requested Kubernetes proxy are bound.
-        /// The canonical best-effort 16443 proxy remains the exception: a port
-        /// conflict leaves Kubernetes RPCs unavailable but does not fail startup.
+        /// Host networking services are bound. System services may still be starting.
         NetworkReady = 5,
-        /// Startup complete.
+        /// Host preparation is complete. Machine operations are available.
         Ready = 6,
         /// Reserved; never published.
         Degraded = 7,
-        /// Boot assets are being downloaded.
+        /// Unused. Observe system_runtime for System asset preparation.
         DownloadingAssets = 8,
         /// Waiting for a displaced daemon to release its disk images.
         CleaningUp = 9,
@@ -1469,6 +1496,65 @@ pub mod setup_status {
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 "CLEANING_UP" => Some(Self::CleaningUp),
                 "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Readiness of the System VM and its dependent services.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SystemRuntimeStatus {
+    #[prost(enumeration = "system_runtime_status::State", tag = "1")]
+    pub state: i32,
+    /// Failure cause or current startup detail. Empty when no detail applies.
+    #[prost(string, tag = "2")]
+    pub reason: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `SystemRuntimeStatus`.
+pub mod system_runtime_status {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum State {
+        Unspecified = 0,
+        /// System VM autostart is disabled.
+        Disabled = 1,
+        /// System VM assets and runtime binaries are being prepared.
+        Starting = 2,
+        /// System services accept requests.
+        Ready = 3,
+        /// System startup or operation failed. Host services remain available.
+        Failed = 4,
+        /// Guest binaries are staged and the System VM is booting.
+        VmStarting = 5,
+        /// The guest agent answered. Docker runtime readiness is still pending.
+        VmReady = 6,
+    }
+    impl State {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STATE_UNSPECIFIED",
+                Self::Disabled => "DISABLED",
+                Self::Starting => "STARTING",
+                Self::Ready => "READY",
+                Self::Failed => "FAILED",
+                Self::VmStarting => "VM_STARTING",
+                Self::VmReady => "VM_READY",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "DISABLED" => Some(Self::Disabled),
+                "STARTING" => Some(Self::Starting),
+                "READY" => Some(Self::Ready),
+                "FAILED" => Some(Self::Failed),
+                "VM_STARTING" => Some(Self::VmStarting),
+                "VM_READY" => Some(Self::VmReady),
                 _ => None,
             }
         }
@@ -1572,6 +1658,252 @@ pub mod storage_recovery_progress {
                 "RESTARTING" => Some(Self::Restarting),
                 "VERIFYING" => Some(Self::Verifying),
                 "COMPLETE" => Some(Self::Complete),
+                "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListWebServicesRequest {
+    /// Empty lists exact aliases. A concrete name returns at most one current service.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+}
+/// Installed routes validated against current DNS ownership.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListWebServicesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub services: ::prost::alloc::vec::Vec<WebService>,
+}
+/// A runtime-confirmed or explicitly configured web service.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WebService {
+    /// Stable resource key: container:<id>, machine:<name>, or k8s:<namespace>/<name>.
+    #[prost(string, tag = "1")]
+    pub owner: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "3")]
+    pub domains: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Empty when the route is absent. Clients must not reconstruct these URLs from ports.
+    #[prost(string, tag = "4")]
+    pub http_url: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub https_url: ::prost::alloc::string::String,
+    #[prost(enumeration = "web_service::HttpsMode", tag = "6")]
+    pub https_mode: i32,
+    /// Upstream ports; these are not the ports in the public URLs.
+    #[prost(uint32, tag = "7")]
+    pub http_port: u32,
+    #[prost(uint32, tag = "8")]
+    pub https_port: u32,
+}
+/// Nested message and enum types in `WebService`.
+pub mod web_service {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum HttpsMode {
+        None = 0,
+        Managed = 1,
+        Passthrough = 2,
+    }
+    impl HttpsMode {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::None => "NONE",
+                Self::Managed => "MANAGED",
+                Self::Passthrough => "PASSTHROUGH",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "NONE" => Some(Self::None),
+                "MANAGED" => Some(Self::Managed),
+                "PASSTHROUGH" => Some(Self::Passthrough),
+                _ => None,
+            }
+        }
+    }
+}
+/// The daemon selects the profile; clients cannot supply a filesystem path.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrepareLocalCaRotationRequest {
+    /// SHA-256 fingerprint of the current root observed by the client.
+    #[prost(string, tag = "1")]
+    pub expected_current_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalCaRotation {
+    /// Exact public certificates for login-session trust migration. No private keys.
+    #[prost(bytes = "vec", tag = "1")]
+    pub previous_certificate_der: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub candidate_certificate_der: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CommitLocalCaRotationRequest {
+    /// Fingerprints pin both sides of the prepared rotation.
+    #[prost(string, tag = "1")]
+    pub expected_old_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub expected_new_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalHttpsStatus {
+    #[prost(enumeration = "local_https_status::TrustState", tag = "1")]
+    pub trust_state: i32,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    /// Uppercase colon-separated SHA-256 fingerprint of the public root.
+    #[prost(string, tag = "3")]
+    pub certificate_sha256: ::prost::alloc::string::String,
+    /// UTC Unix seconds; zero when no certificate is available.
+    #[prost(int64, tag = "4")]
+    pub certificate_not_before_unix_seconds: i64,
+    #[prost(int64, tag = "5")]
+    pub certificate_not_after_unix_seconds: i64,
+    #[prost(bool, tag = "6")]
+    pub legacy_user_trust: bool,
+    /// Certificate lifetime is independent of native trust and publication.
+    #[prost(enumeration = "local_https_status::CertificateState", tag = "7")]
+    pub certificate_state: i32,
+}
+/// Nested message and enum types in `LocalHttpsStatus`.
+pub mod local_https_status {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum TrustState {
+        Unspecified = 0,
+        /// The current CA needs explicit authorization or migration.
+        Untrusted = 1,
+        /// The current, valid CA has TLS-only Admin trust and no User override.
+        Trusted = 2,
+        /// Inspection or certificate preparation failed. See message.
+        Error = 3,
+        /// This daemon does not provide automatic HTTPS.
+        Unavailable = 4,
+    }
+    impl TrustState {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "TRUST_STATE_UNSPECIFIED",
+                Self::Untrusted => "UNTRUSTED",
+                Self::Trusted => "TRUSTED",
+                Self::Error => "ERROR",
+                Self::Unavailable => "UNAVAILABLE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "TRUST_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "UNTRUSTED" => Some(Self::Untrusted),
+                "TRUSTED" => Some(Self::Trusted),
+                "ERROR" => Some(Self::Error),
+                "UNAVAILABLE" => Some(Self::Unavailable),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum CertificateState {
+        /// Certificate inspection has not completed or failed.
+        Unknown = 0,
+        Missing = 1,
+        Valid = 2,
+        /// The certificate is valid and expires within 30 days.
+        RenewalDue = 3,
+        Expired = 4,
+        /// Check the host clock before replacing the certificate.
+        NotYetValid = 5,
+    }
+    impl CertificateState {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unknown => "UNKNOWN",
+                Self::Missing => "MISSING",
+                Self::Valid => "VALID",
+                Self::RenewalDue => "RENEWAL_DUE",
+                Self::Expired => "EXPIRED",
+                Self::NotYetValid => "NOT_YET_VALID",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNKNOWN" => Some(Self::Unknown),
+                "MISSING" => Some(Self::Missing),
+                "VALID" => Some(Self::Valid),
+                "RENEWAL_DUE" => Some(Self::RenewalDue),
+                "EXPIRED" => Some(Self::Expired),
+                "NOT_YET_VALID" => Some(Self::NotYetValid),
+                _ => None,
+            }
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalHttpsAccess {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub certificate_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgeHttpsAccessRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Clients persist CANCELLED and FAILED per profile and CA fingerprint before acknowledgement.
+    /// An explicit Enable or Repair action may bypass that suppression.
+    #[prost(enumeration = "acknowledge_https_access_request::Outcome", tag = "2")]
+    pub outcome: i32,
+}
+/// Nested message and enum types in `AcknowledgeHttpsAccessRequest`.
+pub mod acknowledge_https_access_request {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Outcome {
+        Unspecified = 0,
+        Completed = 1,
+        Cancelled = 2,
+        Failed = 3,
+    }
+    impl Outcome {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "OUTCOME_UNSPECIFIED",
+                Self::Completed => "COMPLETED",
+                Self::Cancelled => "CANCELLED",
+                Self::Failed => "FAILED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+                "COMPLETED" => Some(Self::Completed),
+                "CANCELLED" => Some(Self::Cancelled),
                 "FAILED" => Some(Self::Failed),
                 _ => None,
             }
@@ -1952,6 +2284,18 @@ pub struct SetMachineResourcesResponse {
     #[prost(uint64, tag = "5")]
     pub host_memory: u64,
 }
+/// Request to save machine web backend selection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineWebPortsRequest {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Omission preserves the saved HTTP selection.
+    #[prost(message, optional, tag = "2")]
+    pub http_port: ::core::option::Option<WebPortPolicy>,
+    /// Omission preserves the saved HTTPS selection.
+    #[prost(message, optional, tag = "3")]
+    pub https_port: ::core::option::Option<WebPortPolicy>,
+}
 /// Request to set or clear the default machine.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetDefaultMachineRequest {
@@ -2033,6 +2377,9 @@ pub struct MachineInfo {
     /// Directory mounts.
     #[prost(message, repeated, tag = "10")]
     pub mounts: ::prost::alloc::vec::Vec<DirectoryMount>,
+    /// Saved backend selection, independent of installed routes.
+    #[prost(message, optional, tag = "11")]
+    pub web_ports: ::core::option::Option<MachineWebPorts>,
 }
 /// Machine hardware configuration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2066,12 +2413,12 @@ pub struct MachineNetwork {
     #[prost(string, tag = "5")]
     pub bridge_mac_address: ::prost::alloc::string::String,
     /// IPv4 address of the bridge NIC: the address the Mac reaches directly
-    /// and the one `<machine>.arcbox.local` resolves to. Empty until the
+    /// and the one `<machine>.machine.<local domain>` resolves to. Empty until the
     /// machine has reported it.
     #[prost(string, tag = "6")]
     pub bridge_ip_address: ::prost::alloc::string::String,
     /// The name the host's DNS answers for this machine while it runs
-    /// (`<machine>.<local domain>`). Empty when the machine has no bridge
+    /// (`<machine>.machine.<local domain>`). Empty when the machine has no bridge
     /// address to register.
     #[prost(string, tag = "7")]
     pub dns_name: ::prost::alloc::string::String,
@@ -3344,6 +3691,258 @@ pub struct AgentPingResponse {
     #[prost(uint32, tag = "3")]
     pub protocol_version: u32,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListGuestWebServicesRequest {
+    /// Empty lists exact aliases. A concrete name resolves its current installed route.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListGuestWebServicesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub services: ::prost::alloc::vec::Vec<GuestWebService>,
+}
+/// A ready guest endpoint, selected by its resource kind.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestWebService {
+    #[prost(oneof = "guest_web_service::Route", tags = "1, 2, 3")]
+    pub route: ::core::option::Option<guest_web_service::Route>,
+}
+/// Nested message and enum types in `GuestWebService`.
+pub mod guest_web_service {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Route {
+        #[prost(message, tag = "1")]
+        Container(super::ContainerWebService),
+        #[prost(message, tag = "2")]
+        Index(super::IndexWebService),
+        #[prost(message, tag = "3")]
+        Machine(super::MachineWebService),
+    }
+}
+/// An installed endpoint owned by the responding distro machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebService {
+    /// The host's machine name, before hostname normalization.
+    #[prost(string, tag = "1")]
+    pub machine_name: ::prost::alloc::string::String,
+    /// The one exact canonical machine DNS name assigned by the host.
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// Zero means no managed HTTP route.
+    #[prost(uint32, tag = "4")]
+    pub http_port: u32,
+    #[prost(oneof = "machine_web_service::HttpsBackend", tags = "5, 6")]
+    pub https_backend: ::core::option::Option<machine_web_service::HttpsBackend>,
+}
+/// Nested message and enum types in `MachineWebService`.
+pub mod machine_web_service {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum HttpsBackend {
+        /// Preserve the application's TLS handshake and certificate.
+        #[prost(uint32, tag = "5")]
+        NativeHttpsPort(u32),
+        /// Terminate TLS in the guest, then relay HTTP to this port.
+        #[prost(uint32, tag = "6")]
+        TerminatedHttpPort(u32),
+    }
+}
+/// The builtin index owns the configured apex at the guest bridge gateway.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IndexWebService {
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// HTTP is always available while this endpoint is present.
+    #[prost(bool, tag = "3")]
+    pub managed_https: bool,
+}
+/// The guest releases waiting handshakes after three seconds without renewal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileHttpsAccessRequest {
+    /// A new identifier clears the previous access. Reuse it for polls and cancellation.
+    #[prost(string, tag = "1")]
+    pub observation_id: ::prost::alloc::string::String,
+    /// Exact Mac source addresses. Other clients never wait or produce an access.
+    #[prost(string, repeated, tag = "2")]
+    pub host_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// False releases every waiting handshake without changing certificate validation.
+    #[prost(bool, tag = "3")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileHttpsAccessResponse {
+    /// Empty until a managed ClientHello passes the guest's DNS ownership check.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub destination_ip: ::prost::alloc::string::String,
+    /// Zero means no access. Concurrent accesses retain the first event's sequence.
+    #[prost(uint64, tag = "3")]
+    pub sequence: u64,
+}
+/// Host-only replacement of this guest's ArcBox client trust anchor.
+/// The host sends the active Keychain certificate. CA unavailability sends no request.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileGuestTrustRequest {
+    /// An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    #[prost(oneof = "reconcile_guest_trust_request::Desired", tags = "1, 2")]
+    pub desired: ::core::option::Option<reconcile_guest_trust_request::Desired>,
+}
+/// Nested message and enum types in `ReconcileGuestTrustRequest`.
+pub mod reconcile_guest_trust_request {
+    /// An unset desired state is invalid. Removal requires an explicit guest opt-out.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Desired {
+        #[prost(bytes, tag = "1")]
+        CertificatePem(::prost::alloc::vec::Vec<u8>),
+        #[prost(message, tag = "2")]
+        Remove(super::Empty),
+    }
+}
+/// Acknowledges completed installation or removal, never a queued operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileGuestTrustResponse {
+    #[prost(oneof = "reconcile_guest_trust_response::Applied", tags = "1, 2")]
+    pub applied: ::core::option::Option<reconcile_guest_trust_response::Applied>,
+}
+/// Nested message and enum types in `ReconcileGuestTrustResponse`.
+pub mod reconcile_guest_trust_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Applied {
+        /// SHA-256 of installed DER, in uppercase colon-separated hex.
+        #[prost(string, tag = "1")]
+        InstalledSha256(::prost::alloc::string::String),
+        #[prost(message, tag = "2")]
+        Removed(super::Empty),
+    }
+}
+/// Owns this connection until EOF; only the host may open one on the System VM.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenInstanceAuthorityRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenInstanceAuthorityResponse {}
+/// Replaces every instance root after the exclusive connection has opened.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReplaceInstanceAuthorityRequest {
+    /// Source authority lifetime; strictly increases within one connection.
+    #[prost(uint64, tag = "1")]
+    pub authority_revision: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub roots: ::prost::alloc::vec::Vec<InstanceAuthorityRoot>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstanceAuthorityRoot {
+    #[prost(string, tag = "1")]
+    pub root: ::prost::alloc::string::String,
+    #[prost(enumeration = "instance_authority_root::Target", tag = "2")]
+    pub target: i32,
+    /// OTHER requires a nonzero host loopback u16 port; every other target uses zero.
+    #[prost(uint32, tag = "3")]
+    pub dns_port: u32,
+}
+/// Nested message and enum types in `InstanceAuthorityRoot`.
+pub mod instance_authority_root {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Target {
+        Unspecified = 0,
+        Current = 1,
+        Other = 2,
+        Unavailable = 3,
+    }
+    impl Target {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "UNSPECIFIED",
+                Self::Current => "CURRENT",
+                Self::Other => "OTHER",
+                Self::Unavailable => "UNAVAILABLE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNSPECIFIED" => Some(Self::Unspecified),
+                "CURRENT" => Some(Self::Current),
+                "OTHER" => Some(Self::Other),
+                "UNAVAILABLE" => Some(Self::Unavailable),
+                _ => None,
+            }
+        }
+    }
+}
+/// Confirms the complete snapshot was installed before the response was sent.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstanceAuthorityAck {
+    #[prost(uint64, tag = "1")]
+    pub authority_revision: u64,
+}
+/// Fixes identity for one host-owned distro-machine configuration connection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenMachineWebRequest {
+    /// Raw machine name before hostname normalization.
+    #[prost(string, tag = "1")]
+    pub machine_name: ::prost::alloc::string::String,
+    /// Exact canonical DNS name assigned by the host.
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenMachineWebResponse {}
+/// Replaces the complete policy and public root. Revisions are positive and strictly increase.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReplaceMachineWebRequest {
+    #[prost(uint64, tag = "1")]
+    pub source_revision: u64,
+    #[prost(message, optional, tag = "2")]
+    pub ports: ::core::option::Option<MachineWebPorts>,
+    /// Absence disables managed certificate issuance without changing guest client trust.
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub ca_certificate_pem: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+}
+/// Confirms validated session configuration, not installed routing.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebAck {
+    #[prost(uint64, tag = "1")]
+    pub source_revision: u64,
+}
+/// An installed route selected through protocol discovery or an explicit port label.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContainerWebService {
+    #[prost(string, tag = "1")]
+    pub container_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub hostnames: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// Zero means no managed HTTP route.
+    #[prost(uint32, tag = "4")]
+    pub http_port: u32,
+    #[prost(oneof = "container_web_service::HttpsBackend", tags = "5, 6")]
+    pub https_backend: ::core::option::Option<container_web_service::HttpsBackend>,
+}
+/// Nested message and enum types in `ContainerWebService`.
+pub mod container_web_service {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum HttpsBackend {
+        /// Preserve the application's TLS handshake and certificate.
+        #[prost(uint32, tag = "5")]
+        NativeHttpsPort(u32),
+        /// Terminate TLS in the guest, then relay HTTP to this port.
+        #[prost(uint32, tag = "6")]
+        TerminatedHttpPort(u32),
+    }
+}
 /// System information from the guest.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SystemInfo {
@@ -3397,9 +3996,8 @@ pub struct SystemInfo {
     pub distro_init_pending: bool,
     /// IPv4 address of the guest's bridge NIC (the vmnet interface the Mac
     /// reaches directly), or empty when the guest has none or it has no
-    /// address yet. The host registers `<machine>.arcbox.local` at this
-    /// address; `ip_addresses` keeps listing every interface, so an older
-    /// host that ignores this field sees exactly what it saw before.
+    /// address yet. The host registers `<machine>.machine.<local domain>`
+    /// at this address; `ip_addresses` lists every interface.
     #[prost(string, tag = "13")]
     pub bridge_ip_address: ::prost::alloc::string::String,
 }

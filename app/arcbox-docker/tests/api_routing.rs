@@ -48,10 +48,15 @@ fn router() -> (axum::Router, TempDir) {
 /// normalises `/v1.xx/...` before route matching.
 async fn status_of(method: &str, uri: &str, strip_version: bool) -> Option<StatusCode> {
     let (app, _tmp) = router();
+    let body = if uri.ends_with("/connect") || uri.ends_with("/disconnect") {
+        Body::from(r#"{"Container":"web"}"#)
+    } else {
+        Body::empty()
+    };
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
-        .body(Body::empty())
+        .body(body)
         .unwrap();
     if strip_version {
         request = strip_api_version_prefix(request);

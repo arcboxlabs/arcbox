@@ -1,11 +1,19 @@
-//! DNS packet parsing and response building.
+//! Shared DNS ownership, web URLs, container metadata, and packet handling.
 //!
-//! Platform-independent, no-std-compatible (except `std::net` types).
+//! Platform-independent policy and packet handling with standard-library types.
 //! Compiles under `aarch64-unknown-linux-musl` for use in both host and guest.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::RwLock;
+
+mod names;
+pub use names::NamePattern;
+
+pub mod claims;
+pub mod container;
+pub mod registry;
+pub mod web_services;
 
 /// Shared local-hosts table used by both host-side and VMM-side DNS forwarders.
 pub type LocalHostsTable = RwLock<HashMap<String, IpAddr>>;
@@ -30,41 +38,52 @@ pub enum DnsError {
     #[error("query truncated at offset {offset}")]
     Truncated { offset: usize },
 
-    #[error("unsupported query type: {0}")]
-    UnsupportedType(u16),
-
     #[error("unsupported query class: {0}")]
     UnsupportedClass(u16),
 }
 
 // ── Record types ────────────────────────────────────────────────────────────
 
-/// DNS record type.
+/// DNS record type, preserving unrecognized values for local ownership checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
 pub enum DnsRecordType {
-    A = 1,
-    Cname = 5,
-    Ptr = 12,
-    Mx = 15,
-    Txt = 16,
-    Aaaa = 28,
-    Srv = 33,
+    A,
+    Cname,
+    Ptr,
+    Mx,
+    Txt,
+    Aaaa,
+    Srv,
+    /// A wire type without a dedicated variant, including HTTPS and SVCB.
+    Unknown(u16),
 }
 
-impl TryFrom<u16> for DnsRecordType {
-    type Error = u16;
-
-    fn try_from(value: u16) -> Result<Self, u16> {
+impl From<u16> for DnsRecordType {
+    fn from(value: u16) -> Self {
         match value {
-            1 => Ok(Self::A),
-            5 => Ok(Self::Cname),
-            12 => Ok(Self::Ptr),
-            15 => Ok(Self::Mx),
-            16 => Ok(Self::Txt),
-            28 => Ok(Self::Aaaa),
-            33 => Ok(Self::Srv),
-            other => Err(other),
+            1 => Self::A,
+            5 => Self::Cname,
+            12 => Self::Ptr,
+            15 => Self::Mx,
+            16 => Self::Txt,
+            28 => Self::Aaaa,
+            33 => Self::Srv,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<DnsRecordType> for u16 {
+    fn from(value: DnsRecordType) -> Self {
+        match value {
+            DnsRecordType::A => 1,
+            DnsRecordType::Cname => 5,
+            DnsRecordType::Ptr => 12,
+            DnsRecordType::Mx => 15,
+            DnsRecordType::Txt => 16,
+            DnsRecordType::Aaaa => 28,
+            DnsRecordType::Srv => 33,
+            DnsRecordType::Unknown(value) => value,
         }
     }
 }
@@ -91,7 +110,7 @@ pub enum DnsResponseCode {
 pub struct DnsQuery {
     /// Decoded query name (e.g. `"my-nginx.arcbox.local"`).
     pub name: String,
-    /// Query type (A, AAAA, etc.).
+    /// Query type, including unrecognized wire values.
     pub qtype: DnsRecordType,
     /// Raw 12-byte DNS header.
     pub raw_header: Vec<u8>,
@@ -145,7 +164,7 @@ impl DnsQuery {
         let qtype_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let qclass_raw = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-        let qtype = DnsRecordType::try_from(qtype_raw).map_err(DnsError::UnsupportedType)?;
+        let qtype = DnsRecordType::from(qtype_raw);
 
         if qclass_raw != 1 {
             return Err(DnsError::UnsupportedClass(qclass_raw));
@@ -271,7 +290,7 @@ pub fn build_nxdomain(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
 
 /// Builds a SERVFAIL response.
 ///
-/// Does NOT require full query parsing — works even for unsupported query types.
+/// Does not require question parsing; also works for malformed question sections.
 /// Copies the raw header and flips QR/RCODE bits.
 pub fn build_servfail(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
     if query_bytes.len() < HEADER_LEN {

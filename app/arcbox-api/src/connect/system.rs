@@ -1,10 +1,10 @@
-//! System service — daemon readiness, version, and diagnostics.
+//! System service — independent host/System readiness, version, and diagnostics.
 //!
 //! Provides setup status queries so the desktop app (or any client) can
 //! observe daemon readiness without managing its lifecycle.
 //!
-//! `GetVirtioDebug` is deliberately served from `early_runtime` rather than
-//! the ready handle: a boot that never reaches READY is its main use case.
+//! Diagnostics and web-route snapshots use `early_runtime`. Core checks each
+//! guest's readiness, so machine discovery does not wait for System VM startup.
 
 use std::sync::Arc;
 
@@ -30,6 +30,10 @@ const UPDATE_BUFFER: usize = 64;
 /// Observed by `SystemServiceImpl` to serve gRPC queries.
 #[derive(Debug, Clone)]
 pub struct SetupState {
+    /// Browser requests are independent of startup readiness and native trust mutation.
+    pub https_access: super::HttpsAccess,
+    /// The daemon's TLS worker owns CA mutations independently of VM readiness.
+    pub local_ca: super::LocalCaControl,
     /// Latest snapshot, for `GetSetupStatus` and for seeding a new stream.
     tx: Arc<watch::Sender<SetupStatus>>,
     /// Every update, in order.
@@ -49,10 +53,13 @@ impl SetupState {
         let initial = SetupStatus {
             phase: setup_status::Phase::Initializing.into(),
             message: "Daemon starting...".to_string(),
+            system_runtime: pb::SystemRuntimeStatus::default().into(),
             ..Default::default()
         };
         let (tx, _) = watch::channel(initial);
         Self {
+            https_access: super::HttpsAccess::default(),
+            local_ca: super::LocalCaControl::default(),
             tx: Arc::new(tx),
             updates: broadcast::channel(UPDATE_BUFFER).0,
         }
@@ -91,6 +98,18 @@ impl SetupState {
         });
     }
 
+    /// Publishes System readiness without changing host admission or HTTPS status.
+    pub fn set_system_runtime(&self, state: pb::system_runtime_status::State, reason: &str) {
+        self.publish(|s| {
+            s.system_runtime = pb::SystemRuntimeStatus {
+                state: state.into(),
+                reason: reason.to_owned(),
+                ..Default::default()
+            }
+            .into();
+        });
+    }
+
     /// Updates a specific infrastructure flag.
     pub fn set_dns_installed(&self, installed: bool) {
         self.publish(|s| s.dns_resolver_installed = installed);
@@ -123,6 +142,12 @@ impl SetupState {
         self.publish(|s| s.docker_tools_installed = installed);
     }
 
+    /// Publishes CA status without changing daemon or VM readiness.
+    pub fn set_local_https(&self, status: pb::LocalHttpsStatus) {
+        self.https_access.update_status(&status);
+        self.publish(|s| s.local_https = status.into());
+    }
+
     /// Returns the current snapshot plus a receiver for every update after it.
     ///
     /// Both are taken while holding the snapshot's read lock, which excludes
@@ -151,10 +176,10 @@ impl Default for SetupState {
 /// SystemService gRPC implementation.
 pub struct SystemServiceImpl {
     setup_state: Arc<SetupState>,
-    runtime: SharedRuntime,
-    /// Diagnostics handle, filled as soon as the runtime is constructed
-    /// (before the VM boots) so `GetVirtioDebug` can observe a stuck
-    /// boot while `runtime` is still empty.
+    system_runtime: SharedRuntime,
+    host_runtime: SharedRuntime,
+    /// Constructed Runtime for diagnostics and web discovery before System VM startup.
+    /// Core checks the captured guest's readiness for each web snapshot.
     early_runtime: SharedRuntime,
 }
 
@@ -162,12 +187,14 @@ impl SystemServiceImpl {
     /// Creates a new system service.
     pub fn new(
         setup_state: Arc<SetupState>,
-        runtime: SharedRuntime,
+        system_runtime: SharedRuntime,
+        host_runtime: SharedRuntime,
         early_runtime: SharedRuntime,
     ) -> Self {
         Self {
             setup_state,
-            runtime,
+            system_runtime,
+            host_runtime,
             early_runtime,
         }
     }
@@ -241,6 +268,32 @@ fn device_debug_to_proto(device: arcbox_core::DeviceDebug) -> pb::VirtioDeviceDe
               Router rather than named by callers"
 )]
 impl pb::SystemService for SystemServiceImpl {
+    async fn prepare_local_ca_rotation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::PrepareLocalCaRotationRequest>,
+    ) -> ServiceResult<pb::LocalCaRotation> {
+        let rotation = self
+            .setup_state
+            .local_ca
+            .prepare(request.to_owned_message())
+            .await?;
+        Response::ok(rotation)
+    }
+
+    async fn commit_local_ca_rotation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::CommitLocalCaRotationRequest>,
+    ) -> ServiceResult<pb::Empty> {
+        let response = self
+            .setup_state
+            .local_ca
+            .commit(request.to_owned_message())
+            .await?;
+        Response::ok(response)
+    }
+
     async fn recover_storage(
         &self,
         _ctx: RequestContext,
@@ -260,7 +313,7 @@ impl pb::SystemService for SystemServiceImpl {
             .ok_or_else(|| {
                 ConnectError::invalid_argument("action must be CHECK_ONLY or RECOVER")
             })?;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         let (initial, mut updates) = runtime
             .recover_storage(action)
             .await
@@ -287,6 +340,25 @@ impl pb::SystemService for SystemServiceImpl {
             }
         };
         Response::ok(Box::pin(stream))
+    }
+
+    async fn watch_https_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<ServiceStream<pb::LocalHttpsAccess>> {
+        Response::ok(self.setup_state.https_access.watch())
+    }
+
+    async fn acknowledge_https_access(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::AcknowledgeHttpsAccessRequest>,
+    ) -> ServiceResult<pb::Empty> {
+        self.setup_state
+            .https_access
+            .acknowledge(&request.to_owned_message())?;
+        Response::ok(pb::Empty::default())
     }
 
     async fn get_info(
@@ -381,12 +453,56 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::Empty>,
     ) -> ServiceResult<pb::SystemVmBackendInfo> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         let info = pb::SystemVmBackendInfo {
             backend: backend_to_proto(runtime.system_vm_backend()).into(),
             ..Default::default()
         };
         Response::ok(info)
+    }
+
+    async fn list_web_services(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::ListWebServicesRequest>,
+    ) -> ServiceResult<pb::ListWebServicesResponse> {
+        let hostname = request.hostname.to_ascii_lowercase();
+        let hostname = if hostname.is_empty() {
+            None
+        } else {
+            Some(hostname.parse().map_err(ConnectError::invalid_argument)?)
+        };
+        let services = self
+            .early_runtime
+            .ready()?
+            .list_web_services(hostname)
+            .await
+            .map_err(crate::ApiError::from)?;
+        Response::ok(pb::ListWebServicesResponse {
+            services,
+            ..Default::default()
+        })
+    }
+
+    async fn watch_web_services(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<ServiceStream<pb::ListWebServicesResponse>> {
+        let runtime = Arc::clone(self.early_runtime.ready()?);
+        Response::ok(super::web_services::watch(move || {
+            let runtime = Arc::clone(&runtime);
+            async move {
+                let services = runtime
+                    .list_web_services(None)
+                    .await
+                    .map_err(crate::ApiError::from)?;
+                Ok(pb::ListWebServicesResponse {
+                    services,
+                    ..Default::default()
+                })
+            }
+        }))
     }
 
     async fn get_virtio_debug(
@@ -435,7 +551,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ResolveContainerFsRequest>,
     ) -> ServiceResult<pb::ResolveContainerFsResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.system_runtime.ready()?;
         let req = request.to_owned_message();
         if req.container_id.is_empty() {
             return Err(ConnectError::invalid_argument(
@@ -459,7 +575,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::ResolveImageFsRequest>,
     ) -> ServiceResult<pb::ResolveImageFsResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.system_runtime.ready()?;
         let req = request.to_owned_message();
         if req.top_chain_id.is_empty() {
             return Err(ConnectError::invalid_argument(
@@ -482,7 +598,7 @@ impl pb::SystemService for SystemServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::Empty>,
     ) -> ServiceResult<pb::SystemVmResources> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.host_runtime.ready()?;
         Response::ok(resources_to_proto(runtime.system_vm_resources()))
     }
 
@@ -492,7 +608,7 @@ impl pb::SystemService for SystemServiceImpl {
         request: ServiceRequest<'_, pb::SetSystemVmResourcesRequest>,
     ) -> ServiceResult<pb::SystemVmResources> {
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
+        let runtime = self.host_runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         let resources = runtime
             .resize_system_vm(req.cpus, req.memory_mb)
             .await
@@ -515,7 +631,7 @@ impl pb::SystemService for SystemServiceImpl {
         let req = request.to_owned_message();
         let backend = backend_from_proto(req.backend.as_known().unwrap_or_default())
             .ok_or_else(|| ConnectError::invalid_argument("backend must be HV or VZ"))?;
-        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
+        let runtime = self.host_runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         runtime
             .switch_system_vm_backend(backend)
             .await
@@ -531,6 +647,72 @@ impl pb::SystemService for SystemServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn web_snapshots_use_the_early_handle_without_opening_other_runtime_rpcs() {
+        use arcbox_connect::v1::SystemService as _;
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+        use tokio_stream::StreamExt as _;
+
+        let (directory, early) = crate::connect::tests::storage_runtime();
+        let shared: SharedRuntime = Arc::default();
+        for (early_runtime, available) in [(Arc::default(), false), (early, true)] {
+            let service = SystemServiceImpl::new(
+                Arc::new(SetupState::new()),
+                shared.clone(),
+                Arc::default(),
+                early_runtime,
+            );
+            let bytes = bytes::Bytes::from(pb::ListWebServicesRequest::default().encode_to_vec());
+            let view = pb::ListWebServicesRequest::decode_view(&bytes).unwrap();
+            let listed = service
+                .list_web_services(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await;
+            let bytes = bytes::Bytes::from(pb::Empty::default().encode_to_vec());
+            let view = pb::Empty::decode_view(&bytes).unwrap();
+            let watching = service
+                .watch_web_services(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await;
+            if available {
+                assert_eq!(listed.unwrap().body.services, Vec::<pb::WebService>::new());
+                let mut stream = watching.unwrap().body;
+                let snapshot =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(snapshot.services, Vec::<pb::WebService>::new());
+            } else {
+                assert_eq!(
+                    listed.err().unwrap().code,
+                    connectrpc::ErrorCode::Unavailable
+                );
+                assert_eq!(
+                    watching.err().unwrap().code,
+                    connectrpc::ErrorCode::Unavailable
+                );
+            }
+            let error = service
+                .get_system_vm_backend(
+                    RequestContext::new(Default::default()),
+                    ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+            assert!(shared.get().is_none());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     /// Every update currently buffered for `updates`, as phases.
     fn drain(updates: &mut broadcast::Receiver<SetupStatus>) -> Vec<setup_status::Phase> {
@@ -611,5 +793,76 @@ mod tests {
         state.set_storage_health(None);
         assert!(!updates.try_recv().unwrap().storage_health.is_set());
         assert_eq!(state.current().phase, setup_status::Phase::Ready);
+    }
+
+    #[test]
+    fn https_authorization_does_not_change_docker_readiness() {
+        let state = SetupState::new();
+        state.set_phase(setup_status::Phase::Ready, "ready");
+        state.set_system_runtime(pb::system_runtime_status::State::Ready, "");
+        state.set_vm_running(true);
+        let (_, mut updates) = state.subscribe();
+        for trust in [
+            pb::local_https_status::TrustState::Untrusted,
+            pb::local_https_status::TrustState::Trusted,
+            pb::local_https_status::TrustState::Error,
+        ] {
+            state.set_local_https(pb::LocalHttpsStatus {
+                trust_state: trust.into(),
+                ..Default::default()
+            });
+            let update = updates.try_recv().unwrap();
+            assert_eq!(update.phase, setup_status::Phase::Ready);
+            assert_eq!(
+                update.system_runtime.state,
+                pb::system_runtime_status::State::Ready
+            );
+            assert!(update.vm_running);
+            assert_eq!(update.local_https.trust_state, trust);
+        }
+    }
+
+    #[test]
+    fn system_failure_preserves_host_https_and_storage_status() {
+        use pb::system_runtime_status::State;
+
+        let state = SetupState::new();
+        assert_eq!(
+            state.current().system_runtime.state,
+            State::StateUnspecified
+        );
+        state.set_phase(setup_status::Phase::Ready, "host ready");
+        state.set_local_https(pb::LocalHttpsStatus {
+            trust_state: pb::local_https_status::TrustState::Trusted.into(),
+            ..Default::default()
+        });
+        state.set_storage_recovery(pb::StorageRecoveryProgress {
+            storage_protected: true,
+            ..Default::default()
+        });
+        let (before, mut updates) = state.subscribe();
+
+        for (system, reason) in [
+            (State::Disabled, ""),
+            (State::Starting, "preparing System assets"),
+            (State::VmStarting, "booting System VM"),
+            (State::VmReady, "waiting for Docker"),
+            (State::Failed, "storage recovery required"),
+            (State::Ready, ""),
+        ] {
+            state.set_system_runtime(system, reason);
+            let update = updates.try_recv().unwrap();
+            assert_eq!(update.system_runtime.state, system);
+            assert_eq!(update.system_runtime.reason, reason);
+            assert_eq!(update.phase, before.phase);
+            assert_eq!(update.message, before.message);
+            assert_eq!(update.error, before.error);
+            assert_eq!(update.local_https, before.local_https);
+            assert_eq!(update.storage_recovery, before.storage_recovery);
+            assert_eq!(state.current(), update);
+        }
+        let (snapshot, mut after) = state.subscribe();
+        assert_eq!(snapshot.system_runtime.state, State::Ready);
+        assert!(after.try_recv().is_err());
     }
 }

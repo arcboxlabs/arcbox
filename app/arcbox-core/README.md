@@ -10,7 +10,9 @@ VM readiness, guest-agent connectivity, and networking/port-forward state.
 The main entry point is `Runtime`:
 
 - `Runtime::new(config)` creates the runtime synchronously
-- `runtime.init().await` prepares runtime state and assets
+- `runtime.prepare_host().await` prepares shared directories and removes the legacy shared CA key
+- `runtime.init_system(|_| {}).await` prepares System VM assets and starts the optional System VM
+- `runtime.init(|_| {}).await` runs both stages in order
 - `runtime.ensure_vm_ready().await` ensures the default machine is running
 
 ## Key Components
@@ -27,12 +29,28 @@ The main entry point is `Runtime`:
 use arcbox_core::{Config, Runtime};
 
 let runtime = Runtime::new(Config::default())?;
-runtime.init().await?;
+runtime.init(|_| {}).await?;
 let cid = runtime.ensure_vm_ready().await?;
 println!("default machine CID: {cid}");
 ```
 
+On macOS, initialization removes the legacy shared `tls/ca-key.pem` before the runtime becomes usable, including with System VM autostart disabled. A removal failure stops host preparation. Callers that start machines independently must await `prepare_host` before admitting machine operations; System VM initialization can then run separately. Public certificates and unrelated application files remain intact.
+
+Before calling `init_system`, await `reserve_system_startup` and retain the guard through System service startup and readiness publication. The reservation waits for an existing System VM operation; the caller may cancel that wait. Recovery and configuration requests still reject concurrent operations. `init` holds the reservation across System initialization for direct callers.
+
+Capture `Runtime::capture_web_guest` before collecting HTTPS observation addresses. Read the bridge through `web_guest_bridge_address` and pass the captured guest to `Arc<Runtime>::reconcile_https_access` for enable and disable requests. The call retains the expected VM through native connection and RPC cleanup. Cancel through the token and await completion before disabling the lease. Validate prompt ownership through `with_web_guest_claim`. The daemon starts independent System and distro machine observers before Runtime initialization, including when System VM autostart is disabled.
+
+Capture `Runtime::container_network_incarnation` before querying Kubernetes Services. Pass that identity and a cancellation token to `apply_kubernetes_load_balancers`; the runtime rejects old VM snapshots and withdraws interrupted publications before returning.
+
+`Runtime::set_machine_web_ports` saves typed HTTP and HTTPS backend policies for a user machine. Omitted fields retain their values. The System VM is excluded. This method does not apply routes.
+
+`Arc<Runtime>::list_web_services` concurrently lists containers and the index from the ready System VM, plus services from each running distro machine. A machine hostname selects its exact guest independently of System VM readiness. Each machine response must match the captured raw machine name, canonical hostname, IPv4 address, and current claim revision. Any guest error cancels and drains sibling queries, fails the snapshot, and terminates Watch. Results have stable owner and hostname ordering.
+
+`Arc<Runtime>::list_web_services` owns query cancellation and retains the captured VM through native connection and RPC cleanup. Each guest query has a five-second budget. A disconnected List or Watch caller cancels its query.
+
 ## Architecture
+
+`MigrationManager::prepare_migration` accepts a cancellation token. Cancellation closes command output pipes, kills and reaps the active Docker command, and prevents later planning commands. Callers must cancel and await preparation before releasing its owner. Migration execution has a separate lifecycle.
 
 ```text
 arcbox-api / arcbox-cli

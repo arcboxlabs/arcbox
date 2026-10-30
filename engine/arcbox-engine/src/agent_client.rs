@@ -9,18 +9,27 @@
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
 mod cancellation;
+mod guest_trust;
+mod instance_authority;
 mod machine_exec;
+mod machine_web;
+mod retained_session;
 mod sandbox_stream;
 mod shutdown;
 mod storage_check;
 mod storage_health;
 mod transport;
+mod web_services;
 mod wire;
 
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod kubernetes_tests;
 
+pub use self::instance_authority::InstanceAuthoritySession;
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
+pub use self::machine_web::MachineWebSession;
 pub use self::sandbox_stream::SandboxStream;
 use self::sandbox_stream::StreamKind;
 pub use self::storage_health::StorageHealthStream;
@@ -64,6 +73,7 @@ use buffa::Message;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// A chunk in a sandbox file-write stream.
 #[derive(Debug)]
@@ -158,11 +168,22 @@ impl AgentClient {
     /// The choice between this and [`Self::from_fd_blocking`] must come from
     /// the VM backend — both backends hand over unnamed AF_UNIX fds, so the
     /// socket domain cannot distinguish them.
-    #[cfg(target_os = "macos")]
     pub fn from_fd_async(cid: u32, fd: std::os::unix::io::RawFd) -> Result<Self> {
         let addr = VsockAddr::new(cid, AGENT_PORT);
+        #[cfg(target_os = "macos")]
         let transport = VsockTransport::from_raw_fd(fd, addr)
             .map_err(|e| EngineError::Machine(format!("invalid vsock fd: {e}")))?;
+        #[cfg(target_os = "linux")]
+        let transport = {
+            use arcbox_transport::vsock::VsockStream;
+            use std::os::fd::{FromRawFd, OwnedFd};
+
+            // SAFETY: the caller transfers the connected fd into this client.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            let stream = VsockStream::from_fd(fd)
+                .map_err(|e| EngineError::Machine(format!("invalid vsock fd: {e}")))?;
+            VsockTransport::from_stream(stream, addr)
+        };
         Ok(Self {
             cid,
             transport: AgentTransport::Async(transport),
@@ -993,20 +1014,39 @@ impl AgentClient {
 
     /// Lists the guest cluster's Services of type LoadBalancer.
     ///
-    /// Unary, so it works over the blocking HV transport too.
+    /// Returns the connected client after success so the poller can reuse the connection.
+    /// The caller must cancel through the token and await the blocking worker's completion.
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the guest cannot list
     /// Services (code 503 while the API server is not answering).
     pub async fn list_kubernetes_load_balancers(
-        &mut self,
-    ) -> Result<KubernetesLoadBalancersResponse> {
+        self,
+        cancelled: &CancellationToken,
+    ) -> Result<(Self, KubernetesLoadBalancersResponse)> {
         let payload = KubernetesLoadBalancersRequest::default().encode_to_vec();
-        self.unary_rpc(
-            MessageType::KubernetesLoadBalancersRequest,
-            &payload,
-            MessageType::KubernetesLoadBalancersResponse,
+        let blocking_payload = payload.clone();
+        self.cancellable(
+            cancelled,
+            move |mut client| {
+                let response = client.unary_rpc_blocking(
+                    MessageType::KubernetesLoadBalancersRequest,
+                    &blocking_payload,
+                    MessageType::KubernetesLoadBalancersResponse,
+                )?;
+                Ok((client, response))
+            },
+            move |mut client| async move {
+                let response = client
+                    .unary_rpc(
+                        MessageType::KubernetesLoadBalancersRequest,
+                        &payload,
+                        MessageType::KubernetesLoadBalancersResponse,
+                    )
+                    .await?;
+                Ok((client, response))
+            },
         )
         .await
     }

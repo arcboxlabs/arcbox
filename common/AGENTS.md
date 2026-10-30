@@ -109,6 +109,29 @@ distribution".
 
 ## Guest-facing parsers (VM path)
 
+- `arcbox-atomic-file::write` publishes private files with mode 0600. Use `write_public` only for content that every local user may read. Set final permissions through the temporary file descriptor before publication; propagate both write and durability errors.
+
+- `arcbox-local-ca` exposes public root metadata and certificate validity for
+  host status and guest renewal. Keep expired roots parseable for exact trust
+  revocation. Signing must reject inactive roots and cap leaf validity at the
+  root's bounds. Root private keys must remain in the macOS Keychain.
+  Certificate publication must not mutate trust. Preserve a trusted previous
+  root until an explicit login-session action revokes that exact certificate.
+  Remove the exposed private key before sharing the profile with a guest.
+  Verify returned leaves against the requested DNS name and current public root
+  before pairing them with guest keys.
+  New roots permit only `.local` descendants and exclude every IP address.
+  Signing must respect the loaded root's actual DNS scope, including retained narrower roots.
+  CA scope does not authorize DNS ownership or a resolver for the whole `.local` namespace.
+  Hold the profile operation lock during identity mutation or native trust changes.
+  Release the CLI lock before requesting a daemon operation; the daemon acquires the same lock.
+  Preserve `tls/identity.json` until every retained identity is untrusted and deleted.
+  Resolve certificates through recorded DER or exact public-key identity, never a shared subject name.
+
+- Use `arcbox-local-ca::reconcile_trust_bundle` to replace or remove the owned ArcBox PEM section. Pass `None` only for explicit removal. Validate the owned certificate before removal, including expired roots. Preserve every byte outside the section. Callers must check the incoming root's validity before installation.
+- `arcbox-local-ca::install_trust_anchor` atomically writes a validated ArcBox-only source file or durably removes that file. Reject symlinks and unowned content. The caller must serialize writes and complete its distro updater before acknowledging installation.
+- `arcbox-local-ca::install_trust_bundle` validates incoming validity and durably replaces an existing bundle at the caller-selected path. Serialize calls for that path. Reading may follow a symlink; atomic publication replaces the link and preserves its target. Do not canonicalize the destination. Every replay must confirm durability before acknowledging success. This helper does not select distro trust stores or run distro update tools.
+
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled
   input" rule applies here: every guest-programmed value is arbitrary bits, all
@@ -118,12 +141,39 @@ distribution".
 
 ## arcbox-dns — hand-rolled byte layout
 
+- `NamePattern` parses exact custom `.local` names and explicit descendant wildcards.
+  Keep exact names separate from wildcard bases; a wildcard never includes its apex.
+  Reuse `Domain` validation and preserve label boundaries in suffix matching.
+- `web_services::WebServiceUrls::project` generates public URLs from selected concrete aliases and installed protocol availability.
+  Validate DNS ownership and routes before projection. Managed HTTPS applies only to `.local` descendants; preserve alias order within each group.
+- `claims::resolve` selects an owner from one consistent registry snapshot.
+  Conflicting owners must not fall back to a broader wildcard.
+  Only generated Compose service claims may share a name; custom claims remain exclusive.
+  Resolve the selected owner's address and revision from the same snapshot.
+  Trusted reservations restrict both authority and pattern scope, even without a live route.
+  Delegated trees block every local claim, including more specific exact names.
+  Keep machine-wide lease acquisition outside this pure matcher.
+- `registry::Registry` stores claims, address, and revision together under the caller's lock.
+  Use `Registry::with_builtin_names` for exact host aliases, the index apex, and permanent machine/sandbox trees. Host and index reservations do not include descendants.
+  Generate resource names with `claims::ResourceScope`. Machine and sandbox names use their dedicated trees; do not retain flat or bare resource aliases.
+  Replace the complete owner registration; identical replacements preserve the revision and epoch.
+  Retain owners without addresses, but exclude their claims from selection.
+  Effective replacement or removal advances the epoch; removal and reinsertion must not reuse a revision.
+  Resolve the longest instance root before resource claims. Keep helper transport epochs outside the Registry. Effective instance changes advance the shared epoch and invalidate resolution revisions; identical snapshots do not.
+  Use `invalidate_instance_authorities` for an authority lifetime barrier. Retain known roots as unavailable and advance the revision even when no root is active.
+- `container::ContainerMetadata` reads Docker identity, aliases, and addresses from one inspect snapshot.
+  Choose the primary IPv4 address by network name, independent of JSON map order.
+  Use `NetworkSettings.Networks`; the deprecated top-level address is not authoritative.
+  Generate canonical claims with a caller-supplied suffix and authority; report each rejected name without rewriting the name.
+  One-off Compose containers claim only their unique name; custom CSV names remain exclusive even on service replicas.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.
+- Preserve unknown QTYPE values in `DnsRecordType::Unknown` so local ownership checks run before upstream forwarding.
+  Empty local responses and forwarded queries must preserve the original question bytes.
 - Only the first question is parsed (QDCOUNT ≥ 1); trailing OPT/EDNS ignored.
 - This crate compiles for the guest musl target (`aarch64-unknown-linux-musl`).
-  Keep it std-only (`std::net`); do not pull in host-only deps.
+  Keep dependencies platform-independent; do not pull in host-only dependencies.
 
 ## arcbox-xnu-net — macOS batch DGRAM kernel landmines
 

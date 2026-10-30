@@ -77,6 +77,8 @@ pub mod privileged {
     pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
     /// Helper socket-activation socket path.
     pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+    /// Shared installation lock, retained across installs and uninstall until reboot.
+    pub const HELPER_INSTALL_LOCK: &str = "/var/run/arcbox-helper-install.lock";
     /// Docker socket symlink path.
     pub const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 }
@@ -588,13 +590,13 @@ pub mod guest {
     /// The local CA behind HTTPS for container domains.
     ///
     /// Relative to [`MOUNT`] on the guest side and to the data directory on
-    /// the host. The daemon generates it once; the guest agent signs with it.
+    /// the host. Only the public certificate is shared; the host signs CSRs.
     pub const TLS: &str = "tls";
 
     /// The CA certificate (PEM) inside [`TLS`], which users trust.
     pub const TLS_CA_CERT: &str = "ca.pem";
 
-    /// The CA private key (PKCS#8 PEM, mode 0600) inside [`TLS`].
+    /// Legacy CA private key, removed during migration to the macOS Keychain.
     pub const TLS_CA_KEY: &str = "ca-key.pem";
 
     /// Host-built artifacts the guest reads back.

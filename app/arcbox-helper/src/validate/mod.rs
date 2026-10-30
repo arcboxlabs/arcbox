@@ -12,7 +12,6 @@ mod bridge_iface;
 mod cli_name;
 mod cli_target;
 mod dns_port;
-mod domain;
 mod socket_target;
 mod subnet;
 
@@ -20,7 +19,6 @@ pub use bridge_iface::BridgeIface;
 pub use cli_name::CliName;
 pub use cli_target::CliTarget;
 pub use dns_port::DnsPort;
-pub use domain::Domain;
 pub use socket_target::SocketTarget;
 pub use subnet::Subnet;
 
@@ -30,14 +28,6 @@ pub fn validate_subnet(s: &str) -> Result<(), String> {
 
 pub fn validate_iface(s: &str) -> Result<(), String> {
     s.parse::<BridgeIface>().map(|_| ())
-}
-
-pub fn validate_domain(s: &str) -> Result<(), String> {
-    s.parse::<Domain>().map(|_| ())
-}
-
-pub fn validate_port(port: u16) -> Result<(), String> {
-    DnsPort::try_from(port).map(|_| ())
 }
 
 pub fn validate_socket_target(s: &str) -> Result<(), String> {
@@ -108,44 +98,6 @@ mod tests {
     #[test]
     fn iface_rejects_overflow() {
         assert!("bridge99999999999999999".parse::<BridgeIface>().is_err());
-    }
-
-    #[test]
-    fn valid_domains() {
-        assert!("arcbox.local".parse::<Domain>().is_ok());
-        assert!("test.arcbox.local".parse::<Domain>().is_ok());
-        assert!("my-domain.local".parse::<Domain>().is_ok());
-    }
-
-    #[test]
-    fn invalid_domains() {
-        assert!("".parse::<Domain>().is_err());
-        assert!("UPPER.case".parse::<Domain>().is_err());
-        assert!("has space.local".parse::<Domain>().is_err());
-        let long = "a".repeat(254);
-        assert!(long.parse::<Domain>().is_err());
-        assert!(".".parse::<Domain>().is_err());
-        assert!("..".parse::<Domain>().is_err());
-        assert!(".leading".parse::<Domain>().is_err());
-        assert!("trailing.".parse::<Domain>().is_err());
-        assert!("empty..label".parse::<Domain>().is_err());
-    }
-
-    #[test]
-    fn domain_rejects_label_starting_or_ending_with_hyphen() {
-        assert!("-bad.local".parse::<Domain>().is_err());
-        assert!("bad-.local".parse::<Domain>().is_err());
-        assert!("ok.-bad".parse::<Domain>().is_err());
-        assert!("ok.bad-".parse::<Domain>().is_err());
-    }
-
-    #[test]
-    fn domain_rejects_label_exceeding_63_chars() {
-        let long_label = "a".repeat(64);
-        assert!(format!("{long_label}.local").parse::<Domain>().is_err());
-
-        let ok_label = "a".repeat(63);
-        assert!(format!("{ok_label}.local").parse::<Domain>().is_ok());
     }
 
     #[test]

@@ -9,6 +9,8 @@ authors.workspace = true
 description = "DNS packet parsing and response building for ArcBox (no platform deps)"
 
 [dependencies]
+arcbox-constants.workspace = true
+serde_json.workspace = true
 thiserror = { workspace = true }
 
 [dev-dependencies]

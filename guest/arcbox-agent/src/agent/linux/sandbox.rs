@@ -43,7 +43,9 @@ fn wire_protocol(protocol: arcbox_connect::v1::SandboxPortProtocol) -> Protocol 
 /// sandbox RPC is rejected with 412 (mapped to `FAILED_PRECONDITION` on the
 /// host) and an actionable reason. Initialisation failures store a 503 so
 /// sandbox operations degrade instead of crashing the agent.
-pub(super) fn sandbox_service() -> Result<&'static Arc<SandboxService>, &'static (i32, String)> {
+pub(super) fn sandbox_service(
+    dns: &Arc<crate::dns_server::GuestDnsServer>,
+) -> Result<&'static Arc<SandboxService>, &'static (i32, String)> {
     static SERVICE: OnceLock<Result<Arc<SandboxService>, (i32, String)>> = OnceLock::new();
     SERVICE
         .get_or_init(|| {
@@ -60,7 +62,7 @@ pub(super) fn sandbox_service() -> Result<&'static Arc<SandboxService>, &'static
                 return Err((503, reason));
             }
             let config = crate::config::load();
-            match SandboxService::new(config) {
+            match SandboxService::new(config, Arc::clone(dns)) {
                 Ok(svc) => {
                     tracing::info!("sandbox service initialised");
                     let svc = Arc::new(svc);
@@ -118,10 +120,21 @@ pub(super) async fn handle_sandbox_message<S>(
     msg_type: MessageType,
     trace_id: &str,
     payload: &[u8],
+    services: &crate::agent::Services,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let Some(dns) = &services.dns else {
+        send_sandbox_error(
+            stream,
+            trace_id,
+            403,
+            "sandbox RPC requires System VM DNS services",
+        )
+        .await?;
+        return Ok(());
+    };
     if matches!(
         msg_type,
         MessageType::SandboxCreateRequest | MessageType::SandboxRestoreRequest
@@ -138,7 +151,7 @@ where
         }
     }
 
-    let svc = match sandbox_service() {
+    let svc = match sandbox_service(dns) {
         Ok(s) => Arc::clone(s),
         Err((code, reason)) => {
             send_sandbox_error(stream, trace_id, *code, reason).await?;
