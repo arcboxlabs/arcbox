@@ -16,9 +16,9 @@ virtqueue surface — none of the `virt/AGENTS.md` HV/e2e invariants apply here.
 
 - **Neither crate is on the live container/exec path.** `arcbox-oci` has
   **zero** workspace consumers (`rg arcbox_oci` outside its own crate returns
-  nothing). `arcbox-container`'s only app reference is a **commented-out**
-  re-export: `// pub use arcbox_container as container;`
-  (`app/arcbox/src/lib.rs:29`). The running daemon's container + exec flow
+  nothing), and neither does `arcbox-container`. Both are parked until the
+  activation condition in `docs/architecture/charter.md` ("`runtime/` …
+  is parked, not deleted") is met. The running daemon's container + exec flow
   lives in `app/` (Docker Engine API compat) and the guest agent. Editing
   these crates changes **no** daemon behavior until you also wire them in.
   WHY: prevents hours of "my change did nothing" debugging. Confirm with

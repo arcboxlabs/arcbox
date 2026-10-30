@@ -46,6 +46,7 @@ members = [
     "virt/arcbox-fs",
     "virt/arcbox-net",
     "virt/arcbox-net-virtio",
+    "virt/arcbox-net-inject",
     "virt/arcbox-vmnet",
     "virt/arcbox-dhcp",
 
@@ -98,8 +99,11 @@ members = [
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
     "guest/arcbox-agent",
+
+    # ============================================
+    # Tooling (e2e harness, cargo xtask)
+    # ============================================
     "tests/e2e",
-    "virt/arcbox-net-inject",
     "xtask",
 
     # ============================================
