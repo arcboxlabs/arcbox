@@ -19,6 +19,7 @@
 //! - **Bridged**: VMs appear as separate devices on the network
 
 pub mod datapath_loop;
+pub mod guest_nat;
 pub mod nat;
 pub mod tun;
 

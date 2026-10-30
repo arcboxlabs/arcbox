@@ -8,7 +8,6 @@ use crate::irq::{Gsi, IrqTriggerCallback};
 use arcbox_hypervisor::VirtioDeviceConfig;
 use arcbox_hypervisor::darwin::DarwinVm;
 use arcbox_hypervisor::traits::VirtualMachine;
-use tokio_util::sync::CancellationToken;
 
 /// Socket buffer size (`SO_SNDBUF`/`SO_RCVBUF`) for both ends of a network
 /// socketpair. 8 MiB accommodates burst traffic.
@@ -298,17 +297,7 @@ impl Vmm {
     ///
     /// Returns a `VirtioDeviceConfig` with the VZ-side FDs embedded.
     fn create_network_device(&mut self) -> Result<VirtioDeviceConfig> {
-        use arcbox_net::darwin::datapath_loop::NetworkDatapath;
-        use arcbox_net::darwin::egress::HostEgress;
-        use arcbox_net::darwin::inbound_relay::InboundListenerManager;
-        use arcbox_net::dhcp::{DhcpConfig, DhcpServer};
-        use arcbox_net::dns::{DnsConfig, DnsForwarder};
-        use std::net::Ipv4Addr;
-
-        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
-        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
-        let netmask = Ipv4Addr::new(255, 255, 255, 0);
-        let gateway_mac: [u8; 6] = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+        use arcbox_net::darwin::guest_nat::{self, GuestNat};
 
         // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
         let mut fds: [libc::c_int; 2] = [0; 2];
@@ -339,10 +328,6 @@ impl Vmm {
         Self::set_socket_buffers(vz_fd.as_raw_fd());
         Self::set_socket_buffers(host_fd.as_raw_fd());
 
-        // 2. Cancellation token shared by all spawned network tasks.
-        let cancel = CancellationToken::new();
-        self.net_cancel = Some(cancel.clone());
-
         // NOTE(MTU): the MTU the VZ device will negotiate (1500 by default,
         // ABX-423; 4000 under ARCBOX_DIAG_NET_MTU_4000 — see
         // arcbox-vz/src/device/network.rs). The datapath fragments guest-bound
@@ -350,58 +335,24 @@ impl Vmm {
         // by the peer's advertised MSS (TcpBridge peer_mss).
         let net_mtu = arcbox_hypervisor::darwin::desired_network_mtu();
 
-        // 3. Create the socket proxy, reply channel, and inbound command channel.
-        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(256);
-        let egress = HostEgress::new(
-            gateway_ip,
-            gateway_mac,
-            guest_ip,
-            reply_tx,
-            cancel.clone(),
+        let GuestNat {
+            datapath,
+            inbound,
+            cancel,
+        } = GuestNat::new(
+            host_fd,
             net_mtu,
+            self.shared_dns.as_ref(),
+            self.proxy_env.clone(),
         );
-
-        // Create the inbound listener manager for port forwarding.
-        self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
+        self.net_cancel = Some(cancel);
+        self.inbound_listener_manager = Some(inbound);
 
         tracing::info!(
             "Custom network stack: socket proxy (gateway={}, guest={})",
-            gateway_ip,
-            guest_ip,
+            guest_nat::GATEWAY_IP,
+            guest_nat::GUEST_IP,
         );
-
-        // 4. Create the network stack components.
-        let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
-            .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
-            .with_dns_servers(vec![gateway_ip]);
-        let dhcp_server = DhcpServer::new(dhcp_config);
-
-        let mut dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = if let Some(ref dns) = self.shared_dns {
-            dns_config.local_domain.clone_from(&dns.local_domain);
-            DnsForwarder::with_shared_registry(dns_config, std::sync::Arc::clone(&dns.registry))
-        } else {
-            DnsForwarder::new(dns_config)
-        };
-
-        // 5. Build the datapath and spawn it on the tokio runtime.
-        let mut datapath = NetworkDatapath::new(
-            host_fd,
-            egress,
-            reply_rx,
-            cmd_rx,
-            dhcp_server,
-            dns_forwarder,
-            gateway_ip,
-            guest_ip,
-            gateway_mac,
-            cancel,
-            net_mtu,
-        );
-        if let Some(env) = self.proxy_env.clone() {
-            datapath.set_proxy_env(env);
-        }
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(
@@ -482,7 +433,7 @@ impl Vmm {
         Self::set_socket_buffers(relay_fd.as_raw_fd());
 
         // Spawn the relay task.
-        let cancel = CancellationToken::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
         let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), cancel.clone());
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {

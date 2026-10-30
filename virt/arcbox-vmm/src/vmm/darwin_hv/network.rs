@@ -22,17 +22,7 @@ impl Vmm {
         device_manager: &mut crate::device::DeviceManager,
         primary_net_id: crate::device::DeviceId,
     ) -> Result<()> {
-        use arcbox_net::darwin::datapath_loop::NetworkDatapath;
-        use arcbox_net::darwin::egress::HostEgress;
-        use arcbox_net::darwin::inbound_relay::InboundListenerManager;
-        use arcbox_net::dhcp::{DhcpConfig, DhcpServer};
-        use arcbox_net::dns::{DnsConfig, DnsForwarder};
-        use std::net::Ipv4Addr;
-
-        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
-        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
-        let netmask = Ipv4Addr::new(255, 255, 255, 0);
-        let gateway_mac: [u8; 6] = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+        use arcbox_net::darwin::guest_nat::{self, GuestNat};
 
         // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
         let mut fds: [libc::c_int; 2] = [0; 2];
@@ -136,60 +126,23 @@ impl Vmm {
         // Register the HV-side fd with DeviceManager for TX/RX bridging.
         device_manager.set_net_host_fd(hv_fd.as_raw_fd(), primary_net_id);
 
-        // 2. Cancellation token.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        self.net_cancel = Some(cancel.clone());
-
         // The HV virtio-net NIC advertises the NetConfig default MTU (1500,
         // setup.rs constructs `NetConfig { .. Default::default() }`); the
         // datapath fragments guest-bound UDP datagrams to it (ABX-428).
         let net_mtu = arcbox_virtio::net::NetConfig::default().mtu as usize;
 
-        // 3. Create socket proxy and channels.
-        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(256);
-        let egress = HostEgress::new(
-            gateway_ip,
-            gateway_mac,
-            guest_ip,
-            reply_tx,
-            cancel.clone(),
-            net_mtu,
-        );
-
-        self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
-
-        // 4. Create DHCP + DNS.
-        let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
-            .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
-            .with_dns_servers(vec![gateway_ip]);
-        let dhcp_server = DhcpServer::new(dhcp_config);
-
-        let mut dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = if let Some(ref dns) = self.shared_dns {
-            dns_config.local_domain.clone_from(&dns.local_domain);
-            DnsForwarder::with_shared_registry(dns_config, std::sync::Arc::clone(&dns.registry))
-        } else {
-            DnsForwarder::new(dns_config)
-        };
-
-        // 5. Build and spawn the datapath.
-        let mut datapath = NetworkDatapath::new(
-            host_fd,
-            egress,
-            reply_rx,
-            cmd_rx,
-            dhcp_server,
-            dns_forwarder,
-            gateway_ip,
-            guest_ip,
-            gateway_mac,
+        let GuestNat {
+            mut datapath,
+            inbound,
             cancel,
+        } = GuestNat::new(
+            host_fd,
             net_mtu,
+            self.shared_dns.as_ref(),
+            self.proxy_env.clone(),
         );
-        if let Some(env) = self.proxy_env.clone() {
-            datapath.set_proxy_env(env);
-        }
+        self.net_cancel = Some(cancel);
+        self.inbound_listener_manager = Some(inbound);
 
         // Create bounded channel for RX frame injection. The datapath loop
         // sends frames through the FrameSink; the RxInjectThread (spawned at
@@ -231,8 +184,8 @@ impl Vmm {
 
         tracing::info!(
             "HV network datapath: gateway={}, guest={}, MTU={}",
-            gateway_ip,
-            guest_ip,
+            guest_nat::GATEWAY_IP,
+            guest_nat::GUEST_IP,
             net_mtu,
         );
         Ok(())
