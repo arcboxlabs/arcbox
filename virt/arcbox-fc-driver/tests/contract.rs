@@ -165,6 +165,9 @@ impl ContractHarness for FcHarness {
             entropy: false,
             dirty_tracking: true,
             isolation: self.isolation.clone(),
+            rosetta: false,
+            nested_virt: false,
+            debug_console: None,
         }
     }
 

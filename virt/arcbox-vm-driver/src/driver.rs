@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::capability::{
-    Adopt, Balloon, Checkpoint, CheckpointImage, Console, DebugSnapshot, Detach, Prepare, Staging,
-    Vsock, VsockListen,
+    Adopt, Balloon, Checkpoint, CheckpointImage, Console, DebugSnapshot, Detach, PortForward,
+    Prepare, Staging, Vsock, VsockListen,
 };
 use crate::error::Result;
 use crate::spec::{DiskSpec, IsolationSpec, NicSpec, VmId, VmSpec};
@@ -174,6 +174,20 @@ pub trait VmHandle: Send + Sync {
         None
     }
 
+    /// The guest agent's own log channel, apart from the console. `Some`
+    /// iff [`DriverCapabilities::agent_log`] and the spec's
+    /// [`VmSpec::console`] is not `Off`.
+    fn agent_log(&self) -> Option<&dyn Console> {
+        None
+    }
+
+    /// Takes port forwarding into the guest. `Some` on the first call iff
+    /// [`DriverCapabilities::port_forward`] and the VM's NAT datapath came
+    /// up; `None` after that.
+    fn take_port_forward(&self) -> Option<Box<dyn PortForward>> {
+        None
+    }
+
     /// A diagnostic snapshot. `Some` iff [`DriverCapabilities::debug`].
     fn debug(&self) -> Option<&dyn DebugSnapshot> {
         None
@@ -213,6 +227,10 @@ pub struct DriverCapabilities {
     pub balloon: bool,
     /// Handles expose the guest console output.
     pub console: bool,
+    /// Handles expose the agent's log channel ([`VmHandle::agent_log`]).
+    pub agent_log: bool,
+    /// Handles hand out port forwarding ([`VmHandle::take_port_forward`]).
+    pub port_forward: bool,
     /// Handles expose a debug snapshot.
     pub debug: bool,
     /// Whether guests may run their own hypervisor.

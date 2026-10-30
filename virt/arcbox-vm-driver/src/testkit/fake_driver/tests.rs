@@ -27,6 +27,9 @@ fn spec(id: &str) -> VmSpec {
         entropy: false,
         dirty_tracking: false,
         isolation: Default::default(),
+        rosetta: false,
+        nested_virt: false,
+        debug_console: None,
     }
 }
 

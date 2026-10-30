@@ -68,6 +68,8 @@ impl VmDriver for FcDriver {
             staging: true,
             balloon: false,
             console: false,
+            agent_log: false,
+            port_forward: false,
             debug: false,
             nested_virt: nested_virt(),
         }
@@ -403,6 +405,9 @@ mod tests {
             entropy: false,
             dirty_tracking: false,
             isolation: IsolationSpec::None,
+            rosetta: false,
+            nested_virt: false,
+            debug_console: None,
         };
         assert!(matches!(
             driver.boot(spec, dir.path()).await,

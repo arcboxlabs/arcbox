@@ -242,6 +242,9 @@ mod tests {
             entropy: false,
             dirty_tracking: false,
             isolation: IsolationSpec::None,
+            rosetta: false,
+            nested_virt: false,
+            debug_console: None,
         }
     }
 

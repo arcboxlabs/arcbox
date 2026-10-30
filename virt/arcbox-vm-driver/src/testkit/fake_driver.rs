@@ -149,6 +149,8 @@ impl FakeDriver {
                 staging: true,
                 balloon: true,
                 console: true,
+                agent_log: false,
+                port_forward: false,
                 debug: true,
                 nested_virt: NestedVirt::unsupported("the fake driver runs no hypervisor"),
             },

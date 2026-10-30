@@ -208,16 +208,36 @@ pub struct VmSpec {
     /// How the VMM process is confined.
     #[serde(default)]
     pub isolation: IsolationSpec,
+    /// Share the host's Rosetta translator with the guest as the
+    /// [`VmSpec::ROSETTA_TAG`] virtiofs share, so the guest can run x86_64
+    /// binaries. Honored when the host has Rosetta installed; otherwise the
+    /// VM boots without it. A driver that never can refuses the field.
+    #[serde(default)]
+    pub rosetta: bool,
+    /// Let the guest run its own hypervisor. Honored when the host supports
+    /// it ([`DriverCapabilities::nested_virt`](crate::DriverCapabilities::nested_virt));
+    /// otherwise the VM boots without it. A driver that never can refuses
+    /// the field.
+    #[serde(default)]
+    pub nested_virt: bool,
+    /// Serve a low-level debug console on this Unix socket, for VMMs that
+    /// have one apart from the guest console.
+    #[serde(default)]
+    pub debug_console: Option<PathBuf>,
 }
 
 impl VmSpec {
+    /// The share tag the Rosetta translator is mounted under.
+    pub const ROSETTA_TAG: &str = "rosetta";
+
     /// Checks the invariants no driver can repair.
     ///
     /// CPU and memory are at least 1; disk ids are plain names (the path-safe
     /// alphabet, wider than [`VmId`]'s) and unique; NIC ids and share tags are
     /// non-empty and unique; at most one disk is the root; every MAC is a
-    /// non-nil unicast address; every boot, disk and share path is non-empty;
-    /// the vsock guest CID is 3 or above.
+    /// non-nil unicast address; every boot, disk, share and debug-console
+    /// path is non-empty; the vsock guest CID is 3 or above; no share takes
+    /// [`VmSpec::ROSETTA_TAG`] when [`VmSpec::rosetta`] is set.
     pub fn validate(&self) -> Result<()> {
         if self.cpus == 0 {
             return Err(Error::InvalidSpec("cpus must be at least 1".into()));
@@ -278,6 +298,15 @@ impl VmSpec {
                 )));
             }
             require_path("share host path", &share.host_path)?;
+        }
+        if self.rosetta && share_tags.contains(Self::ROSETTA_TAG) {
+            return Err(Error::InvalidSpec(format!(
+                "share tag `{}` is reserved for rosetta",
+                Self::ROSETTA_TAG
+            )));
+        }
+        if let Some(path) = &self.debug_console {
+            require_path("debug console path", path)?;
         }
         Ok(())
     }
@@ -425,8 +454,13 @@ pub enum NicAttachment {
         /// The interface name (`tap12`).
         name: String,
     },
-    /// The VMM's own NAT (Virtualization.framework's `NAT` attachment).
+    /// The VMM's own NAT (Virtualization.framework's `NAT` attachment, or
+    /// vmnet's shared mode), whose host side is a host bridge interface.
     HostNat,
+    /// The driver's userspace NAT datapath: DHCP, DNS, egress through host
+    /// sockets or a proxy, and port forwarding
+    /// ([`VmHandle::take_port_forward`](crate::VmHandle::take_port_forward)).
+    UserNat,
     /// A host socket the VMM reads and writes Ethernet frames on.
     ///
     /// The number is a *borrowed* descriptor: the caller keeps it open for the
@@ -487,6 +521,9 @@ pub enum ConsoleSpec {
     File(PathBuf),
     /// Serve the console on a Unix socket.
     Socket(PathBuf),
+    /// Keep the output in host pipes, read through
+    /// [`Console`](crate::Console).
+    Pipe,
 }
 
 /// How the VMM process is confined.
@@ -562,6 +599,9 @@ mod tests {
             entropy: true,
             dirty_tracking: false,
             isolation: IsolationSpec::None,
+            rosetta: false,
+            nested_virt: false,
+            debug_console: None,
         }
     }
 
@@ -656,6 +696,26 @@ mod tests {
         let mut s = spec();
         s.memory_mib = 0;
         assert!(invalid(&s).contains("memory_mib"));
+    }
+
+    #[test]
+    fn rosetta_reserves_its_share_tag_only_when_set() {
+        let mut s = spec();
+        s.shares.push(ShareSpec {
+            tag: VmSpec::ROSETTA_TAG.to_owned(),
+            host_path: "/srv/rosetta".into(),
+            read_only: true,
+        });
+        s.validate().unwrap();
+        s.rosetta = true;
+        assert!(invalid(&s).contains("reserved for rosetta"));
+    }
+
+    #[test]
+    fn an_empty_debug_console_path_is_rejected() {
+        let mut s = spec();
+        s.debug_console = Some(PathBuf::new());
+        assert!(invalid(&s).contains("debug console path"));
     }
 
     #[test]

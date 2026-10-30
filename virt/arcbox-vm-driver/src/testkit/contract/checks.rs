@@ -79,6 +79,16 @@ pub async fn capabilities_agree_with_accessors(h: &dyn ContractHarness) {
     assert_eq!(caps.adopt, driver.adopt().is_some(), "adopt");
     assert_eq!(caps.balloon, vm.balloon().is_some(), "balloon");
     assert_eq!(caps.console, vm.console().is_some(), "console");
+    assert_eq!(caps.agent_log, vm.agent_log().is_some(), "agent_log");
+    assert_eq!(
+        caps.port_forward,
+        vm.take_port_forward().is_some(),
+        "port_forward"
+    );
+    assert!(
+        vm.take_port_forward().is_none(),
+        "port forwarding is taken once"
+    );
     assert_eq!(caps.debug, vm.debug().is_some(), "debug");
     assert_eq!(caps.prepare, driver.prepare().is_some(), "prepare");
     assert_eq!(caps.staging, vm.staging().is_some(), "staging");
@@ -333,6 +343,11 @@ fn assert_same_capabilities(a: &dyn VmHandle, b: &dyn VmHandle) {
     assert_eq!(a.detach().is_some(), b.detach().is_some(), "detach");
     assert_eq!(a.balloon().is_some(), b.balloon().is_some(), "balloon");
     assert_eq!(a.console().is_some(), b.console().is_some(), "console");
+    assert_eq!(
+        a.agent_log().is_some(),
+        b.agent_log().is_some(),
+        "agent_log"
+    );
     assert_eq!(a.debug().is_some(), b.debug().is_some(), "debug");
 }
 

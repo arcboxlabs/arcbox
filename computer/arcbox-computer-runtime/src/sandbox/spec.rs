@@ -78,6 +78,9 @@ pub fn build_vm_spec(
         // Dirty-page tracking so checkpointing is always available.
         dirty_tracking: true,
         isolation,
+        rosetta: false,
+        nested_virt: false,
+        debug_console: None,
     })
 }
 

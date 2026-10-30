@@ -131,6 +131,9 @@ impl ContractHarness for FakeHarness {
             entropy: true,
             dirty_tracking: true,
             isolation: Default::default(),
+            rosetta: false,
+            nested_virt: false,
+            debug_console: None,
         }
     }
 

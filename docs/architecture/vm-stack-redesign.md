@@ -157,18 +157,21 @@ pub struct VmSpec {                                  // data — serde
     pub nics: Vec<NicSpec>,                          // { id, mac, attachment: NicAttachment }
     pub vsock: Option<VsockSpec>,                    // { guest_cid }
     pub shares: Vec<ShareSpec>,                      // virtiofs { tag, host_path, read_only }
-    pub console: ConsoleSpec,                        // Off | File(path) | Socket(path)
+    pub console: ConsoleSpec,                        // Off | File(path) | Socket(path) | Pipe
     pub balloon: bool,
     pub entropy: bool,
     pub dirty_tracking: bool,
     pub isolation: IsolationSpec,                    // None | Jailer { uid, gid, chroot_base, netns, new_pid_ns, cgroup }
+    pub rosetta: bool,                               // R4 seam map
+    pub nested_virt: bool,
+    pub debug_console: Option<PathBuf>,
 }
-pub enum NicAttachment { Tap { name: String }, HostNat /* the driver's own host-side NAT */, FileHandle { fd: i32 /* process-local, borrowed for the boot call; VmRecord is the durable identity */ }, Bridge { interface: String } }
+pub enum NicAttachment { Tap { name: String }, HostNat /* the VMM's own host-side NAT */, UserNat /* the driver's userspace NAT datapath (R4 seam map) */, FileHandle { fd: i32 /* process-local, borrowed for the boot call; VmRecord is the durable identity */ }, Bridge { interface: String } }
 
 #[async_trait]
 pub trait VmDriver: Send + Sync {
     fn name(&self) -> &'static str;
-    fn capabilities(&self) -> DriverCapabilities;   // { vsock, vsock_listen, checkpoint, diff_checkpoint, adopt, prepare, balloon, console, debug, nested_virt: NestedVirt }
+    fn capabilities(&self) -> DriverCapabilities;   // { vsock, vsock_listen, checkpoint, diff_checkpoint, adopt, prepare, staging, balloon, console, agent_log, port_forward, debug, nested_virt: NestedVirt }
     async fn boot(&self, spec: VmSpec, runtime_dir: &Path) -> Result<Box<dyn VmHandle>>;
     async fn restore(&self, image: &CheckpointImage, spec: RestoreSpec, runtime_dir: &Path) -> Result<Box<dyn VmHandle>>;   // RestoreSpec { id, nics, isolation, disks } — disks at their host paths for THIS restore
     fn adopt(&self) -> Option<&dyn Adopt>;           // capability: VMs that outlive this process (external-process VMMs only)
@@ -189,6 +192,8 @@ pub trait VmHandle: Send + Sync {
     fn vsock_listener(&self) -> Option<&dyn VsockListen>;
     fn balloon(&self) -> Option<&dyn Balloon>;
     fn console(&self) -> Option<&dyn Console>;
+    fn agent_log(&self) -> Option<&dyn Console>;      // R4 seam map
+    fn take_port_forward(&self) -> Option<Box<dyn PortForward>>;
     fn debug(&self) -> Option<&dyn DebugSnapshot>;
 }
 
@@ -639,16 +644,21 @@ pipeline stay its own until `arcbox-image` grows an OCI→ext4 story.
 
 The engine uses `Vmm` surface that the 2026-08-16 port does not name.
 Each row assigns one item to the port, to a driver, or to the engine. No
-row adds a lifecycle method to `VmHandle`; the port grows by three
-`VmSpec` fields, one `Console` change, and one `PortForward` capability.
+row adds a lifecycle method to `VmHandle`. The port grows by three
+`VmSpec` fields, `ConsoleSpec::Pipe`, `NicAttachment::UserNat`,
+`Console::dup_reader`, and two capability accessors with their
+`DriverCapabilities` flags: `agent_log` and `take_port_forward`. The port
+keeps its rule that it has no `Unsupported` error: a driver that cannot
+do something returns `None` from the accessor, or `InvalidSpec` from
+`boot` for a spec field it can never honor.
 
 | Engine use today | Where it goes | Port change |
 |---|---|---|
-| `set_shared_dns`, `set_proxy_env`, `take_inbound_listener_manager`: both macOS paths build the socketpair datapath inside `Vmm` (`vmm/darwin.rs`, `vmm/darwin_hv/network.rs`). | Each macOS driver builds the datapath through one shared `arcbox-net` helper (socketpair, DHCP, DNS forwarder, proxy, `InboundListenerManager`). The HV driver also attaches its `FrameSink` and `ConnSink` to `DeviceManager`, as today. `HostNetwork` (shared DNS and proxy policy, resolved once per daemon start) moves to `arcbox-net` and is given to `VzDriver` and `HvDriver` at construction in the composition root, so the engine stops carrying it. The handle exposes the listener manager through a `PortForward` capability. The datapath code does not change (D-VM10). | `PortForward` capability. |
-| `dup_serial_readers` and `read_agent_log_output`: the agent-log second console. | `Console` becomes multi-channel: `read_output(channel, max)` and `dup_reader(channel)`, with `ConsoleChannel::{Primary, AgentLog}`. A driver without the agent-log channel answers `Unsupported` for that channel. | `Console` signature and `ConsoleChannel`. |
-| Rosetta share, nested virtualization, HV debug-console socket. | `VmSpec` fields: `rosetta: bool`, `nested_virt: bool`, `debug_console: Option<PathBuf>`. A driver refuses a field it cannot honor at `boot` with `Unsupported`. The existing `DriverCapabilities::nested_virt` reports support, so `supports_nested_virt` leaves `VmBackend`. | Three `VmSpec` fields. |
+| `set_shared_dns`, `set_proxy_env`, `take_inbound_listener_manager`: both macOS paths build the socketpair datapath inside `Vmm` (`vmm/darwin.rs`, `vmm/darwin_hv/network.rs`). | Each macOS driver builds the datapath through one shared `arcbox-net` helper (socketpair, DHCP, DNS forwarder, proxy, `InboundListenerManager`). The HV driver also attaches its `FrameSink` and `ConnSink` to `DeviceManager`, as today. `HostNetwork` (shared DNS and proxy policy, resolved once per daemon start) moves to `arcbox-net` and is given to `VzDriver` and `HvDriver` at construction in the composition root, so the engine stops carrying it. The spec asks for it as `NicAttachment::UserNat`; when the datapath cannot come up, the VZ driver falls back to Apple NAT, as today. The handle exposes the listener manager through the `PortForward` capability. The datapath code does not change (D-VM10). | `UserNat`, `PortForward`. |
+| `dup_serial_readers` and `read_agent_log_output`: the agent-log second console. | `ConsoleSpec::Pipe` keeps both outputs in host pipes. `VmHandle::console()` is the guest console and `VmHandle::agent_log()` is the agent's log channel, both `Console`. `Console::dup_reader` gives the engine's drain its own non-blocking reader. A driver without the agent-log channel returns `None`. | `ConsoleSpec::Pipe`, `agent_log`, `dup_reader`. |
+| Rosetta share, nested virtualization, HV debug-console socket. | `VmSpec` fields: `rosetta: bool`, `nested_virt: bool`, `debug_console: Option<PathBuf>`. `rosetta` and `nested_virt` are honored when the host can and skipped otherwise, as the engine relies on today; a driver that never can (Firecracker) and a driver without a debug console refuse the field at `boot` with `InvalidSpec`. The existing `DriverCapabilities::nested_virt` reports support, so `supports_nested_virt` leaves `VmBackend`. | Three `VmSpec` fields. |
 | `set_skip_hypervisor_stop` and `force_stop_without_hypervisor`: VZ only; HV ignores the skip (ABX-415). | Inside `VzDriver`'s `shutdown`. After an ACPI power-off, the VZ handle skips the hypervisor stop; the HV handle always runs the full stop. The engine calls `shutdown` and does not know the difference. | None. |
-| `vmnet_interface_mac`, `bridge_mac`. | The engine chooses the bridge MAC and puts it in `NicSpec::mac` with `NicAttachment::Bridge`. The driver reports the vmnet interface info through `DebugSnapshot` until a consumer needs a typed field. | None. |
+| `vmnet_interface_mac`, `bridge_mac`. | The engine chooses the bridge MAC and puts it in `NicSpec::mac` of a second NIC with `NicAttachment::HostNat`. The VZ driver builds it on vmnet shared mode when the `vmnet` feature is on, and on Apple NAT otherwise, as today. The driver reports the vmnet interface info through `DebugSnapshot` until a consumer needs a typed field. | None. |
 | `reset_requested` and `reboot`: HV PSCI `SYSTEM_RESET`. | The HV handle emits `VmEvent::ResetRequested`. The lifecycle actor answers with `shutdown` and a fresh `boot` from the same spec. `Vmm::reboot` is already teardown plus boot, so the boot sequence does not change. | None. `ResetRequested` exists. |
 | `pause`, `resume`, `capture_snapshot_context`, `restore_from_snapshot_data`: the engine VM-snapshot API. | Deleted in R4d (see "The engine over the same port"). | None. |
 | `VmDebugSnapshot`, `VmmError`, `SnapshotError` in engine types. | `DebugSnapshot` JSON and `DriverError`. `EngineError::Snapshot` goes with R4d. | None. |
@@ -670,10 +680,10 @@ own commit with no other change.
 ```rust
 #[async_trait] pub trait PortForward: Send {          // taken once per boot; the taker owns it
     async fn add(&mut self, rule: ForwardRule) -> Result<u16>;   // the bound host port
-    async fn remove(&mut self, rule: ForwardRule) -> Result<()>;
+    async fn remove(&mut self, rule: ForwardRule);                // absent: nothing to do
     async fn clear(&mut self);
 }
-// VmHandle: fn take_port_forward(&self) -> Option<Box<dyn PortForward>>  // None: taken, or no such datapath
+// VmHandle: fn take_port_forward(&self) -> Option<Box<dyn PortForward>>  // None: taken, or no UserNat datapath
 // ForwardRule { protocol: Tcp | Udp, host_ip: Ipv4Addr, host_port: u16, guest_port: u16 }
 ```
 

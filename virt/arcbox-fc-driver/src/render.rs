@@ -248,7 +248,8 @@ impl VmLayout {
 ///
 /// Refuses, with [`Error::InvalidSpec`], what Firecracker cannot do or this
 /// driver does not expose: firmware and macOS boots, non-TAP NICs, console
-/// files and sockets, virtiofs shares, the balloon.
+/// files and sockets, virtiofs shares, the balloon, rosetta, nested
+/// virtualization, a debug console.
 pub fn fc_config(spec: &VmSpec, config: &FcDriverConfig, runtime_dir: &Path) -> Result<FcPlan> {
     spec.validate()?;
     let layout = VmLayout::new(&spec.id, &spec.isolation, config, runtime_dir)?;
@@ -262,6 +263,15 @@ pub fn fc_config(spec: &VmSpec, config: &FcDriverConfig, runtime_dir: &Path) -> 
     }
     if spec.balloon {
         return Err(unsupported("the balloon is not exposed"));
+    }
+    if spec.rosetta {
+        return Err(unsupported("rosetta is not available"));
+    }
+    if spec.nested_virt {
+        return Err(unsupported("nested virtualization is not available"));
+    }
+    if spec.debug_console.is_some() {
+        return Err(unsupported("there is no debug console"));
     }
 
     let mut stage = Vec::new();

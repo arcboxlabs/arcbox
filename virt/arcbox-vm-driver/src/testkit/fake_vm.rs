@@ -1,6 +1,8 @@
 //! The fake driver's VM: an in-memory state machine behind a real
 //! [`VmHandle`].
 
+use std::io::Write;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -85,6 +87,9 @@ pub(super) struct VmInner {
     /// that staged them did.
     area: StagingArea,
     console: Mutex<Vec<u8>>,
+    /// Writers behind every `Console::dup_reader`; dropped at exit so the
+    /// readers see EOF.
+    console_taps: Mutex<Vec<UnixStream>>,
     balloon_target_bytes: AtomicU64,
     /// Every `shutdown` this VM was asked for, in order.
     ///
@@ -119,6 +124,7 @@ impl VmInner {
             inbound,
             area,
             console: Mutex::new(Vec::new()),
+            console_taps: Mutex::new(Vec::new()),
             balloon_target_bytes: AtomicU64::new(balloon_target_bytes),
             shutdowns: Mutex::new(Vec::new()),
         })
@@ -153,6 +159,7 @@ impl VmInner {
         // A send error only means nobody is subscribed.
         let _ = self.events.send(VmEvent::Exited(status));
         self.inbound.close(status);
+        lock(&self.console_taps).clear();
         status
     }
 
@@ -185,6 +192,8 @@ impl VmInner {
 
     pub(super) fn push_console(&self, bytes: &[u8]) {
         lock(&self.console).extend_from_slice(bytes);
+        // A tap whose reader is gone has nothing left to deliver to.
+        lock(&self.console_taps).retain_mut(|tap| tap.write_all(bytes).is_ok());
     }
 
     pub(super) fn shutdowns(&self) -> Vec<ShutdownMode> {
@@ -430,6 +439,16 @@ impl Console for FakeVm {
         let mut console = lock(&self.vm.console);
         let n = max_bytes.min(console.len());
         Ok(console.drain(..n).collect())
+    }
+
+    /// Unlike a real VMM's pipe, the fake's reader gets its own copy of
+    /// every byte pushed after the call, and `read_output` keeps its own.
+    fn dup_reader(&self) -> Result<OwnedFd> {
+        self.vm.require_alive()?;
+        let (reader, writer) = UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        lock(&self.vm.console_taps).push(writer);
+        Ok(reader.into())
     }
 }
 

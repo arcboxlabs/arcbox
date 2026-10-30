@@ -8,6 +8,8 @@
 //! driver's handles can ever return `Some` for.
 
 use std::fmt;
+use std::net::Ipv4Addr;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -393,11 +395,57 @@ pub struct BalloonStats {
     pub current_bytes: Option<u64>,
 }
 
-/// The guest console's output.
+/// One guest output channel: the console, or the agent's log channel.
 #[async_trait]
 pub trait Console: Send + Sync {
-    /// Takes up to `max_bytes` of console output not yet read.
+    /// Takes up to `max_bytes` of output not yet read.
     async fn read_output(&self, max_bytes: usize) -> Result<Vec<u8>>;
+
+    /// A non-blocking reader of the same output that the caller owns
+    /// independently of the handle. It reads the same stream as
+    /// [`read_output`](Self::read_output), so a caller uses one of the two.
+    /// It sees EOF only after the VM has exited.
+    fn dup_reader(&self) -> Result<OwnedFd>;
+}
+
+/// Port forwarding from the host into the guest, through the VMM's own
+/// network datapath.
+///
+/// Taken once per boot from [`VmHandle::take_port_forward`]; the taker owns
+/// the forwards and their host listeners.
+#[async_trait]
+pub trait PortForward: Send {
+    /// Listens on `rule`'s host address and forwards to its guest port.
+    /// Returns the bound host port, which differs from `rule.host_port`
+    /// only when that is 0.
+    async fn add(&mut self, rule: ForwardRule) -> Result<u16>;
+    /// Stops the forward `rule` started and waits until its host socket is
+    /// closed. Removing an absent rule does nothing.
+    async fn remove(&mut self, rule: ForwardRule);
+    /// Stops every forward.
+    async fn clear(&mut self);
+}
+
+/// One host-to-guest forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForwardRule {
+    /// The transport.
+    pub protocol: ForwardProtocol,
+    /// The host address to listen on.
+    pub host_ip: Ipv4Addr,
+    /// The host port to listen on; 0 picks a free one.
+    pub host_port: u16,
+    /// The guest port to forward to.
+    pub guest_port: u16,
+}
+
+/// The transport a [`ForwardRule`] forwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ForwardProtocol {
+    /// TCP.
+    Tcp,
+    /// UDP.
+    Udp,
 }
 
 /// A point-in-time view of the VM's internals for diagnostics.

@@ -176,6 +176,9 @@ fn spec(id: &str, isolation: IsolationSpec, rootfs: PathBuf) -> VmSpec {
         entropy: false,
         dirty_tracking: true,
         isolation,
+        rosetta: false,
+        nested_virt: false,
+        debug_console: None,
     }
 }
 

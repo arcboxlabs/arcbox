@@ -56,8 +56,8 @@ pub mod testkit;
 
 pub use capability::{
     Adopt, AfterCheckpoint, Balloon, BalloonStats, Checkpoint, CheckpointFormat, CheckpointImage,
-    CheckpointKind, CheckpointOptions, Console, DebugSnapshot, Detach, DiskSource, Prepare,
-    PreparedVm, Staging, Vsock, VsockListen, VsockListener,
+    CheckpointKind, CheckpointOptions, Console, DebugSnapshot, Detach, DiskSource, ForwardProtocol,
+    ForwardRule, PortForward, Prepare, PreparedVm, Staging, Vsock, VsockListen, VsockListener,
 };
 pub use driver::{
     DriverCapabilities, ExitStatus, IoMode, JailRecord, NestedVirt, ProcessRecord, RestoreSpec,
