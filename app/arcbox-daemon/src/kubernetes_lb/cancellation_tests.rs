@@ -48,12 +48,9 @@ impl ServiceSource for BlockedSource {
 async fn runtime() -> (Arc<Runtime>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Arc::new(
-        Runtime::new(arcbox_core::Config {
-            data_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        })
-        .unwrap()
-        .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
+        Runtime::new(arcbox_core::Config::for_test(dir.path()))
+            .unwrap()
+            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
     );
     runtime.vm_lifecycle().set_kubernetes_hold(true).await;
     (runtime, dir)

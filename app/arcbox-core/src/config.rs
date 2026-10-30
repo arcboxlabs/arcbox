@@ -111,10 +111,11 @@ impl Config {
     /// [`crate::runtime::Runtime`].
     ///
     /// The proxy policy is `none`: under `system`, `Runtime::new` spawns
-    /// `scutil` and `ifconfig`, and a spawn can keep another test's socket
-    /// open (see [`crate::test_support::CHILD_PROCESSES`]).
-    #[cfg(test)]
-    pub(crate) fn for_test(data_dir: &Path) -> Self {
+    /// `scutil` and `ifconfig`. macOS has no `SOCK_CLOEXEC`, so such a child
+    /// can inherit a socket that a concurrent test in the same process
+    /// expects to close, and keep its port bound.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(data_dir: &Path) -> Self {
         let mut config = Self {
             data_dir: data_dir.to_path_buf(),
             ..Self::default()

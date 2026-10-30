@@ -174,10 +174,7 @@ mod tests {
         let handles = crate::context::StartupHandles::new(Arc::new(SetupState::new()));
         let early = super::super::init_early(args, handles).await.unwrap();
         let ctx = Arc::new(super::super::acquire_lock(early).await.unwrap());
-        let mut config = Config {
-            data_dir: directory.path().to_owned(),
-            ..Default::default()
-        };
+        let mut config = Config::for_test(directory.path());
         config.vm.autostart = autostart;
         let runtime = Arc::new(Runtime::new(config).unwrap());
         runtime.prepare_host().await.unwrap();

@@ -49,12 +49,9 @@ struct Harness {
 impl Harness {
     async fn new(blocking: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(Config {
-            data_dir: directory.path().into(),
-            ..Default::default()
-        })
-        .unwrap()
-        .with_network_fixture(NetworkFixture::default());
+        let runtime = Runtime::new(Config::for_test(directory.path()))
+            .unwrap()
+            .with_network_fixture(NetworkFixture::default());
         // The transport harness supplies snapshots; production capture has no fixture bypass.
         let snapshot = CapturedMachineWeb {
             guest: runtime

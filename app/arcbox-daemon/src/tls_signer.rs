@@ -263,12 +263,9 @@ mod tests {
     ) -> (Arc<Runtime>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Arc::new(
-            Runtime::new(arcbox_core::Config {
-                data_dir: directory.path().to_owned(),
-                ..Default::default()
-            })
-            .unwrap()
-            .with_network_fixture(fixture),
+            Runtime::new(arcbox_core::Config::for_test(directory.path()))
+                .unwrap()
+                .with_network_fixture(fixture),
         );
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())

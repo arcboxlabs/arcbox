@@ -275,10 +275,7 @@ mod tests {
         let handles = StartupHandles::new(Arc::new(SetupState::new()));
         let early = init_early(args, handles).await.unwrap();
         let ctx = Arc::new(acquire_lock(early).await.unwrap());
-        let mut config = Config {
-            data_dir: directory.path().to_owned(),
-            ..Default::default()
-        };
+        let mut config = Config::for_test(directory.path());
         config.vm.autostart = false;
         let assets = assets::prepare(&config).await.unwrap();
         let runtime = Arc::new(Runtime::new(config).unwrap());

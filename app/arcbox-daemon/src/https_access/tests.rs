@@ -354,12 +354,9 @@ async fn runtime_source_publishes_only_current_system_claims() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = arcbox_core::runtime::NetworkFixture::default();
     let runtime = Arc::new(
-        Runtime::new(arcbox_core::Config {
-            data_dir: directory.path().into(),
-            ..Default::default()
-        })
-        .unwrap()
-        .with_network_fixture(fixture.clone()),
+        Runtime::new(arcbox_core::Config::for_test(directory.path()))
+            .unwrap()
+            .with_network_fixture(fixture.clone()),
     );
     let address = "10.0.2.3".parse::<IpAddr>().unwrap();
     runtime

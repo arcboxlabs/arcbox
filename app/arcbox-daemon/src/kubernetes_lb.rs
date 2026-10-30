@@ -227,12 +227,9 @@ mod tests {
     async fn polls_only_while_the_vm_is_ready_and_kubernetes_is_held() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Arc::new(
-            Runtime::new(Config {
-                data_dir: dir.path().to_path_buf(),
-                ..Default::default()
-            })
-            .unwrap()
-            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
+            Runtime::new(Config::for_test(dir.path()))
+                .unwrap()
+                .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
         );
         let (vm_tx, vm) = watch::channel(VmLifecycleState::Running);
         let hold = runtime.subscribe_kubernetes_hold();

@@ -148,13 +148,7 @@ mod tests {
     #[tokio::test]
     async fn the_loop_follows_machine_records_through_the_event_bus() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let runtime = Arc::new(
-            Runtime::new(Config {
-                data_dir: tmp.path().to_path_buf(),
-                ..Default::default()
-            })
-            .expect("runtime"),
-        );
+        let runtime = Arc::new(Runtime::new(Config::for_test(tmp.path())).expect("runtime"));
         let bus: &EventBus = runtime.event_bus();
         runtime
             .register_machine_dns("gone", "192.168.64.9".parse().unwrap())

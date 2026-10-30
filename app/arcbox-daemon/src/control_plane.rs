@@ -405,10 +405,9 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let runtime = Arc::new(
-            arcbox_core::Runtime::new(arcbox_core::config::Config {
-                data_dir: directory.path().join("data"),
-                ..Default::default()
-            })
+            arcbox_core::Runtime::new(arcbox_core::config::Config::for_test(
+                &directory.path().join("data"),
+            ))
             .unwrap(),
         );
         runtime
