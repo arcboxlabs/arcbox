@@ -1016,16 +1016,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-net-virtio"
-version = "0.10.5"
-dependencies = [
- "arcbox-conntrack",
- "arcbox-virtio",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arcbox-oci"
 version = "0.10.5"
 dependencies = [

@@ -14,7 +14,7 @@ distribution".
   crate (`arcbox-packet`, `arcbox-datapath`, `arcbox-conntrack`, `arcbox-dns`,
   `arcbox-fakeip`, `arcbox-proxy`, `splicetcp`, `arcbox-xnu-net`). WHY: two
   independent consumers depend on that purity — the VM datapath
-  (`virt/arcbox-net`, `virt/arcbox-net-virtio`) and the host-only proxy harness
+  (`virt/arcbox-net`) and the host-only proxy harness
   (`virt/arcbox-net/examples/tun_proxy.rs`, docs/experiments/2026-06-17-surge-tun-proxy.md). Every
   change must serve **both**; adding a VM type here silently breaks the host
   harness. Most net-crate `lib.rs` headers restate this (arcbox-xnu-net's
@@ -256,7 +256,7 @@ receives. A semantics change here lands on both directions at once.
 1. `cargo test -p <crate>` — per-crate unit tests (every module has them).
 2. Host-only end-to-end: the `tun_proxy` harness (Gate C, docs/experiments/2026-06-17-surge-tun-proxy.md)
    exercises classifier + TcpBridge + proxy **without booting a VM**.
-3. VM datapath: run through `virt/arcbox-net` / `virt/arcbox-net-virtio`.
+3. VM datapath: run through `virt/arcbox-net`.
 4. Full-path throughput / regressions: iperf3 reproducer and measured caps in
    docs/benchmarks/network.md.
 

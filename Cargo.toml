@@ -45,7 +45,6 @@ members = [
     "virt/arcbox-vm-agent",
     "virt/arcbox-fs",
     "virt/arcbox-net",
-    "virt/arcbox-net-virtio",
     "virt/arcbox-net-inject",
     "virt/arcbox-vmnet",
     "virt/arcbox-dhcp",
