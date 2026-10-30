@@ -5,7 +5,7 @@ use crate::error::{Result, VmmError};
 
 use super::*;
 
-impl Vmm {
+impl HvMachine {
     /// Duplicates a daemon-facing socketpair fd into a monotonically increasing
     /// descriptor range derived from the connection's host port.
     ///

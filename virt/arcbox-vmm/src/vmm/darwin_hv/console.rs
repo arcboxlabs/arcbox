@@ -5,7 +5,7 @@ use crate::error::{Result, VmmError};
 
 use super::*;
 
-impl Vmm {
+impl HvMachine {
     /// Spawns the interactive debug-console RX worker when a debug-console
     /// socket was configured (`VmmConfig::debug_console_socket`). The worker
     /// reads operator keystrokes from the socket and injects them into the

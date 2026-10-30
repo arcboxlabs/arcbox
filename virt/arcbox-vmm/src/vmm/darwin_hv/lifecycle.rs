@@ -8,7 +8,7 @@ use super::psci::{CpuOnRequest, CpuPower, CpuPowerRegistry};
 use super::vcpu_loop::{VcpuBoot, VcpuContext, vcpu_run_loop};
 use super::*;
 
-impl Vmm {
+impl HvMachine {
     /// Starts the custom HV VMM by spawning vCPU threads.
     ///
     /// The BSP (vCPU 0) runs immediately. Secondary vCPUs (1..N) are spawned

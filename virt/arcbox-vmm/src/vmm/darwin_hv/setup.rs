@@ -30,7 +30,7 @@ fn read_boot_entropy(buf: &mut [u8]) -> Result<()> {
         .map_err(|e| VmmError::Memory(format!("FDT seed: reading /dev/urandom failed: {e}")))
 }
 
-impl Vmm {
+impl HvMachine {
     /// Custom VMM initialization using Hypervisor.framework (manual execution).
     ///
     /// This path is an alternative to `initialize_darwin()` (VZ framework).

@@ -34,6 +34,7 @@ mod guest_ram;
 mod hvc_blk;
 mod inline_sink;
 mod lifecycle;
+mod machine;
 mod network;
 mod page_release;
 pub(super) mod pl011;
@@ -44,6 +45,7 @@ mod vcpu_loop;
 mod vsock;
 
 pub(super) use hvc_blk::HvcBlkTable;
+pub use machine::HvMachine;
 pub(super) use pl011::Pl011;
 #[cfg(test)]
 use pl011::{PL011_BASE, PL011_DR, PL011_FR, PL011_SIZE};
@@ -108,7 +110,7 @@ const GIC_REDIST_ADDR: u64 = 0x080A_0000;
 /// GIC redistributor region size (32 MB, enough for max vCPUs).
 const GIC_REDIST_SIZE: u64 = 0x200_0000;
 
-/// Type alias for the guest memory backing used by the parent `Vmm` struct
+/// Type alias for the guest memory backing used by [`HvMachine`]
 /// (HV backend). Now backed by `vm-memory`'s mmap abstraction.
 pub(super) type HvGuestMem = GuestMemoryMmap;
 
@@ -326,7 +328,7 @@ mod tests {
         // SAFETY: Same as above for the peer fd.
         let peer_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        let duplicated = Vmm::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
+        let duplicated = HvMachine::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
         // The dup clamps `min_fd` below RLIMIT_NOFILE to stay portable across
         // runners with a low soft limit (CI macOS defaults to ~2560). We
         // only require that the result escapes the low socketpair-recycle

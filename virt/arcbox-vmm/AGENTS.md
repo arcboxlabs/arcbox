@@ -167,6 +167,10 @@ threshold exactly 8".
    (497-517). DAX `hv_vm_unmap` must run while the VM is alive; guest memory
    must outlive `hv_vm` so mapped pages stay valid until `hv_vm_destroy`.
 
+The field order of `HvMachine` (`darwin_hv/machine.rs`) is the same contract
+for the panic path, where implicit drop runs instead of `stop_darwin_hv`. Do
+not reorder its fields.
+
 ABX-415 (SIGSEGV on SIGTERM) lives in exactly this path — do not reorder without
 re-reading every join site's comment.
 
