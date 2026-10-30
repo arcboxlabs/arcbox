@@ -8,6 +8,5 @@
 pub mod coalesce;
 pub mod inject;
 pub mod inline_conn;
-pub mod irq;
 pub mod queue;
 pub mod stats;

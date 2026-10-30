@@ -10,8 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::device::VirtioMmioState;
-use crate::irq::Irq;
+use crate::device::{IoCompletion, VirtioMmioState};
 
 /// A single block I/O request parsed from a VirtIO descriptor chain.
 pub struct BlkWorkItem {
@@ -164,10 +163,8 @@ pub struct BlkWorkerContext {
     pub device_id: String,
     /// MMIO state for setting interrupt_status.
     pub mmio_state: Arc<RwLock<VirtioMmioState>>,
-    /// IRQ trigger callback.
-    pub irq_callback: Arc<dyn Fn(Irq, bool) -> crate::error::Result<()> + Send + Sync>,
-    /// IRQ number for this block device.
-    pub irq: Irq,
+    /// Completes requests: sets INT_VRING, then asserts the device's SPI.
+    pub completion: IoCompletion,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
     /// Shared flush barrier for multi-queue flush synchronization.
@@ -262,7 +259,7 @@ fn drain_queue(ctx: &BlkWorkerContext, last_avail: &mut u16) {
                 None => (chain.head_idx, 0),
             };
             if queue.push_used(head, len) {
-                trigger_irq(ctx);
+                ctx.completion.complete();
             }
         }
         // Re-arm notifications and re-check: loop if the guest added more (and
@@ -709,16 +706,6 @@ fn zero_ranges(
     status
 }
 
-fn trigger_irq(ctx: &BlkWorkerContext) {
-    // Set interrupt_status on MMIO state.
-    if let Ok(mut s) = ctx.mmio_state.write() {
-        s.trigger_interrupt(1); // INT_VRING
-    }
-    // Fire GIC SPI. That is the whole wake: the hypervisor wakes a vCPU
-    // sleeping in WFI and injects into a running one on its own.
-    let _ = (ctx.irq_callback)(ctx.irq, true);
-}
-
 // ============================================================================
 // Per-device async state (stored on DeviceManager)
 // ============================================================================
@@ -783,6 +770,7 @@ mod tests {
     use super::*;
 
     fn test_context(mem: &mut [u8], raw_fd: i32, capacity_sectors: u64) -> BlkWorkerContext {
+        let mmio_state = Arc::new(RwLock::new(VirtioMmioState::new(2, 0)));
         BlkWorkerContext {
             // SAFETY: test memory outlives the returned context.
             guest_mem: unsafe { GuestMemWriter::new(mem.as_mut_ptr(), mem.len(), 0) },
@@ -791,9 +779,8 @@ mod tests {
             capacity_sectors,
             read_only: false,
             device_id: "test-blk".to_string(),
-            mmio_state: Arc::new(RwLock::new(VirtioMmioState::new(2, 0))),
-            irq_callback: Arc::new(|_, _| Ok(())),
-            irq: 32,
+            mmio_state: mmio_state.clone(),
+            completion: IoCompletion::new(mmio_state, 32, Arc::new(|_, _| Ok(()))),
             running: Arc::new(AtomicBool::new(true)),
             flush_barrier: Arc::new(FlushBarrier::new()),
             queue_idx: 0,

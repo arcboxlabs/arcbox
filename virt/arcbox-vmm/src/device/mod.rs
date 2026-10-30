@@ -18,6 +18,7 @@ use crate::irq::{Irq, IrqChip};
 use crate::memory::MemoryManager;
 
 mod checksum;
+mod completion;
 mod debug;
 mod dispatch;
 mod mmio_state;
@@ -29,6 +30,7 @@ mod tree;
 mod tests;
 
 use checksum::finalize_virtio_net_checksum;
+pub use completion::IoCompletion;
 pub use debug::{DeviceDebug, QueueDebug};
 pub use mmio_state::{MAX_VIRTQUEUES, MmioDevice, VirtioMmioState, virtio_mmio};
 pub use tree::DeviceTreeEntry;
@@ -416,12 +418,9 @@ impl DeviceManager {
             )
         };
 
-        let raise_irq: Arc<dyn Fn(u32) + Send + Sync> = Arc::new(move |reason: u32| {
-            if let Ok(mut s) = mmio_arc.write() {
-                s.trigger_interrupt(reason);
-            }
-            let _ = irq_callback(irq, true);
-        });
+        let completion = IoCompletion::new(mmio_arc, irq, irq_callback);
+        let raise_irq: Arc<dyn Fn(u32) + Send + Sync> =
+            Arc::new(move |reason: u32| completion.raise(reason));
 
         Some(arcbox_virtio::DeviceCtx {
             mem: Arc::new(mem),

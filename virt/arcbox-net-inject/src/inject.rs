@@ -21,7 +21,6 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use crate::coalesce::{BATCH_SIZE, CoalescePolicy};
 use crate::inline_conn::{self, InlineConn};
-use crate::irq::IrqHandle;
 use crate::queue;
 use crate::stats::InjectStats;
 
@@ -59,12 +58,10 @@ pub struct RxInjectThread {
     /// RX queue layout (queue index 0 of primary VirtioNet), captured at
     /// DRIVER_OK time.
     pub queue: QueueConfig,
-    /// Interrupt delivery handle.
-    pub irq: IrqHandle,
-    /// MMIO state for setting interrupt_status. Wrapped for &self access.
-    /// The inject thread needs to set interrupt_status |= INT_VRING
-    /// before firing the GIC SPI.
-    pub set_interrupt_status: Arc<dyn Fn() + Send + Sync>,
+    /// Completes a batch: sets `interrupt_status |= INT_VRING`, then
+    /// asserts the device's GIC SPI. One call, so the two steps cannot be
+    /// reordered or split. Asserting the SPI is the whole wake.
+    pub complete_io: Arc<dyn Fn() + Send + Sync>,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
     /// Whether `VIRTIO_F_EVENT_IDX` was negotiated with the guest. When
@@ -656,8 +653,7 @@ impl RxInjectThread {
         }
 
         if fire {
-            (self.set_interrupt_status)();
-            self.irq.trigger();
+            (self.complete_io)();
         }
     }
 }
@@ -788,11 +784,7 @@ mod tests {
             conn_rx,
             guest_mem: ram.mem(),
             queue: ram.cfg(),
-            irq: IrqHandle {
-                callback: Arc::new(|_, _| Ok(())),
-                irq: 32,
-            },
-            set_interrupt_status: Arc::new(|| {}),
+            complete_io: Arc::new(|| {}),
             running: Arc::new(AtomicBool::new(true)),
             event_idx_enabled: event_idx,
         }

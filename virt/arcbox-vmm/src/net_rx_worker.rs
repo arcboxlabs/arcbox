@@ -13,14 +13,13 @@
 //! inject_one_frame` with the channel-based inject thread), and
 //! coalesces interrupts to minimize VM exit overhead.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use arcbox_virtio::{GuestMemWriter, QueueConfig, SplitQueue};
 
-use crate::device::VirtioMmioState;
-use crate::irq::Irq;
+use crate::device::IoCompletion;
 
 /// Maximum frames to inject per kqueue wakeup before checking
 /// interrupt coalescing thresholds.
@@ -47,25 +46,10 @@ pub struct NetRxWorkerContext {
     pub rx_queue: QueueConfig,
     /// Whether `VIRTIO_F_EVENT_IDX` was negotiated with the guest.
     pub event_idx: bool,
-    /// MMIO state for setting interrupt_status (INT_VRING).
-    pub mmio_state: Arc<RwLock<VirtioMmioState>>,
-    /// IRQ callback for GIC SPI injection (thread-safe).
-    pub irq_callback: Arc<dyn Fn(Irq, bool) -> crate::error::Result<()> + Send + Sync>,
-    /// IRQ number for the primary VirtioNet device.
-    pub irq: Irq,
+    /// Completes RX batches: sets INT_VRING, then asserts the device's SPI.
+    pub completion: IoCompletion,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
-}
-
-/// Triggers a virtio-net RX interrupt: sets MMIO interrupt_status and
-/// asserts the GIC SPI.
-fn trigger_net_irq(ctx: &NetRxWorkerContext) {
-    // Set interrupt_status on MMIO state.
-    if let Ok(mut s) = ctx.mmio_state.write() {
-        s.trigger_interrupt(1); // INT_VRING
-    }
-    // Fire GIC SPI (thread-safe — hv_gic_set_spi is global).
-    let _ = (ctx.irq_callback)(ctx.irq, true);
 }
 
 /// Flushes a batch: republishes `avail_event` (EVENT_IDX only) and fires
@@ -77,7 +61,7 @@ fn flush_batch(ctx: &NetRxWorkerContext, queue: &SplitQueue, fire: bool) {
         queue.write_avail_event_current();
     }
     if fire {
-        trigger_net_irq(ctx);
+        ctx.completion.complete();
     }
 }
 
@@ -240,7 +224,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
         if ctx.event_idx {
             queue.write_avail_event_current();
         }
-        trigger_net_irq(&ctx); // Always notify on shutdown.
+        ctx.completion.complete(); // Always notify on shutdown.
     }
 
     unsafe { libc::close(kq) };
