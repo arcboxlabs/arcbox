@@ -90,9 +90,28 @@ arcbox/
 ├── sdk/  runtime/  tests/  xtask/
 ```
 
-`runtime/` (arcbox-container, arcbox-oci — currently zero consumers) is
-either activated inside `engine/arcbox-image`'s OCI story or deleted; it
-does not stay as dead weight.
+`runtime/` (arcbox-container, arcbox-oci) is parked, not deleted. It has
+had zero consumers since 2026-02-26, when the Docker API became a proxy to
+the guest dockerd and the host-side container runtime was removed
+(`0714d401`, `2b165aab`, `fd111018`).
+
+Activation condition: a workspace crate must build or run an OCI runtime
+bundle itself, without dockerd. The expected first consumer is the sandbox
+microVM path (`computer/arcbox-computer-runtime` and
+`virt/arcbox-vm-agent`) starting a workload from an OCI bundle.
+`arcbox-oci` models the OCI runtime spec (`config.json`, bundle, state,
+hooks), not the image spec, so an image pull or layer feature in
+`engine/arcbox-image` does not by itself meet this condition.
+
+When a consumer meets the condition, the activating change must:
+
+- add the dependency from that consumer in the same change;
+- move the crate next to its consumer in the target tree above;
+- update this paragraph and `runtime/AGENTS.md`.
+
+Until then, the crates receive only mechanical maintenance (toolchain,
+lint, and workspace moves). Do not add features to them without a
+consumer. Deleting them requires an ADR that cites this paragraph.
 
 ## Crate migration map
 
