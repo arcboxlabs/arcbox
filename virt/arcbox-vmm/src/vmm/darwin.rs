@@ -508,7 +508,6 @@ impl Vmm {
             cancel.cancel();
         }
         let _ = self.net_vz_fd.take();
-        let _ = self.hv_bridge_net_fd.take();
 
         // Stop vmnet relay and bridge interface.
         #[cfg(feature = "vmnet")]
@@ -531,26 +530,9 @@ impl Vmm {
     ///
     /// Returns `Ok(true)` if the VM stopped within `timeout`, `Ok(false)` on timeout.
     pub fn wait_for_stopped(&mut self, timeout: Duration) -> Result<bool> {
-        if self.config.backend == VmBackend::Hv {
-            if self.hv_poweroff_observed {
-                return Ok(true);
-            }
-            if self.state != VmmState::Running {
-                return Ok(false);
-            }
-            let receiver = self.hv_poweroff_rx.as_ref().ok_or_else(|| {
-                VmmError::invalid_state("HV poweroff receiver is not initialized")
-            })?;
-            return match receiver.recv_timeout(timeout) {
-                Ok(()) => {
-                    self.hv_poweroff_observed = true;
-                    Ok(true)
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(false),
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(VmmError::Vcpu(
-                    "HV vCPU threads exited without PSCI SYSTEM_OFF".into(),
-                )),
-            };
+        let running = self.state == VmmState::Running;
+        if let Some(ref mut hv) = self.hv {
+            return hv.wait_for_poweroff(timeout, running);
         }
 
         if self.state != VmmState::Running {
@@ -581,16 +563,14 @@ impl Vmm {
             )));
         }
 
-        match self.config.backend {
-            VmBackend::Hv => self.connect_vsock_hv(port),
-            VmBackend::Vz => {
-                let vm = self
-                    .darwin_vm
-                    .as_ref()
-                    .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
-                vm.connect_vsock(port).map_err(VmmError::Hypervisor)
-            }
+        if let Some(ref hv) = self.hv {
+            return hv.connect_vsock(port);
         }
+        let vm = self
+            .darwin_vm
+            .as_ref()
+            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+        vm.connect_vsock(port).map_err(VmmError::Hypervisor)
     }
 
     /// Duplicates the host read ends of the VZ console pipes for the
@@ -637,29 +617,15 @@ impl Vmm {
             )));
         }
 
-        match self.config.backend {
-            VmBackend::Hv => {
-                let balloon = self
-                    .hv_balloon
-                    .as_ref()
-                    .ok_or_else(|| VmmError::invalid_state("HV balloon not configured"))?;
-                // Convert bytes → 4 KiB pages, saturating at u32::MAX.
-                let pages = u32::try_from(target_bytes / 4096).unwrap_or(u32::MAX);
-                let guard = balloon
-                    .lock()
-                    .map_err(|e| VmmError::Device(format!("balloon lock poisoned: {e}")))?;
-                guard.set_num_pages(pages);
-                Ok(())
-            }
-            VmBackend::Vz => {
-                let vm = self
-                    .darwin_vm
-                    .as_ref()
-                    .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
-                vm.set_balloon_target_memory(target_bytes)
-                    .map_err(VmmError::Hypervisor)
-            }
+        if let Some(ref hv) = self.hv {
+            return hv.set_balloon_target(target_bytes);
         }
+        let vm = self
+            .darwin_vm
+            .as_ref()
+            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+        vm.set_balloon_target_memory(target_bytes)
+            .map_err(VmmError::Hypervisor)
     }
 
     /// Gets the current target memory size from the balloon device.
@@ -672,11 +638,9 @@ impl Vmm {
             return 0;
         }
 
-        match self.config.backend {
-            VmBackend::Hv => self.hv_balloon.as_ref().map_or(0, |b| {
-                b.lock().map_or(0, |g| u64::from(g.num_pages()) * 4096)
-            }),
-            VmBackend::Vz => self
+        match self.hv {
+            Some(ref hv) => hv.balloon_bytes().0,
+            None => self
                 .darwin_vm
                 .as_ref()
                 .map_or(0, DarwinVm::get_balloon_target_memory),
@@ -688,16 +652,9 @@ impl Vmm {
     /// Returns current balloon stats including target, current, and configured memory sizes.
     #[must_use]
     pub fn get_balloon_stats(&self) -> arcbox_hypervisor::BalloonStats {
-        let (target_bytes, current_bytes) = match self.config.backend {
-            VmBackend::Hv => self.hv_balloon.as_ref().map_or((0, 0), |b| {
-                b.lock().map_or((0, 0), |g| {
-                    (
-                        u64::from(g.num_pages()) * 4096,
-                        u64::from(g.actual()) * 4096,
-                    )
-                })
-            }),
-            VmBackend::Vz => (self.get_balloon_target(), 0),
+        let (target_bytes, current_bytes) = match self.hv {
+            Some(ref hv) => hv.balloon_bytes(),
+            None => (self.get_balloon_target(), 0),
         };
         arcbox_hypervisor::BalloonStats {
             target_bytes,
@@ -710,7 +667,10 @@ impl Vmm {
     pub const fn inbound_listener_manager(
         &mut self,
     ) -> Option<&mut arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        self.inbound_listener_manager.as_mut()
+        match self.hv {
+            Some(ref mut hv) => hv.inbound_listener_manager(),
+            None => self.inbound_listener_manager.as_mut(),
+        }
     }
 
     /// Takes the inbound listener manager out of the VMM.
@@ -720,7 +680,10 @@ impl Vmm {
     pub const fn take_inbound_listener_manager(
         &mut self,
     ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        self.inbound_listener_manager.take()
+        match self.hv {
+            Some(ref mut hv) => hv.take_inbound_listener_manager(),
+            None => self.inbound_listener_manager.take(),
+        }
     }
 
     /// Captures a VM snapshot context from the running Darwin VM.

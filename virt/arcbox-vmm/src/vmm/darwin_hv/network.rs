@@ -2,16 +2,16 @@
 //!
 //! Contains `create_hv_network_datapath` (primary NIC1 socketpair + frame
 //! classifier datapath) and `create_hv_bridge_nic` (NIC2 vmnet bridge). Both are
-//! `impl Vmm` methods that set up socketpairs, configure socket options,
+//! `impl HvMachine` methods that set up socketpairs, configure socket options,
 //! and spawn async tasks for frame forwarding.
 
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
+use super::HvMachine;
 use super::inline_sink::InlineConnSinkAdapter;
 use crate::error::{Result, VmmError};
-use crate::vmm::Vmm;
 
-impl Vmm {
+impl HvMachine {
     /// Creates the network datapath for the HV backend.
     ///
     /// Sets up a SOCK_DGRAM socketpair. One end is registered with DeviceManager
