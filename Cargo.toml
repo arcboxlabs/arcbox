@@ -171,7 +171,7 @@ prost-build = "0.14"
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
-hyper = { version = "1", features = ["full"] }
+hyper = { version = "1.11", features = ["full"] }
 
 # RPC (privileged helper)
 tarpc = { version = "0.37", features = ["serde-transport", "unix", "serde-transport-json"] }

@@ -1,4 +1,8 @@
 //! Fail a translated HTTP/1 message when Hyper cannot preserve its trailers.
+//!
+//! The checks below mirror Hyper's chunked trailer encoder from 1.11 on, which
+//! matches declared names case-insensitively and keeps repeated values. Older
+//! encoders drop such trailers silently, so the workspace requires hyper 1.11.
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, StreamBody, combinators::UnsyncBoxBody};
