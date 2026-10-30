@@ -26,6 +26,11 @@ pub(super) struct Data {
     pub writes: usize,
     pub symlink: Option<String>,
     pub reject_write: bool,
+    /// Archive requests still to answer with 500, as dockerd does while
+    /// the overlay upperdir is in use.
+    pub busy_archives: usize,
+    /// Error messages the next start or restart requests answer with 500, in order.
+    pub start_errors: Vec<&'static str>,
     pub operations: Vec<String>,
     pub requests: Vec<String>,
     pub changed: Arc<Notify>,
@@ -57,6 +62,8 @@ impl Guest {
             writes: 0,
             symlink: None,
             reject_write: false,
+            busy_archives: 0,
+            start_errors: Vec::new(),
             operations: Vec::new(),
             requests: Vec::new(),
             changed: Arc::new(Notify::new()),
@@ -161,6 +168,16 @@ fn respond(request: Request<bytes::Bytes>, data: &Mutex<Data>) -> (Response, Opt
         ));
         let running = !path.ends_with("/stop");
         data.operations.push(path);
+        if running && !data.start_errors.is_empty() {
+            let message = data.start_errors.remove(0);
+            response = response.status(500);
+            return (
+                response
+                    .body(Body::from(json!({"message": message}).to_string()))
+                    .unwrap(),
+                gate,
+            );
+        }
         gate = data.block_operation.take();
         data.metadata["State"]["Running"] = json!(running);
         response = response.status(204);
@@ -177,6 +194,11 @@ fn respond(request: Request<bytes::Bytes>, data: &Mutex<Data>) -> (Response, Opt
         )
         .decode_utf8()
         .unwrap();
+        if data.busy_archives > 0 {
+            data.busy_archives -= 1;
+            response = response.status(500);
+            return (response.body(Body::empty()).unwrap(), gate);
+        }
         if method == Method::HEAD {
             if target != BUNDLES[0] && !BUNDLES[0].starts_with(&format!("{target}/")) {
                 response = response.status(404);

@@ -114,6 +114,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-30 — Container CA injection retries archive requests that hit a busy overlay](logs/2026-10-30-ca-injection-overlay-busy.md)
 - [2026-10-30 — The consumerless arcbox-net-virtio crate is removed](logs/2026-10-30-remove-net-virtio.md)
 - [2026-10-26 — Native TCP ownership and silent rejection share one bridge](logs/2026-10-26-native-tcp-drop-integration.md)
 - [2026-10-24 — TCP egress resolution supports silent rejection](logs/2026-10-24-tcp-egress-drop.md)

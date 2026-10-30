@@ -110,6 +110,62 @@ async fn write_failures_are_errors_and_missing_publication_keeps_create_id() {
 }
 
 #[tokio::test]
+async fn archive_requests_outlast_a_busy_overlay_and_then_report_it() {
+    let guest = guest::Guest::new(metadata()).await;
+    guest.data.lock().unwrap().busy_archives = archive::BUSY_RETRIES as usize;
+    assert_eq!(
+        reconcile_with_pem(&guest.state, "test", &root())
+            .await
+            .unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(guest.data.lock().unwrap().writes, 1);
+
+    let guest = guest::Guest::new(metadata()).await;
+    guest.data.lock().unwrap().busy_archives = archive::BUSY_RETRIES as usize + 1;
+    assert!(
+        reconcile_with_pem(&guest.state, "test", &root())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("500")
+    );
+    assert_eq!(guest.data.lock().unwrap().writes, 0);
+}
+
+#[tokio::test]
+async fn start_outlasts_a_busy_overlay_and_returns_other_errors_unchanged() {
+    const BUSY: &str =
+        "failed to mount /var/lib/docker/rootfs/overlayfs/test: device or resource busy";
+    let retries = archive::BUSY_RETRIES as usize;
+    let guest = guest::Guest::new(metadata()).await;
+    guest.data.lock().unwrap().start_errors = vec![BUSY; retries];
+    let response = operation(guest.state.clone(), "test", "start")
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(guest.data.lock().unwrap().operations.len(), retries + 1);
+
+    let guest = guest::Guest::new(metadata()).await;
+    guest.data.lock().unwrap().start_errors = vec![BUSY; retries + 1];
+    let response = operation(guest.state.clone(), "test", "start")
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(guest.data.lock().unwrap().operations.len(), retries + 1);
+
+    let guest = guest::Guest::new(metadata()).await;
+    guest.data.lock().unwrap().start_errors = vec!["no such image"];
+    let response = operation(guest.state.clone(), "test", "restart")
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("no such image"));
+    assert_eq!(guest.data.lock().unwrap().operations.len(), 1);
+}
+
+#[tokio::test]
 async fn opt_out_precedes_root_loader_failures() {
     let mut config = metadata();
     config["Config"]["Labels"] = json!({OPT_OUT: "false"});

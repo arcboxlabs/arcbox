@@ -91,6 +91,49 @@ pub(super) fn report_warnings(response: &mut Response, warnings: Vec<String>) {
     }
 }
 
+/// Proxies a start or restart, retrying while the overlay of the last archive request is busy.
+///
+/// dockerd mounts the container rootfs to start it, and that mount fails
+/// with `EBUSY` inside the window the last archive request of [`reconcile`]
+/// leaves behind (see [`archive`]). A start that failed this way did not
+/// start the container, so the same request is sent again. Other answers,
+/// including other 500s, are returned unchanged.
+pub(super) async fn proxy_start(
+    state: &AppState,
+    uri: &axum::http::Uri,
+    request: axum::http::Request<Body>,
+) -> Result<Response> {
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, 1024 * 1024)
+        .await
+        .map_err(|e| DockerError::Server(format!("failed to read container start request: {e}")))?;
+    let mut delay = archive::BUSY_RETRY_DELAY;
+    for attempt in 0..=archive::BUSY_RETRIES {
+        // `Parts` is not `Clone` (its extensions are not); a start carries none.
+        let mut request = axum::http::Request::new(Body::from(body.clone()));
+        *request.method_mut() = parts.method.clone();
+        *request.uri_mut() = parts.uri.clone();
+        *request.version_mut() = parts.version;
+        *request.headers_mut() = parts.headers.clone();
+        let response = super::super::proxy_to_system_vm(state, uri, request).await?;
+        if response.status() != StatusCode::INTERNAL_SERVER_ERROR
+            || attempt == archive::BUSY_RETRIES
+        {
+            return Ok(response);
+        }
+        let (response_parts, response_body) = response.into_parts();
+        let error = to_bytes(response_body, 1024 * 1024).await.map_err(|e| {
+            DockerError::GuestUnavailable(format!("failed to read container start error: {e}"))
+        })?;
+        if !String::from_utf8_lossy(&error).contains("device or resource busy") {
+            return Ok(Response::from_parts(response_parts, Body::from(error)));
+        }
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+    }
+    unreachable!("the last attempt returns its response")
+}
+
 pub(super) async fn reconcile(state: &AppState, id: &str) -> Result<Vec<String>> {
     let tls_dir = state.runtime.config().data_dir.join("tls");
     let published = tokio::fs::read(tls_dir.join("ca.pem")).await;

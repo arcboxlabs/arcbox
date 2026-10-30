@@ -103,7 +103,7 @@ pub async fn start_container(
     tracing::Span::current().record("container_id", lifecycle.id.as_str());
     let uri = lifecycle.uri(&uri)?;
     let warnings = ca_injection::reconcile(&state, &lifecycle.id).await?;
-    let mut response = proxy_to_system_vm(&state, &uri, req).await?;
+    let mut response = ca_injection::proxy_start(&state, &uri, req).await?;
     ca_injection::report_warnings(&mut response, warnings);
 
     // On success, inspect the container and set up port forwarding + DNS.
@@ -220,7 +220,7 @@ pub async fn restart_container(
     tracing::Span::current().record("container_id", lifecycle.id.as_str());
     let uri = lifecycle.uri(&uri)?;
     let warnings = ca_injection::reconcile(&state, &lifecycle.id).await?;
-    let mut response = proxy_to_system_vm(&state, &uri, req).await?;
+    let mut response = ca_injection::proxy_start(&state, &uri, req).await?;
     ca_injection::report_warnings(&mut response, warnings);
 
     if response.status().as_u16() == 204 {
