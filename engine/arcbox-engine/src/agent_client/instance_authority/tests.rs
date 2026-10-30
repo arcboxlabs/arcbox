@@ -308,7 +308,14 @@ async fn invalid_or_unsolicited_acknowledgements_close_the_connection() {
                 let error = peer
                     .recv(Instant::now() + Duration::from_secs(3))
                     .unwrap_err();
-                assert!(error.to_string().contains("eof"), "{error}");
+                // Linux resets a Unix socket whose peer closes with unread
+                // data, so the repeated or malformed frame can end in a reset
+                // instead of eof. Both mean that the client closed the connection.
+                let error = error.to_string();
+                assert!(
+                    error.contains("eof") || error.contains("Connection reset"),
+                    "{error}"
+                );
             });
             let (mut session, coordinator) = client.instance_authority().unwrap();
             session.opened().await.unwrap();
