@@ -174,8 +174,8 @@ impl Config {
 
     /// Returns the boot-asset policy selected by this runtime configuration.
     #[must_use]
-    pub fn boot_asset_config(&self) -> crate::boot_assets::BootAssetConfig {
-        crate::boot_assets::BootAssetConfig::with_cache_dir(self.data_dir.join("boot"))
+    pub fn boot_asset_config(&self) -> arcbox_image::boot_assets::BootAssetConfig {
+        arcbox_image::boot_assets::BootAssetConfig::with_cache_dir(self.data_dir.join("boot"))
             .with_custom_kernel(self.vm.kernel_path.clone())
             .with_unpinned_manifest_allowed(self.profile == ArcboxProfile::Development)
     }

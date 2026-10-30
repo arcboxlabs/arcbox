@@ -7,8 +7,9 @@
 //! the *client* closes it — so a parked client pinned the daemon until its
 //! drain timeout aborted everything, in-flight requests included.
 
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{Config, Runtime};
 use arcbox_docker::{DockerApiServer, ServerConfig};
+use arcbox_engine::vm_lifecycle::VmLifecycleConfig;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

@@ -16,7 +16,7 @@ use crate::error::error_info;
 /// `FAILED_PRECONDITION` carrying `NESTED_VIRT_UNSUPPORTED` with the
 /// daemon's authoritative reason, exactly what `GetCapabilities` reports.
 pub(super) fn nested_virt_unsupported(
-    capability: &arcbox_core::NestedVirtCapability,
+    capability: &arcbox_computer::NestedVirtCapability,
 ) -> ConnectError {
     let mut error = ConnectError::new(
         ConnectCode::FailedPrecondition,

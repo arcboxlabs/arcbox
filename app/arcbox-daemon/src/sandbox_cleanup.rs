@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arcbox_computer::cleanup;
-use arcbox_core::{Runtime, VmBackend, VmLifecycleState};
+use arcbox_core::{Runtime, VmBackend};
 use arcbox_engine::EngineError;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};

@@ -1,7 +1,7 @@
 use crate::config::ContainerRuntimeConfig;
 use crate::error::Result;
-use crate::machine::MachineManager;
-use crate::vm_lifecycle::VmLifecycleManager;
+use arcbox_engine::machine::MachineManager;
+use arcbox_engine::vm_lifecycle::VmLifecycleManager;
 use async_trait::async_trait;
 use std::sync::Arc;
 

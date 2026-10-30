@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 #[cfg(target_os = "macos")]
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::ports::KUBERNETES_API_HOST_PORT;
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -271,11 +272,11 @@ async fn vm_running_loop(
 ///
 /// `ContainerRouteInstalled` sets the flag; `MachineStopped` clears it.
 async fn route_status_loop(
-    mut events: tokio::sync::broadcast::Receiver<arcbox_core::event::Event>,
+    mut events: tokio::sync::broadcast::Receiver<arcbox_engine::event::Event>,
     setup_state: Arc<arcbox_api::SetupState>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
-    use arcbox_core::event::Event;
+    use arcbox_engine::event::Event;
     use tokio::sync::broadcast::error::RecvError;
 
     loop {
@@ -436,8 +437,8 @@ async fn container_route_guard(
                 consecutive_failures = 0;
                 if !was_installed {
                     runtime.event_bus().publish(
-                        arcbox_core::event::Event::ContainerRouteInstalled {
-                            name: arcbox_core::DEFAULT_MACHINE_NAME.to_string(),
+                        arcbox_engine::event::Event::ContainerRouteInstalled {
+                            name: arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME.to_string(),
                         },
                     );
                 }
@@ -565,12 +566,12 @@ async fn ensure_isolated_container_route(
 
     let machine_manager = runtime.machine_manager();
     let machine_is_running = machine_manager
-        .get(arcbox_core::DEFAULT_MACHINE_NAME)
+        .get(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)
         .is_some_and(|machine| {
             matches!(
                 machine.state,
-                arcbox_core::machine::MachineState::Starting
-                    | arcbox_core::machine::MachineState::Running
+                arcbox_engine::machine::MachineState::Starting
+                    | arcbox_engine::machine::MachineState::Running
             )
         });
     anyhow::ensure!(
@@ -581,7 +582,7 @@ async fn ensure_isolated_container_route(
     #[cfg(feature = "vmnet")]
     if let Some(bridge) = {
         use arcbox_core::bridge_discovery::MachineBridgeExt as _;
-        machine_manager.vmnet_bridge_name(arcbox_core::DEFAULT_MACHINE_NAME)
+        machine_manager.vmnet_bridge_name(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)
     } {
         arcbox_core::route_reconciler::ensure_route_for_bridge_with_network(
             &bridge,
@@ -600,7 +601,7 @@ async fn ensure_isolated_container_route(
     }
 
     let bridge_mac = machine_manager
-        .bridge_mac(arcbox_core::DEFAULT_MACHINE_NAME)
+        .bridge_mac(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)
         .with_context(|| format!("container bridge MAC is not ready for {container_network}"))?;
     arcbox_core::route_reconciler::ensure_route_with_retry_for_network(
         &bridge_mac,
@@ -675,14 +676,14 @@ fn route_action(resolution: BridgeResolution, active: Option<&str>) -> RouteActi
 /// `discover` is lazy so a stopped VM costs no forwarding-table walk.
 #[cfg(target_os = "macos")]
 fn classify_bridge(
-    machine_state: Option<arcbox_core::machine::MachineState>,
+    machine_state: Option<arcbox_engine::machine::MachineState>,
     discover: impl FnOnce() -> Option<String>,
 ) -> BridgeResolution {
     let running = matches!(
         machine_state,
         Some(
-            arcbox_core::machine::MachineState::Starting
-                | arcbox_core::machine::MachineState::Running
+            arcbox_engine::machine::MachineState::Starting
+                | arcbox_engine::machine::MachineState::Running
         )
     );
     if !running {
@@ -692,10 +693,10 @@ fn classify_bridge(
 }
 
 #[cfg(target_os = "macos")]
-fn system_vm_state(runtime: &Runtime) -> Option<arcbox_core::machine::MachineState> {
+fn system_vm_state(runtime: &Runtime) -> Option<arcbox_engine::machine::MachineState> {
     runtime
         .machine_manager()
-        .get(arcbox_core::DEFAULT_MACHINE_NAME)
+        .get(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)
         .map(|machine| machine.state)
 }
 
@@ -705,14 +706,14 @@ fn resolve_container_bridge(runtime: &Runtime) -> BridgeResolution {
         use arcbox_core::bridge_discovery::MachineBridgeExt as _;
         runtime
             .machine_manager()
-            .vmnet_bridge_name(arcbox_core::DEFAULT_MACHINE_NAME)
+            .vmnet_bridge_name(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)
             .or_else(|| {
                 // The binary may include vmnet support while this signed daemon
                 // is using VZ NAT (notably development builds without
                 // com.apple.vm.networking).
                 let mac = runtime
                     .machine_manager()
-                    .bridge_mac(arcbox_core::DEFAULT_MACHINE_NAME)?;
+                    .bridge_mac(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)?;
                 arcbox_core::bridge_discovery::resolve_bridge_by_mac(&mac).map(|bridge| bridge.name)
             })
     })
@@ -723,7 +724,7 @@ fn resolve_container_bridge(runtime: &Runtime) -> BridgeResolution {
     classify_bridge(system_vm_state(runtime), || {
         let mac = runtime
             .machine_manager()
-            .bridge_mac(arcbox_core::DEFAULT_MACHINE_NAME)?;
+            .bridge_mac(arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME)?;
         arcbox_core::bridge_discovery::resolve_bridge_by_mac(&mac).map(|bridge| bridge.name)
     })
 }
@@ -777,7 +778,7 @@ mod tests {
     use std::time::Duration;
 
     use arcbox_api::SetupState;
-    use arcbox_core::event::{Event, EventBus};
+    use arcbox_engine::event::{Event, EventBus};
 
     use super::*;
 
@@ -789,7 +790,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_running_vm_with_no_fdb_entry_is_inconclusive_not_absent() {
-        use arcbox_core::machine::MachineState;
+        use arcbox_engine::machine::MachineState;
 
         for state in [MachineState::Starting, MachineState::Running] {
             assert_eq!(
@@ -803,7 +804,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn only_the_machine_record_can_say_no_bridge_should_exist() {
-        use arcbox_core::machine::MachineState;
+        use arcbox_engine::machine::MachineState;
 
         // No machine record, and a stopped one, are both authoritative — even
         // if a stale FDB entry still names a bridge.
@@ -853,7 +854,7 @@ mod tests {
     fn a_stopped_vm_costs_no_forwarding_table_walk() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use arcbox_core::machine::MachineState;
+        use arcbox_engine::machine::MachineState;
 
         let walks = AtomicUsize::new(0);
         let _ = classify_bridge(Some(MachineState::Stopped), || {

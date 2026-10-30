@@ -76,7 +76,7 @@ pub async fn execute(args: BootArgs, format: OutputFormat) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use arcbox_constants::paths::ArcboxProfile;
-    use arcbox_core::boot_assets::BootAssetProvider;
+    use arcbox_image::boot_assets::BootAssetProvider;
 
     #[tokio::test]
     async fn development_profile_accepts_a_local_boot_manifest() {

@@ -1,7 +1,9 @@
 //! Recheck storage admission for input received after a stream opens.
 
 use arcbox_connect::{sandbox_v1, v1};
-use arcbox_core::{ExecSessionInput, Runtime, WriteFileChunk};
+use arcbox_core::Runtime;
+use arcbox_engine::agent_client::ExecSessionInput;
+use arcbox_engine::agent_client::WriteFileChunk;
 use connectrpc::{ConnectError, InboundStream, ServiceStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;

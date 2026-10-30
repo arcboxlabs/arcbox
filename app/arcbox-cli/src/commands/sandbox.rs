@@ -18,7 +18,7 @@ use arcbox_connect::sandbox_v1::{
     SandboxFilesystemServiceClient, SandboxProcessServiceClient, SandboxServiceClient,
     SandboxSnapshotServiceClient,
 };
-use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use buffa_types::google::protobuf::Timestamp;
 use clap::{Args, Subcommand};
 use std::collections::HashMap;

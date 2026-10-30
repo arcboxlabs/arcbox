@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use arcbox_connect::v1 as pb;
-use arcbox_core::machine::{MachineWebPorts, WebPortPolicy};
+use arcbox_engine::machine::{MachineWebPorts, WebPortPolicy};
 use clap::Args;
 
 #[derive(Args)]

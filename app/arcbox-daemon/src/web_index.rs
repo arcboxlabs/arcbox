@@ -3,7 +3,8 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

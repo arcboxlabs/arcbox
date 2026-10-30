@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
+use arcbox_image::boot_assets::{BootAssetConfig, BootAssetProvider};
 use serde::Serialize;
 
 use super::super::OutputFormat;
@@ -79,11 +79,11 @@ async fn clear_runtime_generation(root_data_dir: &Path, version: &str) -> std::i
 
 /// Build an NDJSON progress callback that prints one JSON line per progress event.
 fn make_ndjson_progress_callback()
--> Box<dyn Fn(arcbox_core::boot_assets::DownloadProgress) + Send + Sync> {
-    use arcbox_core::boot_assets::PreparePhase;
+-> Box<dyn Fn(arcbox_image::boot_assets::DownloadProgress) + Send + Sync> {
+    use arcbox_image::boot_assets::PreparePhase;
 
     Box::new(
-        move |progress: arcbox_core::boot_assets::DownloadProgress| {
+        move |progress: arcbox_image::boot_assets::DownloadProgress| {
             let (phase, downloaded_bytes, total_bytes, percent) = match &progress.phase {
                 PreparePhase::Checking => ("checking".to_string(), None, None, None),
                 PreparePhase::Downloading { downloaded, total } => {
@@ -121,7 +121,7 @@ fn emit_ndjson(p: PrefetchProgress) {
 
 /// Prefetch with NDJSON progress output.
 async fn prefetch_json(
-    provider: &arcbox_core::boot_assets::BootAssetProvider,
+    provider: &arcbox_image::boot_assets::BootAssetProvider,
     root_data_dir: &Path,
 ) -> anyhow::Result<()> {
     // Boot assets.
@@ -166,16 +166,16 @@ async fn prefetch_json(
 
 /// Prefetch with human-readable table output.
 async fn prefetch_table(
-    provider: &arcbox_core::boot_assets::BootAssetProvider,
+    provider: &arcbox_image::boot_assets::BootAssetProvider,
     root_data_dir: &Path,
 ) -> anyhow::Result<()> {
-    use arcbox_core::boot_assets::DownloadProgress;
+    use arcbox_image::boot_assets::DownloadProgress;
 
     println!("Prefetching boot assets...");
 
     let make_progress_callback = || -> Box<dyn Fn(DownloadProgress) + Send + Sync> {
         Box::new(|progress: DownloadProgress| {
-            use arcbox_core::boot_assets::PreparePhase;
+            use arcbox_image::boot_assets::PreparePhase;
             use std::io::Write;
 
             let status = match &progress.phase {
@@ -238,7 +238,7 @@ async fn prefetch_table(
 
 /// Clear cached boot assets.
 pub(super) async fn clear(data_dir: PathBuf, format: OutputFormat) -> anyhow::Result<()> {
-    use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
+    use arcbox_image::boot_assets::{BootAssetConfig, BootAssetProvider};
 
     let config = BootAssetConfig::with_cache_dir(data_dir.clone());
     let provider = BootAssetProvider::with_config(config)?;
@@ -275,7 +275,7 @@ pub(super) async fn clear(data_dir: PathBuf, format: OutputFormat) -> anyhow::Re
 
 /// List cached versions.
 pub(super) async fn list(data_dir: PathBuf, format: OutputFormat) -> anyhow::Result<()> {
-    use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
+    use arcbox_image::boot_assets::{BootAssetConfig, BootAssetProvider};
 
     let config = BootAssetConfig::with_cache_dir(data_dir);
     let provider = BootAssetProvider::with_config(config)?;

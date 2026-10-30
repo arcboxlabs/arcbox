@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use arcbox_core::persistence::MachinePersistence;
+use arcbox_engine::persistence::MachinePersistence;
 
 const DISK_IMAGE_NAMES: [&str; 4] = [
     "docker.img",

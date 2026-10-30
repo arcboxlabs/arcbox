@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Config;
-use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_net::darwin::inbound_relay::{InboundCommand, InboundProtocol};
 use std::future::{Future, poll_fn};
 use std::net::Ipv4Addr;

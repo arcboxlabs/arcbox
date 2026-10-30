@@ -4,8 +4,9 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use arcbox_connect::v1::{MachineWebPorts, ReplaceMachineWebRequest};
-use arcbox_core::{Runtime, machine::MachineState, runtime::CapturedMachineWeb};
+use arcbox_core::{Runtime, runtime::CapturedMachineWeb};
 use arcbox_engine::agent_client::{AgentClient, MachineWebSession};
+use arcbox_engine::machine::MachineState;
 use arcbox_local_ca::KeychainAuthority;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

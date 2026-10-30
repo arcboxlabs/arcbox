@@ -16,7 +16,7 @@ fn explicit_boot_directory_overrides_the_configured_directory() {
         format!("data_dir = {:?}\n", configured.to_str().unwrap()),
     )
     .unwrap();
-    let version = arcbox_core::boot_assets::boot_asset_version();
+    let version = arcbox_image::boot_assets::boot_asset_version();
     for (directory, sentinel) in [
         (&configured, "configured manifest"),
         (&selected, "selected manifest"),

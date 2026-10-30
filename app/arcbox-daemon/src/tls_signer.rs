@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, runtime::CapturedWebGuest};
+use arcbox_core::{Runtime, runtime::CapturedWebGuest};
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_local_ca::{KeychainAuthority, MAX_CERTIFICATE_SIZE, VerifiedCertificateRequest};
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
 use futures::{SinkExt, StreamExt};

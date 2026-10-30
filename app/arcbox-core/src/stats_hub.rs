@@ -18,7 +18,7 @@ use arcbox_connect::v1::{MachineStats, WatchStatsRequest};
 use tokio::sync::broadcast;
 
 use crate::error::{CoreError, Result};
-use crate::machine::MachineManager;
+use arcbox_engine::machine::MachineManager;
 
 /// Sample cadence requested from the agent.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -184,7 +184,7 @@ impl StatsSource for AgentStatsSource {
 
 /// [`StatsStream`] over the agent's `WatchStats` frames.
 pub struct AgentStatsStream {
-    agent: crate::agent_client::AgentClient,
+    agent: arcbox_engine::agent_client::AgentClient,
 }
 
 impl StatsStream for AgentStatsStream {

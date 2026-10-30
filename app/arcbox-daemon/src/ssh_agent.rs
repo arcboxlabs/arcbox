@@ -33,7 +33,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arcbox_constants::ports::SSH_AUTH_RELAY_PORT;
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
 use tokio::io::{AsyncReadExt, copy_bidirectional};
 use tokio::net::UnixStream;

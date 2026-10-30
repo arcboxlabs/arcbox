@@ -12,9 +12,10 @@
 //! `#[ignore]`d (needs a running daemon + guest), so the routing surface —
 //! including the `GET /containers/json` shadow bug — went unverified for months.
 
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{Config, Runtime};
 use arcbox_docker::api::{create_router, strip_api_version_prefix};
 use arcbox_docker::proxy::VsockConnector;
+use arcbox_engine::vm_lifecycle::VmLifecycleConfig;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::sync::Arc;

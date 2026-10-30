@@ -3,12 +3,12 @@
 //!
 //! The wire format is owned by the `macos-runner-image-builder` repo (the
 //! producer); this module is the consuming side. The generic discovery shape
-//! (index, references, fetchable locations) lives in [`crate::remote_image`]
+//! (index, references, fetchable locations) lives in [`arcbox_image::remote_image`]
 //! and is shared with the Linux machine-image registry.
 
 use serde::Deserialize;
 
-pub use crate::remote_image::{ImageReference, RemoteIndex, RemoteLocation};
+pub use arcbox_image::remote_image::{ImageReference, RemoteIndex, RemoteLocation};
 
 /// Default base location of the published image index: the `darwin/` platform
 /// namespace at the CDN root (the `arcboxcdn-image` bucket fronted by

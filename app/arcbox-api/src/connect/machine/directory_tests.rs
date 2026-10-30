@@ -1,7 +1,7 @@
 use super::*;
 use arcbox_connect::v1::MachineService as _;
-use arcbox_core::event::Event;
-use arcbox_core::machine::{MachineConfig, MachineWebPorts};
+use arcbox_engine::event::Event;
+use arcbox_engine::machine::{MachineConfig, MachineWebPorts};
 use buffa::Message as _;
 use connectrpc::HasMessageView as _;
 use std::sync::Arc;

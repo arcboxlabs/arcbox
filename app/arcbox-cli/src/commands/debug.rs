@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use arcbox_connect::v1::MachineExecRequest;
-use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use clap::Args;
 
 #[derive(Args)]

@@ -1,9 +1,9 @@
 use super::ContainerBackend;
 use crate::config::ContainerRuntimeConfig;
 use crate::error::{CoreError, Result};
-use crate::machine::MachineManager;
-use crate::vm_lifecycle::VmLifecycleManager;
 use arcbox_connect::v1::readiness_event::Kind;
+use arcbox_engine::machine::MachineManager;
+use arcbox_engine::vm_lifecycle::VmLifecycleManager;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +39,7 @@ impl GuestDockerBackend {
 
         // Correlate with the triggering Docker API request via its trace id.
         match agent
-            .watch_readiness(true, timeout, &crate::trace::current_trace_id())
+            .watch_readiness(true, timeout, &arcbox_engine::trace::current_trace_id())
             .await
         {
             Ok(event) if event.kind == Kind::RuntimeReady => {

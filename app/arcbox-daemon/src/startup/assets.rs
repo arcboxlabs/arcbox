@@ -6,7 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arcbox_api::SetupState;
 use arcbox_connect::v1::system_runtime_status::State;
-use arcbox_core::{BootAssetProvider, Config};
+use arcbox_core::Config;
+use arcbox_image::boot_assets::BootAssetProvider;
 use tracing::info;
 
 /// Assets reconciled into the daemon data directory for this startup.
@@ -124,7 +125,7 @@ pub(super) fn seed_from_bundle(data_dir: &Path) -> Result<BundleSeed> {
     let mut seed = BundleSeed::default();
 
     // 1. Boot assets: kernel, rootfs, manifest.
-    let version = arcbox_core::boot_asset_version();
+    let version = arcbox_image::boot_assets::boot_asset_version();
     let boot_dst = data_dir.join(format!("boot/{version}"));
     let boot_src = contents.join(format!("Resources/assets/{version}"));
     if boot_src.join("manifest.json").exists() {
@@ -392,7 +393,7 @@ pub(super) fn ensure_agent_binary_fallback(
 pub(super) fn ensure_agent_binary(data_dir: &Path) -> Result<bool> {
     let agent_dest = data_dir.join("bin/arcbox-agent");
 
-    let version = arcbox_core::boot_asset_version();
+    let version = arcbox_image::boot_assets::boot_asset_version();
     let agent_src = data_dir.join(format!("boot/{version}/arcbox-agent"));
     if !agent_src.exists() {
         tracing::debug!(
@@ -495,7 +496,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cached_agent = dir.path().join(format!(
             "boot/{}/arcbox-agent",
-            arcbox_core::boot_asset_version()
+            arcbox_image::boot_assets::boot_asset_version()
         ));
         fs::create_dir_all(cached_agent.parent().unwrap()).unwrap();
         fs::write(&cached_agent, b"boot-cache-agent").unwrap();
@@ -527,7 +528,7 @@ mod tests {
 
         let cached_agent = dir.path().join(format!(
             "boot/{}/arcbox-agent",
-            arcbox_core::boot_asset_version()
+            arcbox_image::boot_assets::boot_asset_version()
         ));
         fs::create_dir_all(cached_agent.parent().unwrap()).unwrap();
         fs::write(&cached_agent, b"older-boot-cache-agent").unwrap();

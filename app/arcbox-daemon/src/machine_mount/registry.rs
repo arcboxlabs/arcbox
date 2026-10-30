@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use arcbox_core::machine::HostHold;
+use arcbox_engine::machine::HostHold;
 
 /// One mount this daemon made.
 #[derive(Debug)]

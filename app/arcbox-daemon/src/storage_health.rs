@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::Result;
 use arcbox_api::SetupState;
 use arcbox_connect::v1::StorageHealth;
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 

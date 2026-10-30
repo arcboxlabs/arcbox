@@ -6,7 +6,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{Config, Runtime};
+use arcbox_engine::vm_lifecycle::VmLifecycleConfig;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt;
 use hyper::{Request, body::Incoming, server::conn::http1, service::service_fn};

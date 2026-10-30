@@ -21,7 +21,7 @@ use super::image::MacImageManager;
 use super::vm::MacVm;
 use super::{StagingGuard, lease, validate_name};
 use crate::error::{CoreError, Result};
-use crate::machine::MachineState;
+use arcbox_engine::machine::MachineState;
 
 /// Apple licenses at most two concurrently-running macOS guests per host.
 const MAX_RUNNING_MACOS_GUESTS: usize = 2;

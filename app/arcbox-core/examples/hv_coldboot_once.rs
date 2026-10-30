@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use arcbox_core::AgentClient;
+use arcbox_engine::agent_client::AgentClient;
 use arcbox_vmm::{BlockDeviceConfig, SharedDirConfig, VmBackend, Vmm, VmmConfig};
 
 const GUEST_CID: u32 = 3;

@@ -5,7 +5,8 @@ use arcbox_connect::v1::{
     Empty, LocalHttpsAccess, LocalHttpsStatus, SystemService,
     local_https_status::{CertificateState, TrustState},
 };
-use arcbox_core::{DEFAULT_MACHINE_NAME, VmLifecycleState};
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use connectrpc::{HasMessageView, RequestContext, ServiceRequest, ServiceStream};
 use tokio_stream::StreamExt;
 

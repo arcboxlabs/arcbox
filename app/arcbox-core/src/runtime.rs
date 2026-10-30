@@ -30,22 +30,22 @@ pub use web_services::{CapturedMachineWeb, CapturedWebGuest};
 use crate::config::Config;
 use crate::container_backend::{DynContainerBackend, create_backend};
 use crate::error::{CoreError, Result};
-use crate::event::EventBus;
-use crate::machine::{MachineManager, MachineState};
 #[cfg(target_os = "macos")]
 use crate::macos::MacMachineManager;
 use crate::migration::MigrationManager;
-use crate::vm::{HostNetwork, VmManager};
-use crate::vm_lifecycle::{
-    DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager, VmLifecycleState,
-};
 use arcbox_connect::v1::{
     ContainerFsPathsResponse, EnsureMachineExportRequest, EnsureMachineExportResponse,
     ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
 use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
+use arcbox_engine::event::EventBus;
+use arcbox_engine::machine::{MachineManager, MachineState};
 use arcbox_engine::vm::VmIncarnation;
+use arcbox_engine::vm::{HostNetwork, VmManager};
+use arcbox_engine::vm_lifecycle::{
+    DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager, VmLifecycleState,
+};
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
 use arcbox_net::darwin::inbound_relay::InboundProtocol;
@@ -191,7 +191,7 @@ pub struct Runtime {
     #[cfg(target_os = "macos")]
     mac_machine_manager: Arc<MacMachineManager>,
     /// Linux machine image registry (published distro rootfs images).
-    machine_image_manager: Arc<crate::machine_image::MachineImageManager>,
+    machine_image_manager: Arc<arcbox_image::machine_image::MachineImageManager>,
     /// Inbound listener managers keyed by machine name, for port
     /// forwarding via L2 frame injection (macOS). Each utility VM owns its
     /// own bridge interface and therefore its own listener.
@@ -328,7 +328,7 @@ impl Runtime {
             vm_lifecycle_config.route_hook = Some(crate::route_reconciler::system_vm_route_hook(
                 &machine_manager,
                 &event_bus,
-                crate::vm_lifecycle::DEFAULT_MACHINE_NAME,
+                arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME,
                 config.container.cidr,
             ));
         }
@@ -354,9 +354,9 @@ impl Runtime {
         #[cfg(target_os = "macos")]
         let mac_machine_manager = Arc::new(MacMachineManager::new(&config.data_dir));
 
-        let machine_image_manager = Arc::new(crate::machine_image::MachineImageManager::new(
-            &config.data_dir,
-        ));
+        let machine_image_manager = Arc::new(
+            arcbox_image::machine_image::MachineImageManager::new(&config.data_dir),
+        );
 
         let stats_hub = crate::stats_hub::StatsHub::new(crate::stats_hub::AgentStatsSource::new(
             Arc::clone(&machine_manager),
@@ -542,7 +542,9 @@ impl Runtime {
 
     /// Returns the Linux machine image registry.
     #[must_use]
-    pub const fn machine_image_manager(&self) -> &Arc<crate::machine_image::MachineImageManager> {
+    pub const fn machine_image_manager(
+        &self,
+    ) -> &Arc<arcbox_image::machine_image::MachineImageManager> {
         &self.machine_image_manager
     }
 
@@ -597,7 +599,7 @@ impl Runtime {
 
     /// Notes activity and holds the System VM out of idle until the scope
     /// drops. For long-lived proxied operations (pulls, builds, streams).
-    pub fn begin_system_vm_activity(&self) -> crate::vm_lifecycle::ActivityScope {
+    pub fn begin_system_vm_activity(&self) -> arcbox_engine::vm_lifecycle::ActivityScope {
         self.vm_lifecycle.begin_activity()
     }
 
@@ -904,7 +906,10 @@ impl Runtime {
     /// # Errors
     /// Returns an error if the machine is not found or connection fails.
     #[cfg(target_os = "macos")]
-    pub fn get_agent(&self, machine_name: &str) -> Result<crate::agent_client::AgentClient> {
+    pub fn get_agent(
+        &self,
+        machine_name: &str,
+    ) -> Result<arcbox_engine::agent_client::AgentClient> {
         self.machine_manager
             .connect_agent(machine_name)
             .map_err(CoreError::from)
@@ -912,7 +917,10 @@ impl Runtime {
 
     /// Gets an agent client for a machine (Linux version).
     #[cfg(target_os = "linux")]
-    pub fn get_agent(&self, machine_name: &str) -> Result<crate::agent_client::AgentClient> {
+    pub fn get_agent(
+        &self,
+        machine_name: &str,
+    ) -> Result<arcbox_engine::agent_client::AgentClient> {
         self.machine_manager
             .connect_agent(machine_name)
             .map_err(CoreError::from)
@@ -924,14 +932,14 @@ impl Runtime {
     /// async executor. The transport it yields is blocking on the HV
     /// socketpair and async on VZ/Linux vsock: unary RPCs work on both, a
     /// caller wanting the `*_blocking` variants dispatches on
-    /// [`AgentClient::is_blocking`](crate::agent_client::AgentClient::is_blocking)
+    /// [`AgentClient::is_blocking`](arcbox_engine::agent_client::AgentClient::is_blocking)
     /// (`sync_guest_clock` is the reference pattern).
     ///
     /// # Errors
     ///
     /// Returns an error if the System VM is not running or the agent cannot
     /// be reached.
-    pub async fn connect_system_agent(&self) -> Result<crate::agent_client::AgentClient> {
+    pub async fn connect_system_agent(&self) -> Result<arcbox_engine::agent_client::AgentClient> {
         let machine_manager = Arc::clone(&self.machine_manager);
         tokio::task::spawn_blocking(move || machine_manager.connect_agent(DEFAULT_MACHINE_NAME))
             .await
@@ -946,7 +954,7 @@ impl Runtime {
     pub async fn connect_system_agent_expected(
         &self,
         expected: VmIncarnation,
-    ) -> Result<crate::agent_client::AgentClient> {
+    ) -> Result<arcbox_engine::agent_client::AgentClient> {
         let machine_manager = Arc::clone(&self.machine_manager);
         tokio::task::spawn_blocking(move || {
             machine_manager.connect_agent_expected(DEFAULT_MACHINE_NAME, &expected)

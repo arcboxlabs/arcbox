@@ -152,7 +152,7 @@ async fn policies_replace_complete_pairs_without_reopening() {
                     receive(&mut harness.peer, MessageType::ReplaceMachineWebRequest).await;
                 assert_eq!(request.source_revision, revision);
                 let ports =
-                    arcbox_core::machine::MachineWebPorts::try_from(&*request.ports).unwrap();
+                    arcbox_engine::machine::MachineWebPorts::try_from(&*request.ports).unwrap();
                 assert_eq!(ports.http_port.to_string(), http);
                 assert_eq!(ports.https_port.to_string(), https);
                 respond(

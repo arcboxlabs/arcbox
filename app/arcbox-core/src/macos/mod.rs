@@ -1,7 +1,7 @@
 //! macOS guest support: base images, copy-on-write clones, and the macOS machine
 //! lifecycle. Apple Silicon only.
 
-pub(crate) use crate::remote_image::{StagingGuard, validate_name};
+pub(crate) use arcbox_image::remote_image::{StagingGuard, validate_name};
 
 mod disk;
 #[cfg(feature = "macos-ipsw-install")]

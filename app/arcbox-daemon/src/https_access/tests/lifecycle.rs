@@ -236,7 +236,7 @@ async fn machine_supervisor_joins_connection_cleanup_before_disabling() {
         source.started.notified().await;
         names.lock().unwrap().clear();
         events
-            .send(arcbox_core::event::Event::MachineStopping {
+            .send(arcbox_engine::event::Event::MachineStopping {
                 name: "machine".into(),
             })
             .unwrap();

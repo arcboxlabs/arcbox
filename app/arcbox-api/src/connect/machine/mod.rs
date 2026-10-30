@@ -103,7 +103,7 @@ impl pb::MachineService for MachineServiceImpl {
         };
         ctx.check_shutdown()?;
 
-        let config = arcbox_core::machine::MachineConfig {
+        let config = arcbox_engine::machine::MachineConfig {
             name: req.name.clone(),
             // 0 on the wire means "use the daemon-configured default".
             cpus: if req.cpus == 0 {
@@ -138,7 +138,7 @@ impl pb::MachineService for MachineServiceImpl {
             mounts: req
                 .mounts
                 .iter()
-                .map(|m| arcbox_core::machine::MachineMount {
+                .map(|m| arcbox_engine::machine::MachineMount {
                     host_path: m.host_path.clone(),
                     guest_path: m.guest_path.clone(),
                     read_only: m.readonly,
@@ -297,7 +297,7 @@ impl pb::MachineService for MachineServiceImpl {
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::SetMachineWebPortsRequest>,
     ) -> ServiceResult<pb::MachineWebPorts> {
-        use arcbox_core::machine::WebPortPolicy;
+        use arcbox_engine::machine::WebPortPolicy;
 
         let req = request.to_owned_message();
         let http_port = req
@@ -413,7 +413,7 @@ impl pb::MachineService for MachineServiceImpl {
                     .unwrap_or_default(),
                 ip_address: machine.ip_address.clone().unwrap_or_default(),
                 mac_address: String::new(),
-                bridge_mac_address: arcbox_core::vm::bridge_nic_mac_for_vm_id(&machine.vm_id),
+                bridge_mac_address: arcbox_engine::vm::bridge_nic_mac_for_vm_id(&machine.vm_id),
                 dns_name,
                 bridge_ip_address: machine.bridge_ip_address.clone().unwrap_or_default(),
                 ..Default::default()
@@ -696,8 +696,8 @@ fn now_unix_nanos() -> i64 {
 
 /// Maps a system event to its machine-lifecycle wire form, or `None` for
 /// events that are not machine lifecycle transitions.
-fn to_machine_event(event: &arcbox_core::event::Event) -> Option<pb::MachineEvent> {
-    use arcbox_core::event::Event;
+fn to_machine_event(event: &arcbox_engine::event::Event) -> Option<pb::MachineEvent> {
+    use arcbox_engine::event::Event;
 
     let (name, action) = match event {
         Event::MachineCreated { name } => (name, "created"),
@@ -729,7 +729,7 @@ fn resync_event() -> pb::MachineEvent {
 #[cfg(test)]
 mod tests {
     use super::{resync_event, to_machine_event};
-    use arcbox_core::event::Event;
+    use arcbox_engine::event::Event;
 
     #[test]
     fn maps_each_machine_lifecycle_event() {

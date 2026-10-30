@@ -25,8 +25,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arcbox_core::machine::MachineState;
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::machine::MachineState;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};

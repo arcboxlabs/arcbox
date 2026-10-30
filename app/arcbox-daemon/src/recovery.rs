@@ -78,9 +78,9 @@ pub async fn run_system(ctx: &DaemonContext, runtime: &Arc<Runtime>) -> Result<(
     // may have been removed or stolen by another network service.
     #[cfg(target_os = "macos")]
     if linux_vm {
-        use arcbox_core::DEFAULT_MACHINE_NAME;
         #[cfg(feature = "vmnet")]
         use arcbox_core::bridge_discovery::MachineBridgeExt as _;
+        use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
         #[cfg(feature = "vmnet")]
         let vmnet_bridge = runtime
             .machine_manager()

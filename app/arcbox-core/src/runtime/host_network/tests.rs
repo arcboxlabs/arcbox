@@ -1,5 +1,6 @@
 use super::*;
-use crate::{Config, VmLifecycleConfig};
+use crate::Config;
+use arcbox_engine::vm_lifecycle::VmLifecycleConfig;
 use std::sync::Arc;
 
 async fn runtime() -> (Runtime, tempfile::TempDir) {

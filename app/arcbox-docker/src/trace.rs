@@ -6,7 +6,7 @@
 //! - tracing span (for structured logging)
 //! - task-local storage (for automatic propagation to guest RPC calls)
 
-use arcbox_core::trace::CURRENT_TRACE_ID;
+use arcbox_engine::trace::CURRENT_TRACE_ID;
 use axum::extract::Request;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
@@ -77,7 +77,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn echo_current_trace_id() -> impl IntoResponse {
-        arcbox_core::trace::current_trace_id()
+        arcbox_engine::trace::current_trace_id()
     }
 
     #[tokio::test]

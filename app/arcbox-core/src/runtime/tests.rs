@@ -1091,7 +1091,7 @@ async fn the_default_machine_must_exist_and_lands_in_the_config_file() {
 
     runtime
         .machine_manager()
-        .create(crate::machine::MachineConfig {
+        .create(arcbox_engine::machine::MachineConfig {
             name: "dev".to_owned(),
             ..Default::default()
         })
@@ -1116,7 +1116,7 @@ async fn machine_resources_are_checked_against_the_host() {
     let (runtime, _temp_dir) = networking_test_runtime();
     runtime
         .machine_manager()
-        .create(crate::machine::MachineConfig {
+        .create(arcbox_engine::machine::MachineConfig {
             name: "dev".to_owned(),
             cpus: 1,
             memory_mb: 1024,

@@ -6,9 +6,10 @@ use anyhow::{Context, Result, ensure};
 use arcbox_connect::v1::{
     InstanceAuthorityRoot, ReplaceInstanceAuthorityRequest, instance_authority_root::Target,
 };
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
 use arcbox_dns::registry::InstanceTarget;
 use arcbox_engine::agent_client::{AgentClient, InstanceAuthoritySession};
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use arcbox_net::NetworkManager;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;

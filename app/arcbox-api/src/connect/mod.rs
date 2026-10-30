@@ -49,7 +49,7 @@ use std::time::Duration;
 use std::sync::OnceLock;
 
 use arcbox_core::Runtime;
-use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use connectrpc::{ConnectError, RequestContext};
 use tokio_stream::{Stream, StreamExt as _};
 use tokio_util::sync::CancellationToken;

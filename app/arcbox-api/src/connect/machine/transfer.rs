@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arcbox_connect::v1 as pb;
-use arcbox_core::machine::MachineConfig;
-use arcbox_core::machine::archive::read_manifest;
-use arcbox_core::machine_image::{self, MachineImage};
 use arcbox_core::{HostCapacity, Runtime};
+use arcbox_engine::machine::MachineConfig;
+use arcbox_engine::machine::archive::read_manifest;
+use arcbox_image::machine_image::{self, MachineImage};
 use connectrpc::{ConnectError, RequestContext};
 
 use super::super::ContextExt as _;

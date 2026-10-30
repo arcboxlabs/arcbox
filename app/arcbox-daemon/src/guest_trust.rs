@@ -8,7 +8,8 @@ use anyhow::{Result, ensure};
 use arcbox_connect::v1::{
     reconcile_guest_trust_request::Desired, reconcile_guest_trust_response::Applied,
 };
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use arcbox_engine::{agent_client::AgentClient, vm::VmIncarnation};
 use arcbox_local_ca::{KeychainAuthority, PublicAuthority};
 use tokio::{sync::watch, task::JoinSet};

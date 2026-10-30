@@ -31,10 +31,8 @@ The restructure plan and its locked decisions live in
   on `arcbox_error::CommonError`; `arcbox-core` converts via `From` (see
   `CoreError`'s `From<ImageError>`), so `is_not_found()`-style predicates
   answer identically through either type.
-- During the migration, `arcbox-core` keeps compatibility re-exports of
-  moved modules; consumers migrate to the engine crates in follow-up
-  commits and the re-exports then die. Prefer importing from the engine
-  crate in new code.
+- `arcbox-core` no longer re-exports engine or image modules. Consumers
+  import `arcbox_engine::…` and `arcbox_image::…` directly.
 
 ## Crates
 

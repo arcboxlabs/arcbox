@@ -17,7 +17,7 @@ impl VersionOutput {
     fn current() -> Self {
         Self {
             arcbox_core_abctl_version: env!("CARGO_PKG_VERSION"),
-            default_compatible_boot_assets_version: arcbox_core::boot_asset_version(),
+            default_compatible_boot_assets_version: arcbox_image::boot_assets::boot_asset_version(),
             minimum_compatible_helper_version: arcbox_constants::helper::MIN_HELPER_VERSION,
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -78,7 +78,7 @@ mod tests {
         );
         assert_eq!(
             value["default_compatible_boot_assets_version"],
-            arcbox_core::boot_asset_version()
+            arcbox_image::boot_assets::boot_asset_version()
         );
         assert_eq!(
             value["minimum_compatible_helper_version"],

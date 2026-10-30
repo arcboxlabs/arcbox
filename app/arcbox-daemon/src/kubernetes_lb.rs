@@ -14,8 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arcbox_connect::v1::KubernetesLoadBalancersResponse;
-use arcbox_core::{AgentClient, Runtime, VmLifecycleState};
+use arcbox_core::Runtime;
+use arcbox_engine::agent_client::AgentClient;
 use arcbox_engine::vm::VmIncarnation;
+use arcbox_engine::vm_lifecycle::VmLifecycleState;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};

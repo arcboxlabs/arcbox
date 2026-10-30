@@ -16,8 +16,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use arcbox_core::Runtime;
-use arcbox_core::event::Event;
-use arcbox_core::machine::MachineState;
+use arcbox_engine::event::Event;
+use arcbox_engine::machine::MachineState;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -108,7 +108,8 @@ fn published_address(state: MachineState, bridge_ip: Option<&str>) -> Option<IpA
 mod tests {
     use std::time::Duration;
 
-    use arcbox_core::{Config, event::EventBus};
+    use arcbox_core::Config;
+    use arcbox_engine::event::EventBus;
 
     use super::*;
 

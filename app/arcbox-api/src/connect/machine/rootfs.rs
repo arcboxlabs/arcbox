@@ -3,8 +3,8 @@
 
 use arcbox_connect::v1::CreateMachineRequest;
 use arcbox_core::Runtime;
-use arcbox_core::machine::{BootShim, MachineRootfs};
-use arcbox_core::machine_image::{self, ImageSelector, MachineImage};
+use arcbox_engine::machine::{BootShim, MachineRootfs};
+use arcbox_image::machine_image::{self, ImageSelector, MachineImage};
 use connectrpc::{ConnectError, RequestContext};
 use tokio_util::sync::CancellationToken;
 
@@ -62,7 +62,7 @@ pub(super) async fn rootfs_for(
     image: &MachineImage,
 ) -> Result<MachineRootfs, ConnectError> {
     let shim = async {
-        let provider = arcbox_core::boot_assets::BootAssetProvider::new(
+        let provider = arcbox_image::boot_assets::BootAssetProvider::new(
             runtime.config().data_dir.join("boot"),
         )?;
         let assets = provider.get_assets().await?;

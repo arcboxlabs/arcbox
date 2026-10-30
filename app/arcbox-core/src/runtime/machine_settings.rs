@@ -6,7 +6,7 @@ use std::sync::PoisonError;
 
 use super::{DEFAULT_MACHINE_NAME, HostCapacity, Runtime};
 use crate::error::{CoreError, Result};
-use crate::machine::{MachineWebPorts, WebPortPolicy};
+use arcbox_engine::machine::{MachineWebPorts, WebPortPolicy};
 
 /// A machine's CPU and memory limits after [`Runtime::set_machine_resources`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

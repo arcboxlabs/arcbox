@@ -1,7 +1,7 @@
 //! Owns independent trust deliveries until every machine connection and RPC has joined.
 
 use anyhow::Context as _;
-use arcbox_core::machine::MachineState;
+use arcbox_engine::machine::MachineState;
 
 use crate::guest_workers::supervise_machines;
 

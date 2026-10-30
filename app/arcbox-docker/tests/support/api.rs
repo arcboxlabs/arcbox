@@ -10,8 +10,9 @@ pub use mock_guest::MockRoute;
 pub use std::sync::Arc;
 pub use tower::ServiceExt;
 
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{Config, Runtime};
 use arcbox_docker::proxy::VsockConnector;
+use arcbox_engine::vm_lifecycle::VmLifecycleConfig;
 use tempfile::TempDir;
 
 /// Creates a test runtime with a temporary data directory.

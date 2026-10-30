@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use arcbox_core::event::Event;
+use arcbox_engine::event::Event;
 use tokio::{
     sync::{broadcast, broadcast::error::RecvError, watch},
     task::{JoinError, JoinSet},

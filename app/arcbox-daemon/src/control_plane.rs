@@ -401,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn prepared_host_admits_machine_updates_without_system_admission() {
         use arcbox_connect::v1::{setup_status, system_runtime_status::State};
-        use arcbox_core::machine::MachineConfig;
+        use arcbox_engine::machine::MachineConfig;
 
         let directory = tempfile::tempdir().unwrap();
         let runtime = Arc::new(

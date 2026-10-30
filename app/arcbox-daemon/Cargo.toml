@@ -52,6 +52,7 @@ arcbox-local-ca.workspace = true
 futures.workspace = true
 arcbox-dns.workspace = true
 uuid.workspace = true
+arcbox-image.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true

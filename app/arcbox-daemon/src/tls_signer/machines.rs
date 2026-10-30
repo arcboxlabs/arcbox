@@ -1,6 +1,6 @@
 //! Runs one retained signing connection worker for each running machine.
 
-use arcbox_core::machine::MachineState;
+use arcbox_engine::machine::MachineState;
 
 use crate::guest_workers::supervise_machines;
 

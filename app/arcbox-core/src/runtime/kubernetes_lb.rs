@@ -24,8 +24,8 @@ use arcbox_connect::v1::{
 };
 
 use super::Runtime;
-use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_engine::vm::VmIncarnation;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]

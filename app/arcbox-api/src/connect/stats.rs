@@ -6,7 +6,8 @@
 //! the last watcher disconnects.
 
 use arcbox_connect::v1 as pb;
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime};
+use arcbox_core::Runtime;
+use arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };

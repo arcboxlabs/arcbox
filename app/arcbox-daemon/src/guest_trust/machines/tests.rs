@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Mutex};
 
-use arcbox_core::event::{Event, EventBus};
+use arcbox_engine::event::{Event, EventBus};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,

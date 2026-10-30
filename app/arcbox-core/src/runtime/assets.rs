@@ -1,5 +1,5 @@
-use crate::boot_assets::REQUIRED_RUNTIME_BINARIES;
 use crate::error::{CoreError, Result};
+use arcbox_image::boot_assets::REQUIRED_RUNTIME_BINARIES;
 use std::path::Path;
 
 /// Checks that a file exists and has at least one executable permission bit set.

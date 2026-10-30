@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use arcbox_core::boot_assets::{
+use arcbox_image::boot_assets::{
     BootAssetConfig, BootAssetManifest, BootAssetProvider, CachedBinaryReport,
 };
 use serde::Serialize;

@@ -481,7 +481,7 @@ async fn execute_inspect(args: InspectArgs) -> Result<()> {
         .map_err(|error| crate::error::machine_operation(error, &args.name, "inspect"))?
         .into_owned();
 
-    let web_ports = arcbox_core::machine::MachineWebPorts::try_from(&*machine.web_ports)?;
+    let web_ports = arcbox_engine::machine::MachineWebPorts::try_from(&*machine.web_ports)?;
     let payload = serde_json::json!({
         "id": machine.id,
         "name": machine.name,

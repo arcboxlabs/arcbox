@@ -1,6 +1,6 @@
 use super::*;
 use arcbox_connect::v1::MachineService as _;
-use arcbox_core::machine::{MachineConfig, MachineWebPorts, WebPortPolicy};
+use arcbox_engine::machine::{MachineConfig, MachineWebPorts, WebPortPolicy};
 use buffa::Message as _;
 use connectrpc::HasMessageView as _;
 

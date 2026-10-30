@@ -502,20 +502,20 @@ pub async fn ensure_route_for_bridge_with_network(
 ///
 /// `machine_name` is keyed to whichever lifecycle installs the hook — today
 /// that is always the System VM (`Runtime::new` passes
-/// [`crate::vm_lifecycle::DEFAULT_MACHINE_NAME`]), but a future per-role
+/// [`arcbox_engine::vm_lifecycle::DEFAULT_MACHINE_NAME`]), but a future per-role
 /// lifecycle built via `VmLifecycleManager::for_machine` must pass its own
 /// name so bridge lookup and the published event stay keyed on the right
 /// machine.
 pub fn system_vm_route_hook(
-    machine_manager: &std::sync::Arc<crate::machine::MachineManager>,
-    event_bus: &crate::event::EventBus,
+    machine_manager: &std::sync::Arc<arcbox_engine::machine::MachineManager>,
+    event_bus: &arcbox_engine::event::EventBus,
     machine_name: &str,
     network: ContainerNetwork,
-) -> crate::vm_lifecycle::RouteHook {
+) -> arcbox_engine::vm_lifecycle::RouteHook {
     let mm = std::sync::Arc::clone(machine_manager);
     let bus = event_bus.clone();
     let machine_name = machine_name.to_string();
-    crate::vm_lifecycle::RouteHook::new(std::sync::Arc::new(move || {
+    arcbox_engine::vm_lifecycle::RouteHook::new(std::sync::Arc::new(move || {
         #[cfg(feature = "vmnet")]
         {
             // vmnet path: bridge name is known instantly, only need
@@ -527,7 +527,9 @@ pub fn system_vm_route_hook(
                 drop(tokio::spawn(async move {
                     match ensure_route_for_bridge_with_network(&bridge, network).await {
                         Ok(()) => {
-                            bus.publish(crate::event::Event::ContainerRouteInstalled { name });
+                            bus.publish(arcbox_engine::event::Event::ContainerRouteInstalled {
+                                name,
+                            });
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to install container route (vmnet)");
@@ -546,7 +548,9 @@ pub fn system_vm_route_hook(
                 drop(tokio::spawn(async move {
                     match ensure_route_with_retry_for_network(&mac, network).await {
                         Ok(()) => {
-                            bus.publish(crate::event::Event::ContainerRouteInstalled { name });
+                            bus.publish(arcbox_engine::event::Event::ContainerRouteInstalled {
+                                name,
+                            });
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to install container route");
