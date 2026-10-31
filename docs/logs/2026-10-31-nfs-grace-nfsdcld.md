@@ -2,7 +2,7 @@
 
 - Type: change
 - Area: guest agent NFS export (`guest/arcbox-agent/src/nfs.rs`), boot-assets rootfs
-- Commits / PRs: boot-assets `eb58b4e` (`feat(rootfs): ship nfsdcld …`, unreleased), this change
+- Commits / PRs: boot-assets `7eff5073` (`feat(rootfs): ship nfsdcld …`), released as [v0.8.12](https://github.com/arcboxlabs/boot-assets/releases/tag/v0.8.12); this change
 - Related: [boot assets 0.8.10](2026-10-21-boot-0.8.10-private-mountpoint.md) (same release flow)
 
 ## Problem or trigger
@@ -78,9 +78,33 @@ and a manifest with its digest in `boot-assets/dev`, remove the
 `manifest_sha256` pin, and run
 `cargo xtask e2e --test boot_assets --backend <hv|vz>`.
 
+### Release 0.8.12
+
+[Release run 41182589898](https://github.com/arcboxlabs/boot-assets/actions/runs/41182589898)
+published v0.8.12 from `7eff5073de5738572f0f418cb767fbd475786d86`. The tag
+build resolves the kernel tag `latest`, which was v0.0.25, the kernel 0.8.11
+ships. Both kernel digests are unchanged, and the manifest records the kernel
+version as `latest` instead of `v0.0.25`; only `abctl boot status` displays
+that field. The only binary that changed is the per-release FEX artifact.
+`assets.lock` pins `[boot]` 0.8.12.
+
+| Input | SHA-256 |
+|---|---|
+| Merged manifest, pinned by `assets.lock` | `4e1638ce4d9f5fcb4669420bb41481297807bf7f069ea264e54c1e258abc409b` |
+| ARM64 rootfs | `ceb8106753ab22f5a772f03bd1f541bf5e6edb47e36b4a4b42cae56e4b02fa36` |
+| x86_64 rootfs | `b6c81dc7906690e79a9135bc5b3e17f3ff03055e6488e1195939c998d6afe7bb` |
+| ARM64 kernel | `a122ce7a69a77408eeef9423afd9f6915828ba74a767e3e1eace635f913e02c4` |
+
+The CDN and GitHub release manifests are byte-identical. Both published
+rootfs images contain `nfsdcld` and `libsqlite3`.
+
+Fresh daemons built from this change downloaded 0.8.12 from the CDN
+into data dirs with no boot assets: 3 HV and 3 VZ boots. Every boot logged
+`no clients to reclaim, skipping NFSv4 grace period`, and the first open of
+`ArcBox/docker/engine-id` returned as soon as the file was visible. e2e
+`boot_assets` on the published assets passed once per backend, with
+`nfs_export` at 0.0015 s on HV and 0.0025 s on VZ.
+
 ## Follow-ups
 
-- Release boot assets with the boot-assets change, then pin the new `[boot]`
-  version and `manifest_sha256` in `assets.lock`. Until then the pinned
-  0.8.11 rootfs has no nfsdcld, and the first open still waits for grace.
-- The x86_64 rootfs was not built or booted.
+- The x86_64 rootfs was built by the release but not booted.
