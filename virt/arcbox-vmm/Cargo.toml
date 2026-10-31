@@ -57,3 +57,8 @@ vmnet = ["arcbox-net/vmnet", "arcbox-vmnet/vmnet"]
 
 [lints]
 workspace = true
+
+# HV checkpoint spikes (docs/experiments/2026-10-31-hv-checkpoint-*.md).
+[[example]]
+name = "checkpoint_spike"
+required-features = ["gic"]
