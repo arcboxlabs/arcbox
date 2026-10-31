@@ -62,3 +62,7 @@ workspace = true
 [[example]]
 name = "checkpoint_spike"
 required-features = ["gic"]
+
+[[example]]
+name = "checkpoint_blk_spike"
+required-features = ["gic"]
