@@ -6,8 +6,9 @@
 //! dispatched to the PL011 UART, the `DeviceManager` for VirtIO MMIO, or
 //! to the HVC/PSCI handlers.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use arcbox_hv::{ExceptionClass, HvVcpu, MmioInfo, VcpuExit};
 
@@ -75,6 +76,63 @@ pub(super) struct VcpuContext {
     /// This vCPU's exit counters (diagnostics; written Relaxed by this
     /// thread only).
     pub stats: Arc<crate::vcpu_stats::VcpuStats>,
+    /// Orders vCPU creation and holds every thread until all vCPUs exist.
+    pub creation: Arc<CreationOrder>,
+}
+
+/// Creates the VM's vCPUs one at a time in vCPU-id order, before any of
+/// them runs. The in-kernel GIC binds redistributor frames in creation
+/// order, so this fixes each vCPU's frame, which a checkpoint's GIC state
+/// depends on; and `hv_vcpu_create` can block for good while another vCPU
+/// of the VM is inside `hv_vcpu_run` (seen from the seventh vCPU on).
+pub(super) struct CreationOrder {
+    next: Mutex<u32>,
+    advanced: Condvar,
+    count: u32,
+}
+
+impl CreationOrder {
+    pub(super) fn new(count: u32) -> Arc<Self> {
+        Arc::new(Self {
+            next: Mutex::new(0),
+            advanced: Condvar::new(),
+            count,
+        })
+    }
+
+    /// Waits until `pred` holds for the number of vCPUs created so far.
+    /// `false` if the VM stopped first.
+    fn wait(&self, running: &AtomicBool, pred: impl Fn(u32) -> bool) -> bool {
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        while !pred(*next) {
+            if !running.load(Ordering::Relaxed) {
+                return false;
+            }
+            next = self
+                .advanced
+                .wait_timeout(next, Duration::from_millis(10))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
+    /// Creates vCPU `id` after vCPUs `0..id`. `None` if the VM stopped
+    /// first. A failed creation still lets the next vCPU go.
+    fn create(&self, id: u32, running: &AtomicBool) -> Option<arcbox_hv::HvResult<HvVcpu>> {
+        if !self.wait(running, |next| next == id) {
+            return None;
+        }
+        let vcpu = HvVcpu::new();
+        *self.next.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.advanced.notify_all();
+        Some(vcpu)
+    }
+
+    /// Waits until every vCPU exists. `false` if the VM stopped first.
+    fn wait_all(&self, running: &AtomicBool) -> bool {
+        self.wait(running, |next| next >= self.count)
+    }
 }
 
 /// Reads the value of an MMIO write source register, handling the ARM64
@@ -162,6 +220,67 @@ pub(super) enum VcpuBoot {
     AwaitCpuOn(std::sync::mpsc::Receiver<super::psci::CpuOnRequest>),
 }
 
+/// Waits for the next PSCI CPU_ON on `rx`; `None` once the power registry
+/// closed (VM stop).
+fn await_cpu_on(
+    vcpu_id: u32,
+    rx: &std::sync::mpsc::Receiver<super::psci::CpuOnRequest>,
+) -> Option<(u64, u64)> {
+    match rx.recv() {
+        Ok(req) => {
+            tracing::info!(
+                "vCPU {vcpu_id}: received CPU_ON, starting at {:#x}",
+                req.entry_point
+            );
+            Some((req.entry_point, req.context_id))
+        }
+        Err(_) => {
+            tracing::debug!("vCPU {vcpu_id}: power channel closed");
+            None
+        }
+    }
+}
+
+/// Sets the boot register state for one power-on cycle. `false` on a
+/// failure that must end the thread.
+fn set_boot_regs(vcpu: &HvVcpu, vcpu_id: u32, entry_addr: u64, x0_value: u64) -> bool {
+    // Boot register state per ARM64 Linux boot protocol (re-applied on
+    // every power-on — PSCI CPU_ON semantics are reset-like):
+    //   PC    = entry address (kernel entry for BSP, PSCI entry point)
+    //   X0    = parameter (FDT address for BSP, context_id)
+    //   X1-X3 = 0 (reserved)
+    //   CPSR  = EL1h, DAIF masked; MMU off (SCTLR reset)
+    if let Err(e) = vcpu.set_reg(reg::PC, entry_addr) {
+        tracing::error!("vCPU {vcpu_id}: set PC failed: {e}");
+        return false;
+    }
+    if let Err(e) = vcpu.set_reg(reg::X0, x0_value) {
+        tracing::error!("vCPU {vcpu_id}: set X0 failed: {e}");
+        return false;
+    }
+    let _ = vcpu.set_reg(reg::X1, 0);
+    let _ = vcpu.set_reg(reg::X2, 0);
+    let _ = vcpu.set_reg(reg::X3, 0);
+    if let Err(e) = vcpu.set_reg(reg::CPSR, CPSR_EL1H) {
+        tracing::error!("vCPU {vcpu_id}: set CPSR failed: {e}");
+        return false;
+    }
+    if let Err(e) = vcpu.set_sys_reg(arcbox_hv::sys_reg::HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET) {
+        tracing::warn!("vCPU {vcpu_id}: set SCTLR_EL1 failed: {e}");
+    }
+    // A vtimer that fired right before a CPU_OFF leaves the mask set;
+    // clear it so the re-onlined CPU receives timer interrupts.
+    let _ = vcpu.set_vtimer_mask(false);
+
+    tracing::info!(
+        "vCPU {vcpu_id}: starting at PC={:#x}, X0={:#x}, SCTLR={:#x}",
+        entry_addr,
+        x0_value,
+        SCTLR_EL1_RESET,
+    );
+    true
+}
+
 /// Runs a single vCPU for the lifetime of the VM, dispatching MMIO traps to
 /// the device manager and handling PSCI power cycles.
 ///
@@ -195,14 +314,16 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
         hv_vcpu_ids,
         hvc_blk_fds,
         stats,
+        creation,
     } = ctx;
 
-    let vcpu = match HvVcpu::new() {
-        Ok(v) => v,
-        Err(e) => {
+    let vcpu = match creation.create(vcpu_id, &running) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
             tracing::error!("vCPU {vcpu_id}: creation failed: {e}");
             return;
         }
+        None => return,
     };
 
     // Set MPIDR_EL1 for this vCPU (Aff0 = vcpu_id, other affinity fields 0).
@@ -261,64 +382,26 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
         handles.push(std::thread::current());
     }
 
+    if !creation.wait_all(&running) {
+        return;
+    }
+
     // Resolve the first power-on: the BSP boots immediately; a secondary
     // parks until the guest's first CPU_ON for it.
-    let (cpu_on_rx, mut entry_addr, mut x0_value) = match boot {
-        VcpuBoot::Immediate { entry, x0 } => (None, entry, x0),
-        VcpuBoot::AwaitCpuOn(rx) => match rx.recv() {
-            Ok(req) => {
-                tracing::info!(
-                    "vCPU {vcpu_id}: received CPU_ON, starting at {:#x}",
-                    req.entry_point
-                );
-                let (entry, x0) = (req.entry_point, req.context_id);
-                (Some(rx), entry, x0)
-            }
-            Err(_) => {
-                tracing::debug!("vCPU {vcpu_id}: power channel closed, never started");
-                return;
-            }
+    let (cpu_on_rx, (mut entry_addr, mut x0_value)) = match boot {
+        VcpuBoot::Immediate { entry, x0 } => (None, (entry, x0)),
+        VcpuBoot::AwaitCpuOn(rx) => match await_cpu_on(vcpu_id, &rx) {
+            Some(at) => (Some(rx), at),
+            None => return,
         },
     };
 
     // One iteration per power-on cycle; `continue` re-enters after a
     // CPU_OFF → CPU_ON round trip with fresh entry/x0.
     loop {
-        // Boot register state per ARM64 Linux boot protocol (re-applied on
-        // every power-on — PSCI CPU_ON semantics are reset-like):
-        //   PC    = entry address (kernel entry for BSP, PSCI entry point)
-        //   X0    = parameter (FDT address for BSP, context_id)
-        //   X1-X3 = 0 (reserved)
-        //   CPSR  = EL1h, DAIF masked; MMU off (SCTLR reset)
-        if let Err(e) = vcpu.set_reg(reg::PC, entry_addr) {
-            tracing::error!("vCPU {vcpu_id}: set PC failed: {e}");
+        if !set_boot_regs(&vcpu, vcpu_id, entry_addr, x0_value) {
             return;
         }
-        if let Err(e) = vcpu.set_reg(reg::X0, x0_value) {
-            tracing::error!("vCPU {vcpu_id}: set X0 failed: {e}");
-            return;
-        }
-        let _ = vcpu.set_reg(reg::X1, 0);
-        let _ = vcpu.set_reg(reg::X2, 0);
-        let _ = vcpu.set_reg(reg::X3, 0);
-        if let Err(e) = vcpu.set_reg(reg::CPSR, CPSR_EL1H) {
-            tracing::error!("vCPU {vcpu_id}: set CPSR failed: {e}");
-            return;
-        }
-        if let Err(e) = vcpu.set_sys_reg(arcbox_hv::sys_reg::HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET)
-        {
-            tracing::warn!("vCPU {vcpu_id}: set SCTLR_EL1 failed: {e}");
-        }
-        // A vtimer that fired right before a CPU_OFF leaves the mask set;
-        // clear it so the re-onlined CPU receives timer interrupts.
-        let _ = vcpu.set_vtimer_mask(false);
-
-        tracing::info!(
-            "vCPU {vcpu_id}: starting at PC={:#x}, X0={:#x}, SCTLR={:#x}",
-            entry_addr,
-            x0_value,
-            SCTLR_EL1_RESET,
-        );
 
         let mut loop_exit = VcpuLoopExit::Shutdown;
         loop {

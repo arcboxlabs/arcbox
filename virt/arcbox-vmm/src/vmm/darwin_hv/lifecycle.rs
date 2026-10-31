@@ -5,7 +5,7 @@ use crate::error::{Result, VmmError};
 use super::pl011::Pl011;
 use super::pl031::Pl031;
 use super::psci::{CpuOnRequest, CpuPower, CpuPowerRegistry};
-use super::vcpu_loop::{VcpuBoot, VcpuContext, vcpu_run_loop};
+use super::vcpu_loop::{CreationOrder, VcpuBoot, VcpuContext, vcpu_run_loop};
 use super::*;
 
 impl HvMachine {
@@ -221,6 +221,7 @@ impl HvMachine {
         let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
         let pl031 = Arc::new(std::sync::Mutex::new(Pl031::new()));
+        let creation = CreationOrder::new(vcpu_count);
 
         let vcpu_thread_handles = self
             .hv_vcpu_thread_handles
@@ -268,6 +269,7 @@ impl HvMachine {
                 let hvc_fds_clone = self.hvc_blk_fds.clone();
                 let stats = vcpu_stats[i as usize].clone();
                 let registry_for_thread = registry.clone();
+                let creation = creation.clone();
 
                 // The thread creates its HvVcpu once, parks on its receiver
                 // until CPU_ON, and — when the guest offlines it via
@@ -293,6 +295,7 @@ impl HvMachine {
                                 hv_vcpu_ids: ids,
                                 hvc_blk_fds: hvc_fds_clone,
                                 stats,
+                                creation,
                             },
                         );
                     })
@@ -333,6 +336,7 @@ impl HvMachine {
                             hv_vcpu_ids: bsp_hv_vcpu_ids,
                             hvc_blk_fds,
                             stats: bsp_stats,
+                            creation,
                         },
                     );
                 })

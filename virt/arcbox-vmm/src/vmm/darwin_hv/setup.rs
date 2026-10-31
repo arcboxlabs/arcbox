@@ -491,6 +491,44 @@ impl HvMachine {
             );
         }
 
+        // --- 8–10. Kernel, initrd and FDT ---
+        let (kernel_entry, fdt_addr) = self.load_boot_image(&guest_mem, &device_manager)?;
+
+        // --- 11. Store managers ---
+        let event_loop = crate::event::EventLoop::new()?;
+
+        self.memory_manager = Some(memory_manager);
+        self.device_manager = Some(device_manager);
+        self.irq_chip = Some(irq_chip);
+        self.event_loop = Some(event_loop);
+
+        // Store HV-specific state in the Vmm struct for lifecycle management.
+        // GuestMemoryMmap must outlive the HvVm since the mapped memory must
+        // remain valid for the entire VM lifetime.
+        self.hv_vm = Some(vm);
+        self.hv_guest_mem = Some(guest_mem);
+        #[cfg(feature = "gic")]
+        {
+            self.hv_gic = gic;
+        }
+        self.hv_kernel_entry = Some(kernel_entry);
+        self.hv_fdt_addr = Some(fdt_addr);
+        self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
+        self.hv_vcpu_ids = Some(hv_vcpu_ids);
+
+        tracing::info!("Custom Hypervisor.framework VMM initialized");
+        Ok(())
+    }
+
+    /// Loads the kernel and initrd into guest RAM and writes the FDT after
+    /// them. Returns the kernel entry and the FDT address.
+    fn load_boot_image(
+        &self,
+        guest_mem: &GuestMemoryMmap,
+        device_manager: &DeviceManager,
+    ) -> Result<(u64, u64)> {
+        let ram_size = self.config.memory_size as usize;
+
         // --- 8. Load kernel via linux-loader PE loader ---
         let mut kernel_file = std::fs::File::open(&self.config.kernel_path)
             .map_err(|e| VmmError::config(format!("cannot open kernel: {e}")))?;
@@ -498,7 +536,7 @@ impl HvMachine {
         // PE::load writes the kernel image directly into GuestMemoryMmap.
         // The kernel_offset must be 2 MB aligned (ARM64 boot protocol).
         let kernel_result = PE::load(
-            &guest_mem,
+            guest_mem,
             Some(GuestAddress(RAM_BASE_IPA)),
             &mut kernel_file,
             None,
@@ -751,29 +789,6 @@ impl HvMachine {
             fdt_entries.len()
         );
 
-        // --- 11. Store managers ---
-        let event_loop = crate::event::EventLoop::new()?;
-
-        self.memory_manager = Some(memory_manager);
-        self.device_manager = Some(device_manager);
-        self.irq_chip = Some(irq_chip);
-        self.event_loop = Some(event_loop);
-
-        // Store HV-specific state in the Vmm struct for lifecycle management.
-        // GuestMemoryMmap must outlive the HvVm since the mapped memory must
-        // remain valid for the entire VM lifetime.
-        self.hv_vm = Some(vm);
-        self.hv_guest_mem = Some(guest_mem);
-        #[cfg(feature = "gic")]
-        {
-            self.hv_gic = gic;
-        }
-        self.hv_kernel_entry = Some(kernel_entry);
-        self.hv_fdt_addr = Some(fdt_addr.raw_value());
-        self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
-        self.hv_vcpu_ids = Some(hv_vcpu_ids);
-
-        tracing::info!("Custom Hypervisor.framework VMM initialized");
-        Ok(())
+        Ok((kernel_entry, fdt_addr.raw_value()))
     }
 }
