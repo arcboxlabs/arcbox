@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/arcboxlabs/arcbox/compare/runner-agent-v0.1.7...runner-agent-v0.2.0) (2026-10-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runner:** rename Fleet to ArcBox Runners
+
+### Bug Fixes
+
+* **runner-agent:** reach ArcBox's Docker socket through HostLayout ([76c464e](https://github.com/arcboxlabs/arcbox/commit/76c464e868ef24d29d8ea5220199e3aa3608a235))
+
+
+### Code Refactoring
+
+* **runner:** rename Fleet to ArcBox Runners ([1c544b7](https://github.com/arcboxlabs/arcbox/commit/1c544b7f959d38a5a8ed6b72b31e99c7b6e6bb5a))
+
 ## [0.1.7](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.6...fleet-agent-v0.1.7) (2026-10-03)
 
 
