@@ -371,16 +371,29 @@ changes, datapath does not:
   sites (`sync_irq_level`, `raise_interrupt_for_device`) stay as they are.
   There is no `exit_vcpus` step: c3004580 removed the post-SPI kick
   (crate `AGENTS.md`), so the contract is two steps, not three.
-- `HvDriver: VmDriver` renders `VmSpec` into today's `VmmConfig` (a pure
-  `render`, tested), boots an `HvMachine`, and returns it as a `VmHandle`:
-  `Vsock::dial` is the socketpair injection (`IoMode::Blocking`), `Balloon`
-  is the HV balloon, `DebugSnapshot` is `debug_snapshot()`, `Console`
-  reads the console ring. `Checkpoint` is **absent**: `Vmm::capture_snapshot_context`
-  answers `Unsupported("snapshot capture is not yet implemented for the HV
-  backend")` today, so there is nothing to put behind the capability and
-  `capabilities().checkpoint` is false — a stated gap, not a stub (R4 seam
-  map, 2026-08-17). `set_balloon_target`'s off-macOS `Unsupported` stub
-  disappears — the capability accessor returns `None`.
+- `HvDriver: VmDriver` (`arcbox_vmm::hv_driver`) renders `VmSpec` into
+  today's `VmmConfig` (a pure `render::vmm_config`, tested), boots an
+  `HvMachine`, and returns it as a `VmHandle`: `Vsock::dial` is the
+  socketpair injection (`IoMode::Blocking`; a guest without a listener
+  answers with a reset, read as EOF, so the dial never reports
+  `ConnectionRefused`), `Balloon` is the HV balloon, `DebugSnapshot` is the
+  device and vCPU snapshot, and `PortForward` serves the datapath's
+  `InboundListenerManager`. A watcher thread blocks on the PSCI SYSTEM_OFF
+  channel: SYSTEM_OFF tears the machine down and emits `Exited`,
+  SYSTEM_RESET emits `ResetRequested`, and any other end of the vCPU threads
+  is `Exited` with code 1. `ShutdownMode::Graceful` waits for the guest's own
+  power-off, because Hypervisor.framework has no host-side power button; the
+  caller asks the guest through its agent first. `render` refuses what HV can
+  never do: Rosetta, nested virtualization, host console output
+  (`ConsoleSpec::Off` only, so `Console` and `agent_log` are absent; the
+  virtio-console device stays as guest ABI), and NICs other than one
+  `UserNat` optionally followed by one `HostNat`. `Checkpoint` is
+  **absent**: `Vmm::capture_snapshot_context` answers `Unsupported("snapshot
+  capture is not yet implemented for the HV backend")` today, so there is
+  nothing to put behind the capability and `capabilities().checkpoint` is
+  false — a stated gap, not a stub (R4 seam map, 2026-08-17).
+  `set_balloon_target`'s off-macOS `Unsupported` stub disappears — the
+  capability accessor returns `None`.
 - `arcbox_vmm::snapshot` (the JSON+LZ4 store) retires in favor of
   `arcbox_snapshot::SnapshotCatalog`; `VmSnapshotContext`/`VmRestoreData`
   become `HvMachine` internals behind `Checkpoint`. The Linux `criu`

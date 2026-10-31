@@ -24,7 +24,7 @@ use crate::vcpu::VcpuManager;
 #[cfg(target_os = "macos")]
 mod darwin;
 #[cfg(target_os = "macos")]
-mod darwin_hv;
+pub(crate) mod darwin_hv;
 #[cfg(target_os = "linux")]
 mod linux;
 
