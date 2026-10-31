@@ -40,12 +40,14 @@ use crate::darwin::tcp_bridge::TcpBridge;
 use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 
+mod control;
 mod fd;
 mod guest_tx;
 mod intercept;
 #[cfg(test)]
 mod tests;
 
+pub use control::DatapathControl;
 use fd::{FdWrapper, set_nonblocking};
 use guest_tx::{DeliveryClass, GuestTx, NOBUFS_RETRY_DELAY, drain_cmd_rx, drain_reply_rx};
 use intercept::{handle_intercepted_frame, process_inbound_cmd};
@@ -94,6 +96,9 @@ pub struct NetworkDatapath {
     /// resolved from the operator's policy. `None` connects everything
     /// directly.
     pub proxy_env: Option<ProxyEnvironment>,
+    /// Requests from [`DatapathControl`] handles (see [`Self::control`]).
+    control_rx: mpsc::UnboundedReceiver<control::Command>,
+    control_tx: mpsc::UnboundedSender<control::Command>,
 }
 
 impl NetworkDatapath {
@@ -118,6 +123,7 @@ impl NetworkDatapath {
         cancel: CancellationToken,
         mtu: usize,
     ) -> Self {
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         Self {
             guest_fd,
             egress,
@@ -134,6 +140,16 @@ impl NetworkDatapath {
             frame_sink: None,
             conn_sink: None,
             proxy_env: None,
+            control_rx,
+            control_tx,
+        }
+    }
+
+    /// A handle for requests to this datapath once it runs.
+    #[must_use]
+    pub fn control(&self) -> DatapathControl {
+        DatapathControl {
+            tx: self.control_tx.clone(),
         }
     }
 
@@ -183,7 +199,12 @@ impl NetworkDatapath {
             frame_sink,
             conn_sink,
             proxy_env,
+            mut control_rx,
+            control_tx,
         } = self;
+        // Only external handles keep the control channel open.
+        drop(control_tx);
+        let mut control_open = true;
 
         // Set guest_fd to non-blocking for AsyncFd.
         let guest_raw_fd = guest_fd.as_raw_fd();
@@ -291,6 +312,21 @@ impl NetworkDatapath {
                     tracing::info!("Network datapath shutting down");
                     break;
                 }
+
+                command = control_rx.recv(), if control_open => match command {
+                    Some(control::Command::AbortTcp(reply)) => {
+                        let mut resets = Vec::new();
+                        tcp_bridge.abort(|frame| resets.push(frame));
+                        let _ = reply.send(resets);
+                    }
+                    Some(control::Command::SendToGuest(frames)) => {
+                        for frame in frames {
+                            guest_tx.send(frame, DeliveryClass::Reliable);
+                        }
+                        guest_tx.flush(guest_raw_fd);
+                    }
+                    None => control_open = false,
+                },
 
                 // Drain an EAGAIN-blocked backlog when the guest FD becomes
                 // writable. An ENOBUFS-blocked backlog is timer-driven below:

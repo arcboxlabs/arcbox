@@ -4,6 +4,8 @@ use super::intercept::build_dns_servfail_response;
 use super::*;
 use std::os::fd::{FromRawFd, RawFd};
 
+mod control;
+
 /// Creates a SOCK_DGRAM socketpair, returning (fd_a, fd_b) as OwnedFds.
 fn socketpair() -> (OwnedFd, OwnedFd) {
     let mut fds: [i32; 2] = [0; 2];
@@ -286,6 +288,45 @@ fn test_build_dns_servfail_response() {
     assert_eq!(&response[12..], &query[12..]); // Question echoed
 }
 
+const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 1);
+const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
+const GATEWAY_MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
+const GUEST_MAC: [u8; 6] = [2, 0, 0, 0, 0, 2];
+
+/// A datapath on 192.168.64.0/24 and the guest end of its socketpair.
+fn fixture(cancel: &CancellationToken) -> (NetworkDatapath, tokio::net::UnixDatagram) {
+    let (host_fd, guest_fd) = socketpair();
+    let guest = std::os::unix::net::UnixDatagram::from(guest_fd);
+    guest.set_nonblocking(true).unwrap();
+    let guest = tokio::net::UnixDatagram::from_std(guest).unwrap();
+    let (reply_tx, reply_rx) = mpsc::channel(16);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+    let datapath = NetworkDatapath::new(
+        host_fd,
+        HostEgress::new(
+            GATEWAY_IP,
+            GATEWAY_MAC,
+            GUEST_IP,
+            reply_tx,
+            cancel.clone(),
+            1500,
+        ),
+        reply_rx,
+        cmd_rx,
+        DhcpServer::new(crate::dhcp::DhcpConfig::new(
+            GATEWAY_IP,
+            Ipv4Addr::new(255, 255, 255, 0),
+        )),
+        DnsForwarder::new(crate::dns::DnsConfig::default()),
+        GATEWAY_IP,
+        GUEST_IP,
+        GATEWAY_MAC,
+        cancel.clone(),
+        1500,
+    );
+    (datapath, guest)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn guest_batch_promotes_handshake_before_following_payload() {
     use arcbox_packet::ethernet::{
@@ -294,43 +335,13 @@ async fn guest_batch_promotes_handshake_before_following_payload() {
     };
     use tokio::io::AsyncReadExt;
 
-    let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-    let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
-    let gateway_mac = [2, 0, 0, 0, 0, 1];
-    let guest_mac = [2, 0, 0, 0, 0, 2];
+    let (gateway_ip, guest_ip, gateway_mac, guest_mac) =
+        (GATEWAY_IP, GUEST_IP, GATEWAY_MAC, GUEST_MAC);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
-    let (host_fd, guest_fd) = socketpair();
-    let guest = std::os::unix::net::UnixDatagram::from(guest_fd);
-    guest.set_nonblocking(true).unwrap();
-    let guest = tokio::net::UnixDatagram::from_std(guest).unwrap();
     let cancel = CancellationToken::new();
-    let (reply_tx, reply_rx) = mpsc::channel(16);
-    let (_cmd_tx, cmd_rx) = mpsc::channel(1);
-    let datapath = NetworkDatapath::new(
-        host_fd,
-        HostEgress::new(
-            gateway_ip,
-            gateway_mac,
-            guest_ip,
-            reply_tx,
-            cancel.clone(),
-            1500,
-        ),
-        reply_rx,
-        cmd_rx,
-        DhcpServer::new(crate::dhcp::DhcpConfig::new(
-            gateway_ip,
-            Ipv4Addr::new(255, 255, 255, 0),
-        )),
-        DnsForwarder::new(crate::dns::DnsConfig::default()),
-        gateway_ip,
-        guest_ip,
-        gateway_mac,
-        cancel.clone(),
-        1500,
-    );
+    let (datapath, guest) = fixture(&cancel);
     let running = tokio::spawn(datapath.run());
     let result = tokio::time::timeout(Duration::from_secs(2), async {
         let mut params = TcpFrameParams {
