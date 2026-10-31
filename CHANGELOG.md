@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/arcboxlabs/arcbox/compare/v0.10.5...v0.11.0) (2026-10-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runner:** rename Fleet to ArcBox Runners
+
+### Features
+
+* **net:** integrate IPv6 lifecycle with silent TCP rejection ([a13f5c5](https://github.com/arcboxlabs/arcbox/commit/a13f5c57b491e29e3f19df23ec82e5a6792b7726))
+* **splicetcp:** abandon inspected relays without TCP close ([774d027](https://github.com/arcboxlabs/arcbox/commit/774d02702908b1b9a69f01ec8db9f547f2353ee3))
+* **splicetcp:** support silent TCP handshake rejection ([fe36394](https://github.com/arcboxlabs/arcbox/commit/fe363946a7620d549ff2c83d30133de96683256e))
+* **vm-driver:** carry the macOS engine surface on the port ([eb859f3](https://github.com/arcboxlabs/arcbox/commit/eb859f33ba768178bdb5a60bbbec0177604b50d9))
+* **vz-driver:** add the Virtualization.framework adapter (R4a) ([be55711](https://github.com/arcboxlabs/arcbox/commit/be557118505b1b1954a94386ec12832cfe8c75fc))
+
+
+### Bug Fixes
+
+* **agent:** require hyper 1.11 for declared HTTP/1 trailers ([4e1751e](https://github.com/arcboxlabs/arcbox/commit/4e1751e4c1620139765bdf9853d71478bf865080))
+* **agent:** run nfsdcld so nfsd skips the NFSv4 grace period ([3284c1c](https://github.com/arcboxlabs/arcbox/commit/3284c1c71165b8e60b9c4660eec532c755eb7847))
+* **build:** align Clippy configuration with Rust 1.96 ([7829cc2](https://github.com/arcboxlabs/arcbox/commit/7829cc234564089f8e7f9cf5c751642012377729))
+* **docker:** retry container archive and start requests on a busy overlay ([cf6c37d](https://github.com/arcboxlabs/arcbox/commit/cf6c37dcf415799fc4a50523f0a89fdb998185bb))
+* **e2e:** require successful daemon finalization ([6958d54](https://github.com/arcboxlabs/arcbox/commit/6958d54db05f2d6b8cef1105ab3d17cd8b5671c3))
+* **splicetcp:** preserve recovery during host-first close ([#760](https://github.com/arcboxlabs/arcbox/issues/760)) ([ce82383](https://github.com/arcboxlabs/arcbox/commit/ce82383d16bd2b81462854432e4985c347c240a6))
+
+
+### Code Refactoring
+
+* **core:** drop the engine and image compatibility re-exports ([cd19fe7](https://github.com/arcboxlabs/arcbox/commit/cd19fe7d20452b0b79c0275d8499bc35c63b9597))
+* **fleet:** restore the archived Fleet agent verbatim ([e111259](https://github.com/arcboxlabs/arcbox/commit/e111259eebb27bb7097f3b0eb95c1075552f3d7e))
+* **net:** build the guest NAT datapath in one place ([7d8088a](https://github.com/arcboxlabs/arcbox/commit/7d8088a50d6eb046b7a74d68c8cb5cf9a276c583))
+* **runner:** rename Fleet to ArcBox Runners ([1c544b7](https://github.com/arcboxlabs/arcbox/commit/1c544b7f959d38a5a8ed6b72b31e99c7b6e6bb5a))
+* **virt:** remove the consumerless arcbox-net-virtio crate ([26ffceb](https://github.com/arcboxlabs/arcbox/commit/26ffcebc3783d4ec8eaf85982de136e1d484dfc2))
+
+
+### Tests
+
+* **daemon:** build test runtimes without system proxy probes ([f4b6a83](https://github.com/arcboxlabs/arcbox/commit/f4b6a835d10c5bcaa4c551c27240c8ff33d387d0))
+* **engine:** accept a reset when the client closes on a bad acknowledgement ([7e9b711](https://github.com/arcboxlabs/arcbox/commit/7e9b7117c46cb0af038cde85608826ec0fbb12db))
+* **splicetcp:** cover abandonment races and ACK overhead ([b5508fd](https://github.com/arcboxlabs/arcbox/commit/b5508fd78275e1b55c07e685d1a50dfbfc32ca0a))
+
+
+### Documentation
+
+* **adr:** restore self-hosted runners as ArcBox Runners ([fd02175](https://github.com/arcboxlabs/arcbox/commit/fd02175a6c370aa9ec028b28c5f49aa878ab3f93))
+* **agents:** align project structure with the charter ([e130e01](https://github.com/arcboxlabs/arcbox/commit/e130e01e7fc9e43026f5698d3bfb36975d169fea))
+* **architecture:** add the R4 seam map and refresh the R4 gate ([9054214](https://github.com/arcboxlabs/arcbox/commit/905421468ef955a3be1a26a5d6dff2a297501289))
+* **charter:** park runtime crates behind an activation condition ([98c99fb](https://github.com/arcboxlabs/arcbox/commit/98c99fb2c452b194b5ca4b1f421004b14165e152))
+* restore the ArcBox Runners sections ([18fb66c](https://github.com/arcboxlabs/arcbox/commit/18fb66c97d87ff539581ab81311d662dddb8244a))
+* **splicetcp:** describe discard retention without product references ([3ff31a0](https://github.com/arcboxlabs/arcbox/commit/3ff31a0b6abc51a4e2c07e1a610754f6737c5053))
+
+
+### Miscellaneous Chores
+
+* **boot:** bump boot assets to 0.8.12 ([0903eb5](https://github.com/arcboxlabs/arcbox/commit/0903eb512d01678b24367b7511a6289064b78e8a))
+
 ## [0.10.5](https://github.com/arcboxlabs/arcbox/compare/v0.10.4...v0.10.5) (2026-10-22)
 
 
