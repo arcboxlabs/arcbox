@@ -15,10 +15,19 @@
 //! port 2049 and does not register with the portmapper, so the guest needs no
 //! `rpcbind` — which it does not ship and which the in-kernel NFSv3 server
 //! fatally requires. It also removes the MOUNT protocol, so a single relay
-//! suffices. NFSv4's grace period is ended immediately after nfsd starts
-//! (there is a single read-only client with no lock state to reclaim), so
-//! file opens are never deferred; the `nfsdcld`/`rpc_pipefs` client-tracking
-//! machinery that stalled the earlier attempt is not used.
+//! suffices.
+//!
+//! NFSv4's grace period is ended as soon as nfsd starts: there is a single
+//! read-only client with no state to reclaim, and during grace nfsd answers
+//! every OPEN with `NFS4ERR_GRACE`, which the macOS client retries every 2 s.
+//! That needs a client tracker: `nfsdcld` runs over `rpc_pipefs` and is ready
+//! before nfsd starts. Its database lives on the `/var` tmpfs, so every boot
+//! starts with no clients to reclaim and nfsd skips grace on its own; writing
+//! `/proc/fs/nfsd/v4_end_grace` is the backstop. Without a tracker the kernel
+//! refuses that write with `EBUSY` and the first open under `~/ArcBox` waits
+//! out the whole grace period (6–12 s measured). A rootfs without
+//! `/sbin/nfsdcld` (boot assets before it was shipped) still serves; grace
+//! just runs its 10 s minimum.
 //!
 //! `rpc.mountd` still runs locally: the kernel calls it to authorize export
 //! access even under NFSv4, but the client never contacts it.
@@ -51,6 +60,14 @@ mod platform {
     const EXPORT_CONTAINERD: &str = "/run/arcbox/nfs-export/docker/containerd";
     const NFSD_MOUNTPOINT: &str = "/proc/fs/nfsd";
     const NFS_STATE_DIR: &str = "/var/lib/nfs";
+    /// The NFSv4 client tracker, shipped by boot assets that carry it.
+    const NFSDCLD_BIN: &str = "/sbin/nfsdcld";
+    /// nfsd creates the `nfsd/cld` upcall pipe here when it starts.
+    const RPC_PIPEFS_MOUNTPOINT: &str = "/var/lib/nfs/rpc_pipefs";
+    /// nfsdcld's client database, on the `/var` tmpfs.
+    const NFSDCLD_STATE_DIR: &str = "/var/lib/nfs/nfsdcld";
+    /// nfsdcld initializes in milliseconds; this only bounds a wedged one.
+    const NFSDCLD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     const EXPORTS_PATH: &str = "/etc/exports";
     /// Watched for mount-table changes; also the table the live export
     /// entries are derived from, so the two can never disagree.
@@ -177,6 +194,12 @@ local      tpi_cots_ord  -     loopback  -       -       -
         if !mountd_running() && !tcp_port_ready(cfg.mountd_port) {
             spawn_mountd(&cfg)?;
             notes.push(format!("spawned rpc.mountd on port {}", cfg.mountd_port));
+        }
+
+        match ensure_client_tracker() {
+            Ok(true) => notes.push("spawned nfsdcld".to_string()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "nfs export: client tracker unavailable"),
         }
 
         ensure_nfsd_threads(&cfg)?;
@@ -313,28 +336,7 @@ local      tpi_cots_ord  -     loopback  -       -       -
     /// guard forever.
     fn spawn_mountd(cfg: &ExportConfig<'_>) -> Result<(), String> {
         let port = cfg.mountd_port.to_string();
-        let mut child = Command::new("/sbin/rpc.mountd")
-            .args(["-F", "-p", &port])
-            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .stdin(Stdio::null())
-            .stdout(daemon_log_file("rpc.mountd"))
-            .stderr(daemon_log_file("rpc.mountd"))
-            .spawn()
-            .map_err(|e| format!("failed to spawn rpc.mountd: {e}"))?;
-        tracing::info!(
-            pid = child.id(),
-            port = cfg.mountd_port,
-            "nfs export: rpc.mountd spawned"
-        );
-        std::thread::spawn(move || match child.wait() {
-            Ok(status) => tracing::warn!(%status, "nfs export: rpc.mountd exited"),
-            // On the legacy PID-1 path the supervisor's global waitpid(-1)
-            // reaper can win the race; its own log line carries the status.
-            Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
-                tracing::debug!("nfs export: rpc.mountd reaped by the global reaper");
-            }
-            Err(e) => tracing::warn!(error = %e, "nfs export: rpc.mountd wait failed"),
-        });
+        spawn_supervised("rpc.mountd", "/sbin/rpc.mountd", &["-F", "-p", &port])?;
         // Let the listener bind before returning so a repeat setup pass sees
         // the port taken and does not spawn a second, conflicting mountd.
         for _ in 0..20 {
@@ -344,6 +346,102 @@ local      tpi_cots_ord  -     loopback  -       -       -
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         Ok(())
+    }
+
+    /// Spawns a long-running NFS helper in the foreground, logging to its own
+    /// file, with a thread that reaps it and logs its exit.
+    fn spawn_supervised(name: &str, program: &str, args: &[&str]) -> Result<u32, String> {
+        let mut child = Command::new(program)
+            .args(args)
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .stdin(Stdio::null())
+            .stdout(daemon_log_file(name))
+            .stderr(daemon_log_file(name))
+            .spawn()
+            .map_err(|e| format!("failed to spawn {name}: {e}"))?;
+        let pid = child.id();
+        tracing::info!(pid, ?args, "nfs export: {name} spawned");
+        let name = name.to_owned();
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) => tracing::warn!(%status, "nfs export: {name} exited"),
+            // On the legacy PID-1 path the supervisor's global waitpid(-1)
+            // reaper can win the race; its own log line carries the status.
+            Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                tracing::debug!("nfs export: {name} reaped by the global reaper");
+            }
+            Err(e) => tracing::warn!(error = %e, "nfs export: {name} wait failed"),
+        });
+        Ok(pid)
+    }
+
+    /// Starts `nfsdcld`, the NFSv4 client tracker, so nfsd finds it when it
+    /// starts and [`end_grace_early`] is allowed to end grace.
+    ///
+    /// nfsd creates its `nfsd/cld` upcall pipe in `rpc_pipefs` at startup and
+    /// waits one second for a reader; nfsdcld watches for that pipe with
+    /// inotify. Spawning it is not enough: on a fresh database (every boot)
+    /// nfsdcld's one-time upgrade reads `/proc/fs/nfsd/nfsv4recoverydir`,
+    /// which takes `nfsd_mutex` — the lock the threads write holds for that
+    /// whole second. Started together, nfsdcld blocks behind nfsd, nfsd times
+    /// out, and grace runs in full. So this returns only once nfsdcld has
+    /// set up its pipe watch, which comes after the upgrade.
+    ///
+    /// Returns whether it spawned one. Best-effort: without a tracker nfsd
+    /// still serves, it just keeps the grace period.
+    fn ensure_client_tracker() -> Result<bool, String> {
+        if !Path::new(NFSDCLD_BIN).exists() {
+            tracing::warn!(
+                path = NFSDCLD_BIN,
+                "nfs export: rootfs ships no nfsdcld; NFSv4 grace will run its full period"
+            );
+            return Ok(false);
+        }
+        if !is_mounted(RPC_PIPEFS_MOUNTPOINT) {
+            fs::create_dir_all(RPC_PIPEFS_MOUNTPOINT)
+                .map_err(|e| format!("mkdir {RPC_PIPEFS_MOUNTPOINT} failed({e})"))?;
+            mount(
+                Some("rpc_pipefs"),
+                RPC_PIPEFS_MOUNTPOINT,
+                Some("rpc_pipefs"),
+                MsFlags::empty(),
+                None::<&str>,
+            )
+            .map_err(|e| format!("mount -t rpc_pipefs {RPC_PIPEFS_MOUNTPOINT} failed({e})"))?;
+        }
+        if process_named("nfsdcld") {
+            return Ok(false);
+        }
+        fs::create_dir_all(NFSDCLD_STATE_DIR)
+            .map_err(|e| format!("mkdir {NFSDCLD_STATE_DIR} failed({e})"))?;
+        let pid = spawn_supervised(
+            "nfsdcld",
+            NFSDCLD_BIN,
+            &["-F", "-p", RPC_PIPEFS_MOUNTPOINT, "-s", NFSDCLD_STATE_DIR],
+        )?;
+        let deadline = std::time::Instant::now() + NFSDCLD_READY_TIMEOUT;
+        while !has_inotify_fd(pid) {
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    pid,
+                    "nfs export: nfsdcld not ready; nfsd may start without it"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(true)
+    }
+
+    /// True once `pid` holds an inotify descriptor — for nfsdcld, the watch on
+    /// the `rpc_pipefs` directory nfsd creates its pipe in.
+    fn has_inotify_fd(pid: u32) -> bool {
+        let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            fs::read_link(entry.path())
+                .is_ok_and(|target| target.as_os_str() == "anon_inode:inotify")
+        })
     }
 
     /// Brings up kernel nfsd by writing `/proc/fs/nfsd` directly.
@@ -362,8 +460,8 @@ local      tpi_cots_ord  -     loopback  -       -       -
     }
 
     /// Best-effort: cap the grace period at the kernel minimum (10s) before
-    /// threads start. Only a fallback — [`end_grace_early`] normally ends the
-    /// grace period outright the moment nfsd is up. The lease time is left at
+    /// threads start. Only a fallback for a guest with no client tracker —
+    /// with nfsdcld, nfsd skips grace outright. The lease time is left at
     /// the kernel default (90s) so the host client renews it rarely instead of
     /// every few seconds.
     fn set_grace_fallback() {
@@ -374,12 +472,19 @@ local      tpi_cots_ord  -     loopback  -       -       -
 
     /// Best-effort: end the NFSv4 grace period immediately. During grace the
     /// server defers new OPENs to let prior clients reclaim state, but this
-    /// export has a single read-only client with nothing to reclaim. Requires
-    /// running nfsd threads (the kernel returns EBUSY otherwise); repeat
-    /// writes are no-ops once grace has ended.
+    /// export has a single read-only client with nothing to reclaim. The
+    /// kernel returns `EBUSY` unless nfsd threads are running with an active
+    /// client tracker ([`ensure_client_tracker`]); a failure here means the
+    /// host's first open waits out the grace period, so it is a warning.
+    /// The kernel also refuses once grace has ended, so a repeat setup pass
+    /// checks first.
     fn end_grace_early() {
-        if let Err(e) = fs::write("/proc/fs/nfsd/v4_end_grace", "Y") {
-            tracing::debug!(error = %e, "nfs export: could not end v4 grace early (non-fatal)");
+        const END_GRACE: &str = "/proc/fs/nfsd/v4_end_grace";
+        if fs::read_to_string(END_GRACE).is_ok_and(|ended| ended.trim() == "Y") {
+            return;
+        }
+        if let Err(e) = fs::write(END_GRACE, "Y") {
+            tracing::warn!(error = %e, "nfs export: could not end v4 grace early; opens wait for the grace period");
         }
     }
 
