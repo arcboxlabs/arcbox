@@ -13,6 +13,7 @@ gic = []
 
 [dependencies]
 libc = { workspace = true }
+serde.workspace = true
 thiserror = "2"
 tracing = "0.1"
 

@@ -86,13 +86,13 @@ pub const HV_REG_CPSR: u32 = 34;
 pub const HV_SYS_REG_MPIDR_EL1: u16 = 0xc005;
 pub const HV_SYS_REG_SCTLR_EL1: u16 = 0xc080;
 pub const HV_SYS_REG_TTBR0_EL1: u16 = 0xc100;
-pub const HV_SYS_REG_TTBR1_EL1: u16 = 0xc108;
+pub const HV_SYS_REG_TTBR1_EL1: u16 = 0xc101;
 pub const HV_SYS_REG_TCR_EL1: u16 = 0xc102;
 pub const HV_SYS_REG_MAIR_EL1: u16 = 0xc510;
 pub const HV_SYS_REG_VBAR_EL1: u16 = 0xc600;
 pub const HV_SYS_REG_SP_EL1: u16 = 0xe208;
-pub const HV_SYS_REG_SPSR_EL1: u16 = 0xe200;
-pub const HV_SYS_REG_ELR_EL1: u16 = 0xe201;
+pub const HV_SYS_REG_SPSR_EL1: u16 = 0xc200;
+pub const HV_SYS_REG_ELR_EL1: u16 = 0xc201;
 
 // ---------------------------------------------------------------------------
 // Interrupt types for hv_vcpu_set_pending_interrupt
@@ -167,6 +167,17 @@ unsafe extern "C" {
         pending: bool,
     ) -> hv_return_t;
     pub fn hv_vcpu_set_vtimer_mask(vcpu: hv_vcpu_t, masked: bool) -> hv_return_t;
+    pub fn hv_vcpu_get_vtimer_mask(vcpu: hv_vcpu_t, masked: *mut bool) -> hv_return_t;
+    /// `CNTVCT_EL0 = mach_absolute_time() - vtimer_offset`.
+    pub fn hv_vcpu_get_vtimer_offset(vcpu: hv_vcpu_t, offset: *mut u64) -> hv_return_t;
+    pub fn hv_vcpu_set_vtimer_offset(vcpu: hv_vcpu_t, offset: u64) -> hv_return_t;
+
+    // SIMD & FP registers Q0–Q31 (`hv_simd_fp_reg_t` is the register index).
+    // The setter takes the vector by value in `v0`, which Rust cannot
+    // declare in an FFI signature; call it through `hv_vcpu_set_simd_fp_reg`.
+    pub fn hv_vcpu_get_simd_fp_reg(vcpu: hv_vcpu_t, reg: u32, value: *mut [u8; 16]) -> hv_return_t;
+    #[link_name = "hv_vcpu_set_simd_fp_reg"]
+    fn hv_vcpu_set_simd_fp_reg_raw();
 
     // VM configuration (macOS 13+)
     pub fn hv_vm_config_create() -> *mut c_void;
@@ -186,6 +197,34 @@ unsafe extern "C" {
     pub fn hv_vcpu_set_trap_debug_exceptions(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
     pub fn hv_vcpu_set_trap_debug_reg_accesses(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
 
+}
+
+/// `hv_vcpu_set_simd_fp_reg(vcpu, reg, value)`, with the 128-bit `value`
+/// passed in `v0` as the C ABI requires for `hv_simd_fp_uchar16_t`.
+///
+/// # Safety
+///
+/// Same contract as the framework call: `vcpu` must be a live vCPU owned by
+/// the calling thread.
+pub unsafe fn hv_vcpu_set_simd_fp_reg(vcpu: hv_vcpu_t, reg: u32, value: &[u8; 16]) -> hv_return_t {
+    let ret: u64;
+    // SAFETY: loads 16 readable bytes into q0 and calls the framework with
+    // the AAPCS64 argument registers it expects (x0 = vcpu, w1 = reg,
+    // v0 = value); `clobber_abi("C")` covers every register the callee and
+    // the `bl` may change.
+    unsafe {
+        core::arch::asm!(
+            "ldr q0, [{value}]",
+            "bl {f}",
+            value = in(reg) value.as_ptr(),
+            f = sym hv_vcpu_set_simd_fp_reg_raw,
+            inlateout("x0") vcpu => ret,
+            in("x1") u64::from(reg),
+            clobber_abi("C"),
+        );
+    }
+    // `hv_return_t` is a 32-bit value returned in w0.
+    (ret as u32).cast_signed()
 }
 
 // GICv3 APIs (macOS 15+). Gated behind the `gic` cargo feature because
@@ -224,5 +263,20 @@ unsafe extern "C" {
     pub fn hv_gic_get_spi_interrupt_range(base: *mut u32, count: *mut u32) -> hv_return_t;
 
     // --- State save/restore ---
+    /// Snapshot of the distributor and redistributors, excluding the
+    /// per-vCPU ICC registers. Every vCPU must be outside `hv_vcpu_run`.
+    /// Release with `os_release`.
+    pub fn hv_gic_state_create() -> *mut c_void;
+    pub fn hv_gic_state_get_size(state: *mut c_void, size: *mut usize) -> hv_return_t;
+    pub fn hv_gic_state_get_data(state: *mut c_void, data: *mut c_void) -> hv_return_t;
+    /// Valid only after the GIC and every vCPU exist and before any vCPU runs.
     pub fn hv_gic_set_state(data: *const c_void, size: usize) -> hv_return_t;
+    pub fn hv_gic_get_icc_reg(vcpu: hv_vcpu_t, reg: u16, value: *mut u64) -> hv_return_t;
+    pub fn hv_gic_set_icc_reg(vcpu: hv_vcpu_t, reg: u16, value: u64) -> hv_return_t;
+}
+
+#[cfg(feature = "gic")]
+unsafe extern "C" {
+    /// Releases an `os_object` such as an `hv_gic_state_t` (libSystem).
+    pub fn os_release(object: *mut c_void);
 }

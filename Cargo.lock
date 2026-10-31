@@ -877,6 +877,7 @@ name = "arcbox-hv"
 version = "0.3.20"
 dependencies = [
  "libc",
+ "serde",
  "thiserror 2.0.18",
  "tracing",
 ]

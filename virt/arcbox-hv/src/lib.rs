@@ -12,6 +12,8 @@ pub mod ffi;
 #[cfg(feature = "gic")]
 mod gic;
 mod memory;
+#[cfg(feature = "gic")]
+pub mod snapshot;
 mod vcpu;
 mod vm;
 
