@@ -678,6 +678,36 @@ impl Vmm {
             .checkpoint(dir)
     }
 
+    /// Starts this (not yet started) HV machine from the checkpoint in
+    /// `dir` instead of booting it. The configuration must match the
+    /// checkpointed machine's, with its disks cloned from the checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for another backend or state, or if the checkpoint
+    /// cannot be read or applied.
+    #[cfg(all(target_os = "macos", feature = "gic"))]
+    pub fn hv_restore(&mut self, dir: &std::path::Path) -> Result<()> {
+        if self.state != VmmState::Created {
+            return Err(VmmError::invalid_state(format!(
+                "cannot restore into state {:?}",
+                self.state
+            )));
+        }
+        self.hv
+            .as_mut()
+            .ok_or_else(|| VmmError::Unsupported("restore needs the HV backend".into()))?
+            .prepare_restore(dir)?;
+        self.start()?;
+        match self.hv.as_mut().map(darwin_hv::HvMachine::finish_restore) {
+            Some(Err(e)) => {
+                let _ = self.stop();
+                Err(e)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Runs the VMM until it exits.
     ///
     /// This is the main event loop that blocks until the VM exits.

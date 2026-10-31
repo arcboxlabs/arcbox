@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::device::{MAX_VIRTQUEUES, VirtioMmioState};
+use crate::error::{Result, VmmError};
 
 /// One virtqueue's transport registers.
 #[derive(Serialize, Deserialize)]
@@ -20,14 +21,14 @@ struct QueueState {
 /// their avail cursor from the used ring.
 #[derive(Serialize, Deserialize)]
 pub(super) struct DeviceState {
-    mmio_base: u64,
+    pub(super) mmio_base: u64,
     device_id: u32,
     device_features: u64,
-    driver_features: u64,
+    pub(super) driver_features: u64,
     device_features_sel: u32,
     driver_features_sel: u32,
     queue_sel: u32,
-    status: u8,
+    pub(super) status: u8,
     interrupt_status: u32,
     config_generation: u32,
     shm_sel: u32,
@@ -60,5 +61,37 @@ impl DeviceState {
                 })
                 .collect(),
         }
+    }
+
+    pub(super) fn apply(&self, s: &mut VirtioMmioState) -> Result<()> {
+        if s.device_id != self.device_id {
+            return Err(VmmError::invalid_state(format!(
+                "device at {:#x} is type {}, the checkpoint has type {}",
+                self.mmio_base, s.device_id, self.device_id
+            )));
+        }
+        s.device_features = self.device_features;
+        s.driver_features = self.driver_features;
+        s.device_features_sel = self.device_features_sel;
+        s.driver_features_sel = self.driver_features_sel;
+        s.queue_sel = self.queue_sel;
+        s.status = self.status;
+        s.interrupt_status = self.interrupt_status;
+        s.config_generation = self.config_generation;
+        s.shm_sel = self.shm_sel;
+        for q in &self.queues {
+            if q.index >= MAX_VIRTQUEUES {
+                return Err(VmmError::invalid_state(format!(
+                    "queue {} out of range",
+                    q.index
+                )));
+            }
+            s.queue_num[q.index] = q.num;
+            s.queue_ready[q.index] = q.ready;
+            s.queue_desc[q.index] = q.desc;
+            s.queue_driver[q.index] = q.driver;
+            s.queue_device[q.index] = q.device;
+        }
+        Ok(())
     }
 }

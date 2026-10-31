@@ -1,4 +1,4 @@
-//! Checkpoint of a running HV machine (spike).
+//! Checkpoint and restore of a running HV machine (spike).
 //!
 //! A checkpoint is taken in place: every powered-on vCPU stops at the top
 //! of its run loop, captures its own registers and stays parked with its
@@ -10,6 +10,11 @@
 //!
 //! Only the block devices are quiesced so far; a machine with a NIC or
 //! vsock device is not checkpointed consistently yet.
+//!
+//! A restore builds the same machine in a fresh process (Hypervisor.framework
+//! allows one VM per process), maps the RAM image copy-on-write, writes the
+//! device state back, creates every vCPU in id order and resumes them where
+//! they stopped. The caller provides the disks, cloned from the checkpoint.
 //!
 //! Method and results: `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`.
 
@@ -24,11 +29,16 @@ use serde::{Deserialize, Serialize};
 use super::Pl031;
 
 mod device_state;
+mod restore;
 mod save;
+
+pub(in crate::vmm) use restore::Restore;
 
 use device_state::DeviceState;
 
-/// How long the vCPUs get to stop.
+/// `DRIVER_OK` in the virtio device status.
+const DRIVER_OK: u8 = 4;
+/// How long the vCPUs get to stop, and to restore.
 const PAUSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The checkpoint request the vCPU threads poll, and the states they leave.

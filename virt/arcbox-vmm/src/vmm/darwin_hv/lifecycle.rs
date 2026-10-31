@@ -51,6 +51,15 @@ impl HvMachine {
                 .ok_or_else(|| VmmError::config("device manager not initialized".to_string()))?,
         );
 
+        // A checkpoint being resumed: its device state goes in before any
+        // worker or vCPU starts.
+        #[cfg(feature = "gic")]
+        let restore = self.hv_restore.clone();
+        #[cfg(feature = "gic")]
+        if let Some(ref r) = restore {
+            r.apply_devices(&device_manager)?;
+        }
+
         // Spawn async block I/O worker threads (one per block device).
         // Uses device info captured during initialize_darwin_hv.
         // Must happen before Arc is cloned to other threads.
@@ -220,7 +229,11 @@ impl HvMachine {
         paused.store(false, std::sync::atomic::Ordering::SeqCst);
         let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
-        let pl031 = Arc::new(std::sync::Mutex::new(Pl031::new()));
+        #[cfg(feature = "gic")]
+        let rtc = restore.as_ref().map_or_else(Pl031::new, |r| r.pl031());
+        #[cfg(not(feature = "gic"))]
+        let rtc = Pl031::new();
+        let pl031 = Arc::new(std::sync::Mutex::new(rtc));
         self.hv_pl031 = Some(Arc::clone(&pl031));
         let creation = CreationOrder::new(vcpu_count);
 
@@ -256,6 +269,10 @@ impl HvMachine {
                 receivers.push(rx);
             }
             let registry = CpuPowerRegistry::from_senders(senders);
+            #[cfg(feature = "gic")]
+            if let Some(ref r) = restore {
+                registry.set_states(r.cpu_on());
+            }
 
             for (i, rx) in (1..vcpu_count).zip(receivers) {
                 let r = running.clone();
@@ -273,6 +290,16 @@ impl HvMachine {
                 let creation = creation.clone();
                 #[cfg(feature = "gic")]
                 let checkpoint = self.hv_checkpoint.clone();
+                #[cfg(feature = "gic")]
+                let boot = match restore {
+                    Some(ref plan) => VcpuBoot::Restore {
+                        plan: Arc::clone(plan),
+                        cpu_on: Some(rx),
+                    },
+                    None => VcpuBoot::AwaitCpuOn(rx),
+                };
+                #[cfg(not(feature = "gic"))]
+                let boot = VcpuBoot::AwaitCpuOn(rx);
 
                 // The thread creates its HvVcpu once, parks on its receiver
                 // until CPU_ON, and — when the guest offlines it via
@@ -284,7 +311,7 @@ impl HvMachine {
                     .spawn(move || {
                         vcpu_run_loop(
                             i,
-                            VcpuBoot::AwaitCpuOn(rx),
+                            boot,
                             VcpuContext {
                                 device_manager: dm,
                                 running: r,
@@ -320,16 +347,22 @@ impl HvMachine {
         let bsp_stats = vcpu_stats[0].clone();
         #[cfg(feature = "gic")]
         let bsp_checkpoint = self.hv_checkpoint.clone();
+        let bsp_boot = VcpuBoot::Immediate {
+            entry: kernel_entry,
+            x0: fdt_addr,
+        };
+        #[cfg(feature = "gic")]
+        let bsp_boot = match restore {
+            Some(plan) => VcpuBoot::Restore { plan, cpu_on: None },
+            None => bsp_boot,
+        };
         {
             let t = std::thread::Builder::new()
                 .name("hv-vcpu-0".to_string())
                 .spawn(move || {
                     vcpu_run_loop(
                         0,
-                        VcpuBoot::Immediate {
-                            entry: kernel_entry,
-                            x0: fdt_addr,
-                        },
+                        bsp_boot,
                         VcpuContext {
                             device_manager,
                             running,

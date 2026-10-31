@@ -221,6 +221,27 @@ pub(super) enum VcpuBoot {
     /// park on it again after every CPU_OFF (secondaries). The thread exits
     /// when the power registry closes the sender (VM stop).
     AwaitCpuOn(std::sync::mpsc::Receiver<super::psci::CpuOnRequest>),
+    /// Resume a checkpoint: restore this vCPU's state and continue where it
+    /// stopped, or, if it was off, wait for CPU_ON on `cpu_on` as above.
+    #[cfg(feature = "gic")]
+    Restore {
+        plan: Arc<super::checkpoint::Restore>,
+        cpu_on: Option<std::sync::mpsc::Receiver<super::psci::CpuOnRequest>>,
+    },
+}
+
+/// How a vCPU thread's first power-on cycle starts.
+enum FirstRun {
+    /// At the kernel entry with `x0`.
+    Boot(u64, u64),
+    /// Wherever the restored registers say.
+    #[cfg_attr(
+        not(feature = "gic"),
+        allow(dead_code, reason = "checkpoint restore only")
+    )]
+    Resume,
+    /// At the first CPU_ON.
+    AwaitCpuOn,
 }
 
 /// Waits for the next PSCI CPU_ON on `rx`; `None` once the power registry
@@ -392,11 +413,31 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
     }
 
     // Resolve the first power-on: the BSP boots immediately; a secondary
-    // parks until the guest's first CPU_ON for it.
-    let (cpu_on_rx, (mut entry_addr, mut x0_value)) = match boot {
-        VcpuBoot::Immediate { entry, x0 } => (None, (entry, x0)),
-        VcpuBoot::AwaitCpuOn(rx) => match await_cpu_on(vcpu_id, &rx) {
-            Some(at) => (Some(rx), at),
+    // parks until the guest's first CPU_ON for it; a restored vCPU that was
+    // on continues where the checkpoint stopped it.
+    let (cpu_on_rx, first) = match boot {
+        VcpuBoot::Immediate { entry, x0 } => (None, FirstRun::Boot(entry, x0)),
+        VcpuBoot::AwaitCpuOn(rx) => (Some(rx), FirstRun::AwaitCpuOn),
+        #[cfg(feature = "gic")]
+        VcpuBoot::Restore { plan, cpu_on } => {
+            match plan.restore_vcpu(vcpu_id, &vcpu, &device_manager) {
+                Ok(true) => (cpu_on, FirstRun::Resume),
+                Ok(false) => (cpu_on, FirstRun::AwaitCpuOn),
+                Err(e) => {
+                    tracing::error!("vCPU {vcpu_id}: {e}");
+                    running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    };
+    // A resumed vCPU skips the boot register setup of its first cycle.
+    let mut resumed = matches!(first, FirstRun::Resume);
+    let (mut entry_addr, mut x0_value) = match first {
+        FirstRun::Boot(entry, x0) => (entry, x0),
+        FirstRun::Resume => (0, 0),
+        FirstRun::AwaitCpuOn => match cpu_on_rx.as_ref().and_then(|rx| await_cpu_on(vcpu_id, rx)) {
+            Some(at) => at,
             None => return,
         },
     };
@@ -404,7 +445,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
     // One iteration per power-on cycle; `continue` re-enters after a
     // CPU_OFF → CPU_ON round trip with fresh entry/x0.
     loop {
-        if !set_boot_regs(&vcpu, vcpu_id, entry_addr, x0_value) {
+        if !std::mem::take(&mut resumed) && !set_boot_regs(&vcpu, vcpu_id, entry_addr, x0_value) {
             return;
         }
 

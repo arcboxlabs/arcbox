@@ -44,9 +44,23 @@ impl HvMachine {
 
         // --- 1. Allocate guest RAM via vm-memory's mmap abstraction ---
         // This allocates anonymous memory and provides type-safe GPA access.
-        let guest_mem =
-            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(RAM_BASE_IPA), ram_size)])
-                .map_err(|e| VmmError::Memory(format!("guest memory allocation failed: {e}")))?;
+        // A resumed checkpoint maps its RAM image copy-on-write instead, so
+        // only the pages the guest touches are read.
+        #[cfg(feature = "gic")]
+        let restored = self
+            .hv_restore
+            .as_ref()
+            .map(|r| r.guest_memory(ram_size))
+            .transpose()?;
+        #[cfg(not(feature = "gic"))]
+        let restored = None;
+        let guest_mem = match restored {
+            Some(mem) => mem,
+            None => {
+                GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(RAM_BASE_IPA), ram_size)])
+                    .map_err(|e| VmmError::Memory(format!("guest memory allocation failed: {e}")))?
+            }
+        };
         tracing::debug!(
             "Allocated {} MB guest RAM via vm-memory",
             ram_size / (1024 * 1024)
@@ -491,8 +505,17 @@ impl HvMachine {
             );
         }
 
-        // --- 8–10. Kernel, initrd and FDT ---
-        let (kernel_entry, fdt_addr) = self.load_boot_image(&guest_mem, &device_manager)?;
+        // --- 8–10. Kernel, initrd and FDT, unless resuming a checkpoint whose
+        // RAM already holds them ---
+        #[cfg(feature = "gic")]
+        let restoring = self.hv_restore.is_some();
+        #[cfg(not(feature = "gic"))]
+        let restoring = false;
+        let (kernel_entry, fdt_addr) = if restoring {
+            (0, 0)
+        } else {
+            self.load_boot_image(&guest_mem, &device_manager)?
+        };
 
         // --- 11. Store managers ---
         let event_loop = crate::event::EventLoop::new()?;
@@ -519,7 +542,6 @@ impl HvMachine {
         tracing::info!("Custom Hypervisor.framework VMM initialized");
         Ok(())
     }
-
     /// Loads the kernel and initrd into guest RAM and writes the FDT after
     /// them. Returns the kernel entry and the FDT address.
     fn load_boot_image(

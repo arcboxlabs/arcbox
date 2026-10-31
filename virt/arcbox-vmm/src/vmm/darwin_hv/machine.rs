@@ -169,6 +169,9 @@ pub struct HvMachine {
     /// Checkpoint request shared with the vCPU threads.
     #[cfg(feature = "gic")]
     pub(super) hv_checkpoint: Arc<super::checkpoint::CheckpointCtl>,
+    /// The checkpoint `initialize` and `start` resume instead of booting.
+    #[cfg(feature = "gic")]
+    pub(super) hv_restore: Option<Arc<super::checkpoint::Restore>>,
 }
 
 impl HvMachine {
@@ -220,6 +223,8 @@ impl HvMachine {
             hv_pl031: None,
             #[cfg(feature = "gic")]
             hv_checkpoint,
+            #[cfg(feature = "gic")]
+            hv_restore: None,
         }
     }
 

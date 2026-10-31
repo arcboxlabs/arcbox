@@ -117,6 +117,18 @@ impl CpuPowerRegistry {
         self.lock().iter().map(|slot| slot.on).collect()
     }
 
+    /// Sets each CPU's power state from a checkpoint (index = vCPU id),
+    /// before any vCPU runs.
+    #[cfg_attr(
+        not(feature = "gic"),
+        allow(dead_code, reason = "checkpoint restore only")
+    )]
+    pub(super) fn set_states(&self, on: &[bool]) {
+        for (slot, &on) in self.lock().iter_mut().zip(on) {
+            slot.on = on;
+        }
+    }
+
     /// Powers `target` on: marks the slot on and wakes its thread. Resolves
     /// the race with a concurrent CPU_ON for the same target under the lock.
     /// Returns the PSCI return code for X0.
