@@ -90,6 +90,9 @@ from memory. Every new file is added to the index below.
 
 - [2026-10-31 — Can a Hypervisor.framework VM be checkpointed in one process and resumed in another?](experiments/2026-10-31-hv-checkpoint-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
 - [2026-10-31 — Can a multi-vCPU HV VM with a virtio-blk device under load be checkpointed and resumed?](experiments/2026-10-31-hv-checkpoint-blk-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
+- [2026-10-31 — Can the production HV VMM checkpoint a Linux guest in the middle of block I/O and resume it?](experiments/2026-10-31-hv-checkpoint-linux-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
+- [2026-10-31 — Can an HV checkpoint carry a Linux guest's live TCP and vsock connections through a restore?](experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
+- [2026-10-31 — Can an HV checkpoint save its TCP flow table so the restore resets flows the guest is silently waiting on?](experiments/2026-10-31-hv-checkpoint-tcp-reset-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
 - [2026-10-09 — Does the Keychain CA reject other application identities?](experiments/2026-10-09-keychain-signing-identity.md)
 - [2026-10-09 — Can a Linux CA bundle preserve macOS SSL trust?](experiments/2026-10-09-macos-trust-portability.md)
 - [2026-10-08 — Why can copying into a stopped container fail with OverlayFS EBUSY?](experiments/2026-10-08-overlay-copy-lifetime.md) — [guest lifecycle recorder](../tests/bench/signoz/probe-overlay-lifecycle.sh), [lifecycle analyzer](../tests/bench/signoz/analyze_overlay_lifecycle.py), [experimental exit barrier](../tests/bench/signoz/moby-overlay-exit/README.md)

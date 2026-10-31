@@ -66,3 +66,7 @@ required-features = ["gic"]
 [[example]]
 name = "checkpoint_blk_spike"
 required-features = ["gic"]
+
+[[example]]
+name = "checkpoint_linux_spike"
+required-features = ["gic"]
