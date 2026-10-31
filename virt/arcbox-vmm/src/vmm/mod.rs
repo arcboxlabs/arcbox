@@ -656,6 +656,28 @@ impl Vmm {
         ))
     }
 
+    /// Checkpoints a running HV machine into `dir` (spike; see
+    /// `darwin_hv/checkpoint.rs`) and returns a timing summary. The vCPUs
+    /// stay stopped: call [`Self::stop`] next.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for another backend or state, or if a part of the
+    /// checkpoint cannot be captured or written.
+    #[cfg(all(target_os = "macos", feature = "gic"))]
+    pub fn hv_checkpoint(&mut self, dir: &std::path::Path) -> Result<String> {
+        if self.state != VmmState::Running {
+            return Err(VmmError::invalid_state(format!(
+                "cannot checkpoint from state {:?}",
+                self.state
+            )));
+        }
+        self.hv
+            .as_mut()
+            .ok_or_else(|| VmmError::Unsupported("checkpoint needs the HV backend".into()))?
+            .checkpoint(dir)
+    }
+
     /// Runs the VMM until it exits.
     ///
     /// This is the main event loop that blocks until the VM exits.

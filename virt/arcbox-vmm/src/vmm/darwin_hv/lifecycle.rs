@@ -221,6 +221,7 @@ impl HvMachine {
         let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
         let pl031 = Arc::new(std::sync::Mutex::new(Pl031::new()));
+        self.hv_pl031 = Some(Arc::clone(&pl031));
         let creation = CreationOrder::new(vcpu_count);
 
         let vcpu_thread_handles = self
@@ -270,6 +271,8 @@ impl HvMachine {
                 let stats = vcpu_stats[i as usize].clone();
                 let registry_for_thread = registry.clone();
                 let creation = creation.clone();
+                #[cfg(feature = "gic")]
+                let checkpoint = self.hv_checkpoint.clone();
 
                 // The thread creates its HvVcpu once, parks on its receiver
                 // until CPU_ON, and — when the guest offlines it via
@@ -296,6 +299,8 @@ impl HvMachine {
                                 hvc_blk_fds: hvc_fds_clone,
                                 stats,
                                 creation,
+                                #[cfg(feature = "gic")]
+                                checkpoint,
                             },
                         );
                     })
@@ -313,6 +318,8 @@ impl HvMachine {
         let hvc_blk_fds = self.hvc_blk_fds.clone();
         let bsp_hv_vcpu_ids = hv_vcpu_ids;
         let bsp_stats = vcpu_stats[0].clone();
+        #[cfg(feature = "gic")]
+        let bsp_checkpoint = self.hv_checkpoint.clone();
         {
             let t = std::thread::Builder::new()
                 .name("hv-vcpu-0".to_string())
@@ -337,6 +344,8 @@ impl HvMachine {
                             hvc_blk_fds,
                             stats: bsp_stats,
                             creation,
+                            #[cfg(feature = "gic")]
+                            checkpoint: bsp_checkpoint,
                         },
                     );
                 })

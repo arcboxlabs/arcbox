@@ -47,7 +47,9 @@ const RTC_ICR: u64 = 0x01C;
 const AMBA_ID_BASE: u64 = 0xFE0;
 const AMBA_IDS: [u8; 8] = [0x31, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
 
-/// Minimal PL031 RTC emulator.
+/// Minimal PL031 RTC emulator. Its whole state is the four registers
+/// below, so a checkpoint stores the struct as is.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pl031 {
     /// Guest-visible time = host wall clock + this offset (wrapping u32
     /// seconds). Zero until the guest writes RTC_LR, so reads report the

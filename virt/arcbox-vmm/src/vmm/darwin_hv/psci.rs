@@ -113,7 +113,7 @@ impl CpuPowerRegistry {
     }
 
     /// Snapshots each CPU's power state (index = vCPU id).
-    fn snapshot(&self) -> Vec<bool> {
+    pub(super) fn snapshot(&self) -> Vec<bool> {
         self.lock().iter().map(|slot| slot.on).collect()
     }
 

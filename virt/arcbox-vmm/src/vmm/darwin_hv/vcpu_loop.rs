@@ -78,6 +78,9 @@ pub(super) struct VcpuContext {
     pub stats: Arc<crate::vcpu_stats::VcpuStats>,
     /// Orders vCPU creation and holds every thread until all vCPUs exist.
     pub creation: Arc<CreationOrder>,
+    /// Checkpoint request: the loop stops and parks here when it is set.
+    #[cfg(feature = "gic")]
+    pub checkpoint: Arc<super::checkpoint::CheckpointCtl>,
 }
 
 /// Creates the VM's vCPUs one at a time in vCPU-id order, before any of
@@ -315,6 +318,8 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
         hvc_blk_fds,
         stats,
         creation,
+        #[cfg(feature = "gic")]
+        checkpoint,
     } = ctx;
 
     let vcpu = match creation.create(vcpu_id, &running) {
@@ -408,6 +413,14 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
             if !running.load(Ordering::Relaxed) {
                 tracing::info!("vCPU {vcpu_id}: shutdown requested");
                 break;
+            }
+
+            // Checkpoint: stop here, outside `hv_vcpu_run` with the last
+            // exit fully handled, and stay parked until the VM stops.
+            #[cfg(feature = "gic")]
+            if checkpoint.requested() {
+                checkpoint.park(vcpu_id, &vcpu, &running);
+                continue;
             }
 
             // Cooperative pause: if the host has requested a pause, park here

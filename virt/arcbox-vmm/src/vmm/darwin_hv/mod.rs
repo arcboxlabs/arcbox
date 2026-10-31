@@ -28,6 +28,8 @@ use crate::error::VmmError;
 
 use super::*;
 
+#[cfg(feature = "gic")]
+mod checkpoint;
 mod console;
 #[cfg(test)]
 mod guest_ram;

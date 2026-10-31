@@ -164,12 +164,19 @@ pub struct HvMachine {
     /// guest via [`Vmm::reboot`] instead of tearing the machine down. Cleared
     /// by `reboot`.
     pub(super) hv_reset_requested: Arc<AtomicBool>,
+    /// The PL031 the vCPU threads share; a checkpoint saves it.
+    pub(super) hv_pl031: Option<Arc<std::sync::Mutex<super::Pl031>>>,
+    /// Checkpoint request shared with the vCPU threads.
+    #[cfg(feature = "gic")]
+    pub(super) hv_checkpoint: Arc<super::checkpoint::CheckpointCtl>,
 }
 
 impl HvMachine {
     /// Creates an uninitialized machine for `config`. `running` is the
     /// owner's run flag; every thread the machine spawns watches it.
     pub(in crate::vmm) fn new(config: VmmConfig, running: Arc<AtomicBool>) -> Self {
+        #[cfg(feature = "gic")]
+        let hv_checkpoint = super::checkpoint::CheckpointCtl::new(config.vcpu_count as usize);
         Self {
             config,
             running,
@@ -210,6 +217,9 @@ impl HvMachine {
             hv_guest_mem: None,
             hv_paused: Arc::new(AtomicBool::new(false)),
             hv_reset_requested: Arc::new(AtomicBool::new(false)),
+            hv_pl031: None,
+            #[cfg(feature = "gic")]
+            hv_checkpoint,
         }
     }
 
