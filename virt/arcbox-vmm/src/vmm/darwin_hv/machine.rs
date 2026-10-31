@@ -169,7 +169,7 @@ pub struct HvMachine {
 impl HvMachine {
     /// Creates an uninitialized machine for `config`. `running` is the
     /// owner's run flag; every thread the machine spawns watches it.
-    pub(in crate::vmm) fn new(config: VmmConfig, running: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(config: VmmConfig, running: Arc<AtomicBool>) -> Self {
         Self {
             config,
             running,
@@ -214,25 +214,22 @@ impl HvMachine {
     }
 
     /// Sets the shared DNS policy. Must be called before [`Self::initialize`].
-    pub(in crate::vmm) fn set_shared_dns(&mut self, dns: arcbox_net::dns::SharedDns) {
+    pub(crate) fn set_shared_dns(&mut self, dns: arcbox_net::dns::SharedDns) {
         self.shared_dns = Some(dns);
     }
 
     /// Sets the egress proxy. Must be called before [`Self::initialize`].
-    pub(in crate::vmm) fn set_proxy_env(
-        &mut self,
-        env: arcbox_fakeip::proxy_detect::ProxyEnvironment,
-    ) {
+    pub(crate) fn set_proxy_env(&mut self, env: arcbox_fakeip::proxy_detect::ProxyEnvironment) {
         self.proxy_env = Some(env);
     }
 
     /// Builds the VM, guest memory, devices and the boot image.
-    pub(in crate::vmm) fn initialize(&mut self) -> Result<()> {
+    pub(crate) fn initialize(&mut self) -> Result<()> {
         self.initialize_darwin_hv()
     }
 
     /// Starts the vCPU threads and io workers, then the event loop.
-    pub(in crate::vmm) fn start(&mut self) -> Result<()> {
+    pub(crate) fn start(&mut self) -> Result<()> {
         self.start_darwin_hv()?;
         if let Some(ref mut event_loop) = self.event_loop {
             event_loop.start()?;
@@ -241,18 +238,18 @@ impl HvMachine {
     }
 
     /// Parks every vCPU thread.
-    pub(in crate::vmm) fn pause(&self) -> Result<()> {
+    pub(crate) fn pause(&self) -> Result<()> {
         self.pause_darwin_hv()
     }
 
     /// Unparks every vCPU thread.
-    pub(in crate::vmm) fn resume(&self) -> Result<()> {
+    pub(crate) fn resume(&self) -> Result<()> {
         self.resume_darwin_hv()
     }
 
     /// Stops the event loop, tears the machine down in the drop-order
     /// contract above, then cancels the network datapath.
-    pub(in crate::vmm) fn stop(&mut self) -> Result<()> {
+    pub(crate) fn stop(&mut self) -> Result<()> {
         if let Some(ref mut event_loop) = self.event_loop {
             event_loop.stop();
         }
@@ -279,14 +276,18 @@ impl HvMachine {
         }
     }
 
+    /// The channel the guest's PSCI SYSTEM_OFF completes, once
+    /// [`Self::start`] has run. It disconnects without a message when every
+    /// vCPU thread exits for another reason: a SYSTEM_RESET, a host stop or
+    /// a vCPU failure.
+    pub(crate) fn poweroff_receiver(&self) -> Option<crossbeam_channel::Receiver<()>> {
+        self.hv_poweroff_rx.clone()
+    }
+
     /// Waits for the guest's PSCI SYSTEM_OFF. `running` is whether the
     /// owner considers the VM running; a completion already observed
     /// answers `true` regardless.
-    pub(in crate::vmm) fn wait_for_poweroff(
-        &mut self,
-        timeout: Duration,
-        running: bool,
-    ) -> Result<bool> {
+    pub(crate) fn wait_for_poweroff(&mut self, timeout: Duration, running: bool) -> Result<bool> {
         if self.hv_poweroff_observed {
             return Ok(true);
         }
@@ -310,22 +311,22 @@ impl HvMachine {
     }
 
     /// Whether the guest asked for PSCI SYSTEM_RESET.
-    pub(in crate::vmm) fn reset_requested(&self) -> bool {
+    pub(crate) fn reset_requested(&self) -> bool {
         self.hv_reset_requested.load(Ordering::SeqCst)
     }
 
     /// Clears the reset request before a reboot.
-    pub(in crate::vmm) fn clear_reset_requested(&self) {
+    pub(crate) fn clear_reset_requested(&self) {
         self.hv_reset_requested.store(false, Ordering::SeqCst);
     }
 
     /// Opens a host-initiated vsock connection to `port` in the guest.
-    pub(in crate::vmm) fn connect_vsock(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
+    pub(crate) fn connect_vsock(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         self.connect_vsock_hv(port)
     }
 
     /// Sets the balloon target in bytes (4 KiB pages, saturating).
-    pub(in crate::vmm) fn set_balloon_target(&self, target_bytes: u64) -> Result<()> {
+    pub(crate) fn set_balloon_target(&self, target_bytes: u64) -> Result<()> {
         let balloon = self
             .hv_balloon
             .as_ref()
@@ -339,7 +340,7 @@ impl HvMachine {
     }
 
     /// Returns the balloon `(target, current)` in bytes; zeros without one.
-    pub(in crate::vmm) fn balloon_bytes(&self) -> (u64, u64) {
+    pub(crate) fn balloon_bytes(&self) -> (u64, u64) {
         self.hv_balloon.as_ref().map_or((0, 0), |b| {
             b.lock().map_or((0, 0), |g| {
                 (
@@ -351,12 +352,12 @@ impl HvMachine {
     }
 
     /// DAX counters for VirtioFS share `share_idx`.
-    pub(in crate::vmm) fn dax_stats(&self, share_idx: usize) -> Option<crate::dax::DaxStats> {
+    pub(crate) fn dax_stats(&self, share_idx: usize) -> Option<crate::dax::DaxStats> {
         self.hv_dax_mappers.get(share_idx).map(|m| m.stats())
     }
 
     /// Virtio MMIO device and queue state.
-    pub(in crate::vmm) fn virtio_debug(&self) -> Vec<crate::device::DeviceDebug> {
+    pub(crate) fn virtio_debug(&self) -> Vec<crate::device::DeviceDebug> {
         self.hv_device_manager
             .as_deref()
             .or(self.device_manager.as_ref())
@@ -365,7 +366,7 @@ impl HvMachine {
     }
 
     /// Per-vCPU exit counters.
-    pub(in crate::vmm) fn vcpu_snapshots(&self) -> Vec<crate::vcpu_stats::VcpuStatsSnapshot> {
+    pub(crate) fn vcpu_snapshots(&self) -> Vec<crate::vcpu_stats::VcpuStatsSnapshot> {
         self.hv_vcpu_stats
             .iter()
             .enumerate()
@@ -375,21 +376,21 @@ impl HvMachine {
 
     /// vmnet interface info for the bridge NIC, once it has started.
     #[cfg(feature = "vmnet")]
-    pub(in crate::vmm) fn vmnet_interface_info(&self) -> Option<arcbox_vmnet::VmnetInterfaceInfo> {
+    pub(crate) fn vmnet_interface_info(&self) -> Option<arcbox_vmnet::VmnetInterfaceInfo> {
         self.vmnet_bridge
             .as_ref()
             .and_then(|v| v.interface_info().cloned())
     }
 
     /// The port-forwarding listener manager, while the machine owns it.
-    pub(in crate::vmm) const fn inbound_listener_manager(
+    pub(crate) const fn inbound_listener_manager(
         &mut self,
     ) -> Option<&mut arcbox_net::darwin::inbound_relay::InboundListenerManager> {
         self.inbound_listener_manager.as_mut()
     }
 
     /// Takes the port-forwarding listener manager.
-    pub(in crate::vmm) const fn take_inbound_listener_manager(
+    pub(crate) const fn take_inbound_listener_manager(
         &mut self,
     ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
         self.inbound_listener_manager.take()

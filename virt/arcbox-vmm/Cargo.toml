@@ -36,13 +36,18 @@ crossbeam-channel = "0.5"
 arcbox-fakeip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+arcbox-vm-driver = { workspace = true }
 arcbox-vmnet = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arcbox-constants.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+arcbox-vm-driver = { workspace = true, features = ["testkit"] }
 
 [features]
 # `gic` is on by default so every binary linking arcbox-vmm

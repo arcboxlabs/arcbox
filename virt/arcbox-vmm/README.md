@@ -13,6 +13,7 @@ This crate provides high-level VM management on top of the hypervisor abstractio
 - **MemoryManager**: Memory allocation and guest physical address mapping
 - **DeviceManager**: VirtIO device registration and I/O handling
 - **FDT generation**: Flattened Device Tree for ARM64 boot
+- **HvDriver** (macOS): the `arcbox-vm-driver` port over the Hypervisor.framework machine
 
 ## Architecture
 
