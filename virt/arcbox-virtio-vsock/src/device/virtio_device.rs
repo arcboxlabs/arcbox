@@ -61,6 +61,7 @@ impl VirtioDevice for VirtioVsock {
         self.rx_queue = None;
         self.tx_queue = None;
         self.event_queue = None;
+        self.pending_reset = None;
     }
 
     fn process_queue(

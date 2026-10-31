@@ -1,5 +1,6 @@
 //! `VirtioVsock` device — TX/RX queue handling, custom-VMM hot path, `VirtioDevice` impl.
 
+mod events;
 mod rx_injection;
 pub use rx_injection::RxRound;
 #[cfg(test)]
@@ -138,6 +139,9 @@ pub struct VirtioVsock {
     /// HV backend; remains `None` on the VZ backend (which does not use
     /// the custom-VMM `poll_rx_injection` path).
     ctx: Option<DeviceCtx>,
+    /// A TRANSPORT_RESET the guest has not handled yet; host→guest
+    /// injection waits for it (see `events.rs`).
+    pending_reset: Option<events::PendingReset>,
     /// Trait-object view of the host-side connection manager. Used by
     /// `process_queue` (TX path) so tests can supply a mock implementing
     /// `VsockHostConnections` without dragging in the concrete manager.
@@ -180,6 +184,7 @@ impl VirtioVsock {
             event_queue: None,
             host_connections: HashMap::new(),
             ctx: None,
+            pending_reset: None,
             conns: None,
             conn_mgr: None,
         }
@@ -201,6 +206,7 @@ impl VirtioVsock {
             event_queue: None,
             host_connections: HashMap::new(),
             ctx: None,
+            pending_reset: None,
             conns: None,
             conn_mgr: None,
         }

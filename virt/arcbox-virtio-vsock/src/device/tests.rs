@@ -1091,3 +1091,62 @@ fn an_event_idx_round_interrupts_only_when_the_guest_asked() {
         }
     );
 }
+
+#[test]
+fn transport_reset_fills_one_event_buffer_and_resumes_from_used_idx() {
+    use arcbox_virtio_core::DeviceCtx;
+
+    // Event queue of 4 at GPA 0: desc @ 0x100, avail @ 0x200, used @ 0x300;
+    // event buffers @ 0x400 + 0x10 * i.
+    let (desc, avail, used) = (0x100usize, 0x200usize, 0x300usize);
+    let mut mem = vec![0u8; 0x1000];
+    for i in 0..4u16 {
+        let d = desc + usize::from(i) * 16;
+        mem[d..d + 8].copy_from_slice(&(0x400 + u64::from(i) * 0x10).to_le_bytes());
+        mem[d + 8..d + 12].copy_from_slice(&4u32.to_le_bytes());
+        mem[d + 12..d + 14].copy_from_slice(&2u16.to_le_bytes()); // WRITE
+        mem[avail + 4 + usize::from(i) * 2..][..2].copy_from_slice(&i.to_le_bytes());
+    }
+    // The guest posted buffers 0..2 and the device already used buffer 0,
+    // as a device restored after an earlier event finds the ring.
+    mem[avail + 2..avail + 4].copy_from_slice(&2u16.to_le_bytes());
+    mem[used + 2..used + 4].copy_from_slice(&1u16.to_le_bytes());
+    // An id the device must overwrite (TRANSPORT_RESET is 0).
+    mem[0x410..0x414].copy_from_slice(&[0xff; 4]);
+
+    let mut vsock = {
+        let mut v = VirtioVsock::new(VsockConfig::default());
+        // SAFETY: `mem` outlives `v` and is not moved while it is bound.
+        v.bind_ctx(DeviceCtx {
+            mem: Arc::new(unsafe {
+                arcbox_virtio_core::GuestMemWriter::new(mem.as_mut_ptr(), mem.len(), 0)
+            }),
+            raise_irq: Arc::new(|_| {}),
+        });
+        v
+    };
+    let qcfg = QueueConfig {
+        desc_addr: desc as u64,
+        avail_addr: avail as u64,
+        used_addr: used as u64,
+        size: 4,
+        ready: true,
+        gpa_base: 0,
+    };
+
+    assert!(vsock.reset_handled());
+    assert!(vsock.post_transport_reset(&qcfg));
+    // Host→guest injection waits until the guest refills the event buffer.
+    assert!(!vsock.reset_handled());
+    mem[avail + 2..avail + 4].copy_from_slice(&3u16.to_le_bytes());
+    assert!(vsock.reset_handled());
+    mem[avail + 2..avail + 4].copy_from_slice(&2u16.to_le_bytes());
+    // Buffer 1, not buffer 0: the cursor comes from used.idx.
+    assert_eq!(&mem[0x410..0x414], &0u32.to_le_bytes());
+    assert_eq!(u16::from_le_bytes([mem[used + 2], mem[used + 3]]), 2);
+    let elem = used + 4 + 8;
+    assert_eq!(&mem[elem..elem + 8], &[1, 0, 0, 0, 4, 0, 0, 0]);
+    // Nothing else posted: no event, used ring untouched.
+    assert!(!vsock.post_transport_reset(&qcfg));
+    assert_eq!(u16::from_le_bytes([mem[used + 2], mem[used + 3]]), 2);
+}

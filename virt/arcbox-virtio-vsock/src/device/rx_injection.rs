@@ -58,6 +58,9 @@ impl VirtioVsock {
         let Some(ctx) = self.ctx.clone() else {
             return RxRound::default();
         };
+        if !self.reset_handled() {
+            return RxRound::default();
+        }
         let Some(conns) = self.conn_mgr.clone() else {
             return RxRound::default();
         };
