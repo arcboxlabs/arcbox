@@ -1,6 +1,6 @@
 //! Platform configurations.
 
-use crate::error::VZResult;
+use crate::error::{VZError, VZResult};
 use std::ffi::c_void;
 
 use super::mac::{MacAuxiliaryStorage, MacHardwareModel, MacMachineIdentifier};
@@ -38,6 +38,48 @@ impl GenericPlatform {
     pub fn is_nested_virt_supported() -> bool {
         // SAFETY: class-property read behind an availability guard.
         unsafe { crate::shim_ffi::abx_platform_generic_nested_supported() }
+    }
+
+    /// Returns the opaque data representation of the machine identifier.
+    ///
+    /// A new platform gets a random identifier. Restoring saved state
+    /// requires the identifier of the machine that saved it, so persist this
+    /// with the state and pass it to [`Self::set_machine_identifier`].
+    #[must_use]
+    pub fn machine_identifier(&self) -> Vec<u8> {
+        // SAFETY: valid handle; the shim mallocs the buffer that take_bytes frees.
+        unsafe {
+            let mut len: usize = 0;
+            let bytes = crate::shim_ffi::abx_platform_generic_machine_id_data(
+                self.inner.cast(),
+                &raw mut len,
+            );
+            super::mac::take_bytes(bytes, len)
+        }
+    }
+
+    /// Sets the machine identifier from its data representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` is not a valid representation.
+    pub fn set_machine_identifier(&self, data: &[u8]) -> VZResult<()> {
+        // SAFETY: self.inner is a valid platform handle; the slice is valid
+        // for the duration of the call.
+        let ok = unsafe {
+            crate::shim_ffi::abx_platform_generic_set_machine_id(
+                self.inner.cast(),
+                data.as_ptr().cast(),
+                data.len(),
+            )
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(VZError::InvalidConfiguration(
+                "invalid generic machine identifier data representation".into(),
+            ))
+        }
     }
 
     /// Enables or disables nested virtualization for this platform config.

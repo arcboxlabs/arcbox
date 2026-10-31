@@ -5,7 +5,7 @@ import Virtualization
 
 /// Copies `data` into a malloc'd buffer owned by the caller (Rust), freed via
 /// `abx_bytes_free`. Returns nil (len 0) for empty data.
-private func abxDataCopy(
+func abxDataCopy(
     _ data: Data, _ lengthOut: UnsafeMutablePointer<UInt>?
 ) -> UnsafeMutableRawPointer? {
     lengthOut?.pointee = UInt(data.count)

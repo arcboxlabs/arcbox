@@ -49,6 +49,26 @@ func configValidate(
     }
 }
 
+/// Whether a VM built from `config` can save and restore its state
+/// (macOS 14+). The error names the first device that cannot.
+func configValidateSaveRestore(
+    _ config: UnsafeMutableRawPointer,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> Bool {
+    guard #available(macOS 14.0, *) else {
+        errorOut?.pointee = abxStrdup("save/restore requires macOS 14")
+        return false
+    }
+    do {
+        try abxBorrow(config, as: VZVirtualMachineConfiguration.self)
+            .validateSaveRestoreSupport()
+        return true
+    } catch {
+        errorOut?.pointee = abxErrorString(error)
+        return false
+    }
+}
+
 func bootLoaderLinuxNew(_ kernelPath: UnsafePointer<CChar>) -> UnsafeMutableRawPointer {
     let url = URL(fileURLWithPath: String(cString: kernelPath))
     return abxRetainedHandle(VZLinuxBootLoader(kernelURL: url))
@@ -73,6 +93,27 @@ func bootLoaderMacOSNew() -> UnsafeMutableRawPointer {
 
 func platformGenericNew() -> UnsafeMutableRawPointer {
     abxRetainedHandle(VZGenericPlatformConfiguration())
+}
+
+/// The platform's machine identifier. A restore needs the identifier of
+/// the machine that saved the state.
+func platformGenericMachineIdData(
+    _ platform: UnsafeMutableRawPointer, _ lengthOut: UnsafeMutablePointer<UInt>?
+) -> UnsafeMutableRawPointer? {
+    abxDataCopy(
+        abxBorrow(platform, as: VZGenericPlatformConfiguration.self)
+            .machineIdentifier.dataRepresentation, lengthOut)
+}
+
+func platformGenericSetMachineId(
+    _ platform: UnsafeMutableRawPointer, _ bytes: UnsafeRawPointer, _ length: UInt
+) -> Bool {
+    let data = Data(bytes: bytes, count: Int(length))
+    guard let identifier = VZGenericMachineIdentifier(dataRepresentation: data) else {
+        return false
+    }
+    abxBorrow(platform, as: VZGenericPlatformConfiguration.self).machineIdentifier = identifier
+    return true
 }
 
 func platformGenericNestedSupported() -> Bool {

@@ -214,6 +214,47 @@ func vmResume(
     }
 }
 
+/// Saves a paused VM's state to `path` (macOS 14+).
+func vmSaveState(
+    _ box: UnsafeMutableRawPointer,
+    _ path: UnsafePointer<CChar>,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @escaping ABXStateCallback
+) {
+    guard #available(macOS 14.0, *) else {
+        callback(ctx, abxStrdup("save/restore requires macOS 14"))
+        return
+    }
+    let url = URL(fileURLWithPath: String(cString: path))
+    let vmBox = abxBorrow(box, as: ABXVMBox.self)
+    vmBox.queue.sync {
+        vmBox.vm.saveMachineStateTo(url: url) { error in
+            callback(ctx, error.flatMap(abxErrorString))
+        }
+    }
+}
+
+/// Restores a stopped VM from the state at `path`; the VM is left paused
+/// (macOS 14+).
+func vmRestoreState(
+    _ box: UnsafeMutableRawPointer,
+    _ path: UnsafePointer<CChar>,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @escaping ABXStateCallback
+) {
+    guard #available(macOS 14.0, *) else {
+        callback(ctx, abxStrdup("save/restore requires macOS 14"))
+        return
+    }
+    let url = URL(fileURLWithPath: String(cString: path))
+    let vmBox = abxBorrow(box, as: ABXVMBox.self)
+    vmBox.queue.sync {
+        vmBox.vm.restoreMachineStateFrom(url: url) { error in
+            callback(ctx, error.flatMap(abxErrorString))
+        }
+    }
+}
+
 func vmSocketDeviceCount(_ box: UnsafeMutableRawPointer) -> UInt64 {
     let vmBox = abxBorrow(box, as: ABXVMBox.self)
     return vmBox.queue.sync { UInt64(vmBox.vm.socketDevices.count) }

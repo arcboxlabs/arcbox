@@ -2,8 +2,10 @@
 
 use crate::device::MemoryBalloonDevice;
 use crate::error::{VZError, VZResult};
+use crate::shim_ffi::StateCb;
 use crate::socket::VirtioSocketDevice;
 use std::ffi::c_void;
+use std::path::Path;
 use tokio::sync::oneshot;
 
 // ============================================================================
@@ -237,6 +239,72 @@ impl VirtualMachine {
             message: "Resume operation cancelled".into(),
         })?;
         result.map_err(|msg| VZError::OperationFailed(format!("VM resume failed: {msg}")))
+    }
+
+    /// Saves a paused VM's state, including guest RAM, to `path` (macOS 14+).
+    ///
+    /// The VM stays paused. Disk images are not part of the state: copy them
+    /// while the VM is paused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the VM is not paused or the save fails.
+    pub async fn save_state(&self, path: impl AsRef<Path>) -> VZResult<()> {
+        if self.state() != VirtualMachineState::Paused {
+            return Err(VZError::InvalidState {
+                expected: "Paused".into(),
+                actual: format!("state={:?}", self.state()),
+            });
+        }
+        self.state_file_op(path.as_ref(), crate::shim_ffi::abx_vm_save_state, "save")
+            .await
+    }
+
+    /// Restores state saved by [`Self::save_state`] into this VM, which must
+    /// never have been started (macOS 14+). The VM is left paused; call
+    /// [`Self::resume`].
+    ///
+    /// The configuration must match the saving VM's, including the
+    /// platform's machine identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the VM is not stopped or the restore fails.
+    pub async fn restore_state(&self, path: impl AsRef<Path>) -> VZResult<()> {
+        if self.state() != VirtualMachineState::Stopped {
+            return Err(VZError::InvalidState {
+                expected: "Stopped".into(),
+                actual: format!("state={:?}", self.state()),
+            });
+        }
+        self.state_file_op(
+            path.as_ref(),
+            crate::shim_ffi::abx_vm_restore_state,
+            "restore",
+        )
+        .await
+    }
+
+    async fn state_file_op(
+        &self,
+        path: &Path,
+        op: unsafe extern "C" fn(*mut c_void, *const std::ffi::c_char, *mut c_void, StateCb),
+        what: &str,
+    ) -> VZResult<()> {
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+            VZError::InvalidConfiguration(format!("path contains NUL: {}", path.display()))
+        })?;
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+        let ctx: *mut c_void = Box::into_raw(Box::new(tx)).cast();
+        // SAFETY: vm_box is valid; c_path outlives the call (the shim copies
+        // it into a URL before returning); ctx ownership transfers to the
+        // exactly-once trampoline.
+        unsafe { op(self.vm_box, c_path.as_ptr(), ctx, state_trampoline) };
+        let result = rx.await.map_err(|_| VZError::Internal {
+            code: -1,
+            message: format!("{what} operation cancelled"),
+        })?;
+        result.map_err(|msg| VZError::OperationFailed(format!("VM {what} failed: {msg}")))
     }
 
     /// Requests a graceful stop, asking the guest to shut down cleanly.

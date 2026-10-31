@@ -27,7 +27,7 @@ fn path_cstring(path: &Path) -> VZResult<CString> {
 ///
 /// `bytes` must be null (with `len == 0`) or a shim-allocated buffer of `len`
 /// bytes that has not been freed yet.
-unsafe fn take_bytes(bytes: *mut c_void, len: usize) -> Vec<u8> {
+pub(super) unsafe fn take_bytes(bytes: *mut c_void, len: usize) -> Vec<u8> {
     if bytes.is_null() {
         return Vec::new();
     }

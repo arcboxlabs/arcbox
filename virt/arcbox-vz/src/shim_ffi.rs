@@ -56,6 +56,10 @@ unsafe extern "C" {
     pub fn abx_config_set_boot_loader(config: *mut c_void, boot_loader: *mut c_void);
     pub fn abx_config_set_platform(config: *mut c_void, platform: *mut c_void);
     pub fn abx_config_validate(config: *mut c_void, error_out: *mut *mut c_char) -> bool;
+    pub fn abx_config_validate_save_restore(
+        config: *mut c_void,
+        error_out: *mut *mut c_char,
+    ) -> bool;
 
     // Boot loaders
     pub fn abx_bootloader_linux_new(kernel_path: *const c_char) -> *mut c_void;
@@ -67,6 +71,16 @@ unsafe extern "C" {
     pub fn abx_platform_generic_new() -> *mut c_void;
     pub fn abx_platform_generic_nested_supported() -> bool;
     pub fn abx_platform_generic_set_nested(platform: *mut c_void, enabled: bool);
+    /// Malloc'd bytes freed with `abx_bytes_free`.
+    pub fn abx_platform_generic_machine_id_data(
+        platform: *mut c_void,
+        length_out: *mut usize,
+    ) -> *mut c_void;
+    pub fn abx_platform_generic_set_machine_id(
+        platform: *mut c_void,
+        bytes: *const c_void,
+        length: usize,
+    ) -> bool;
 
     // Device configurations
     pub fn abx_storage_disk_image_new(
@@ -142,6 +156,18 @@ unsafe extern "C" {
     pub fn abx_vm_stop(vm_box: *mut c_void, ctx: *mut c_void, cb: StateCb);
     pub fn abx_vm_pause(vm_box: *mut c_void, ctx: *mut c_void, cb: StateCb);
     pub fn abx_vm_resume(vm_box: *mut c_void, ctx: *mut c_void, cb: StateCb);
+    pub fn abx_vm_save_state(
+        vm_box: *mut c_void,
+        path: *const c_char,
+        ctx: *mut c_void,
+        cb: StateCb,
+    );
+    pub fn abx_vm_restore_state(
+        vm_box: *mut c_void,
+        path: *const c_char,
+        ctx: *mut c_void,
+        cb: StateCb,
+    );
     pub fn abx_vm_socket_device_count(vm_box: *mut c_void) -> u64;
     pub fn abx_vm_socket_device_at(vm_box: *mut c_void, index: u64) -> *mut c_void;
     pub fn abx_vm_balloon_count(vm_box: *mut c_void) -> u64;
@@ -226,6 +252,7 @@ mod tests {
         abx_config_set_boot_loader as *const (),
         abx_config_set_platform as *const (),
         abx_config_validate as *const (),
+        abx_config_validate_save_restore as *const (),
         abx_bootloader_linux_new as *const (),
         abx_bootloader_linux_set_initrd as *const (),
         abx_bootloader_linux_set_cmdline as *const (),
@@ -233,6 +260,8 @@ mod tests {
         abx_platform_generic_new as *const (),
         abx_platform_generic_nested_supported as *const (),
         abx_platform_generic_set_nested as *const (),
+        abx_platform_generic_machine_id_data as *const (),
+        abx_platform_generic_set_machine_id as *const (),
         abx_storage_disk_image_new as *const (),
         abx_network_nat_new as *const (),
         abx_network_file_handle_new as *const (),
@@ -268,6 +297,8 @@ mod tests {
         abx_vm_stop as *const (),
         abx_vm_pause as *const (),
         abx_vm_resume as *const (),
+        abx_vm_save_state as *const (),
+        abx_vm_restore_state as *const (),
         abx_vm_socket_device_count as *const (),
         abx_vm_socket_device_at as *const (),
         abx_vm_balloon_count as *const (),
@@ -285,7 +316,7 @@ mod tests {
 
     /// Update when symbols are added; a mismatch means Exports.swift and this
     /// file have drifted.
-    const EXPECTED_SYMBOL_COUNT: usize = 71;
+    const EXPECTED_SYMBOL_COUNT: usize = 76;
 
     #[test]
     fn link_coverage() {

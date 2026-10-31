@@ -199,6 +199,27 @@ impl VirtualMachineConfiguration {
         }
     }
 
+    /// Checks that a VM built from this configuration can save and restore
+    /// its state (macOS 14+). The error names a device that cannot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when save/restore is unsupported.
+    pub fn validate_save_restore(&self) -> VZResult<()> {
+        // SAFETY: as for `validate`.
+        unsafe {
+            let mut error: *mut std::ffi::c_char = ptr::null_mut();
+            if crate::shim_ffi::abx_config_validate_save_restore(self.inner.cast(), &raw mut error)
+            {
+                Ok(())
+            } else {
+                Err(VZError::InvalidConfiguration(
+                    crate::shim_ffi::take_error_string(error),
+                ))
+            }
+        }
+    }
+
     /// Builds the virtual machine from this configuration.
     ///
     /// This finalizes all device configurations and creates the

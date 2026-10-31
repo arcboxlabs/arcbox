@@ -101,6 +101,14 @@ public func abxConfigValidate(
     configValidate(config, errorOut)
 }
 
+@_cdecl("abx_config_validate_save_restore")
+public func abxConfigValidateSaveRestore(
+    _ config: UnsafeMutableRawPointer,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> Bool {
+    configValidateSaveRestore(config, errorOut)
+}
+
 // MARK: - Boot loaders
 
 @_cdecl("abx_bootloader_linux_new")
@@ -142,6 +150,20 @@ public func abxPlatformGenericNestedSupported() -> Bool {
 @_cdecl("abx_platform_generic_set_nested")
 public func abxPlatformGenericSetNested(_ platform: UnsafeMutableRawPointer, _ enabled: Bool) {
     platformGenericSetNested(platform, enabled)
+}
+
+@_cdecl("abx_platform_generic_machine_id_data")
+public func abxPlatformGenericMachineIdData(
+    _ platform: UnsafeMutableRawPointer, _ lengthOut: UnsafeMutablePointer<UInt>?
+) -> UnsafeMutableRawPointer? {
+    platformGenericMachineIdData(platform, lengthOut)
+}
+
+@_cdecl("abx_platform_generic_set_machine_id")
+public func abxPlatformGenericSetMachineId(
+    _ platform: UnsafeMutableRawPointer, _ bytes: UnsafeRawPointer, _ length: UInt
+) -> Bool {
+    platformGenericSetMachineId(platform, bytes, length)
 }
 
 // MARK: - Device configurations
@@ -397,6 +419,26 @@ public func abxVmResume(
     _ callback: @escaping ABXStateCallback
 ) {
     vmResume(box, ctx, callback)
+}
+
+@_cdecl("abx_vm_save_state")
+public func abxVmSaveState(
+    _ box: UnsafeMutableRawPointer,
+    _ path: UnsafePointer<CChar>,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @escaping ABXStateCallback
+) {
+    vmSaveState(box, path, ctx, callback)
+}
+
+@_cdecl("abx_vm_restore_state")
+public func abxVmRestoreState(
+    _ box: UnsafeMutableRawPointer,
+    _ path: UnsafePointer<CChar>,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ callback: @escaping ABXStateCallback
+) {
+    vmRestoreState(box, path, ctx, callback)
 }
 
 @_cdecl("abx_vm_socket_device_count")
