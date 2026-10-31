@@ -250,10 +250,12 @@ impl FrameClassifier {
                 if !reply.is_empty() {
                     replies.push(reply);
                 }
-            } else if let Some(frame) = self.rx_queue.pop_front()
-                && let Some(handshake) = bridge.try_complete_handshake(&frame)
-            {
-                replies.extend(handshake);
+            } else if let Some(frame) = self.rx_queue.pop_front() {
+                if let Some(handshake) = bridge.try_complete_handshake(&frame) {
+                    replies.extend(handshake);
+                } else if let Some(reset) = bridge.untracked_reply(&frame) {
+                    replies.push(reset);
+                }
             }
         }
         replies

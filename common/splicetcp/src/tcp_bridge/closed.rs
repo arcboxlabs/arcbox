@@ -1,10 +1,44 @@
 //! Stateless TCP CLOSED replies after upstream resources have been released.
 
-use super::TcpBridge;
-use crate::ethernet::{TcpFrameParams, build_tcp_rst_frame, build_tcp_rst_only_frame};
+use super::{SynFlowKey, TcpBridge};
+use crate::ethernet::{
+    ETH_HEADER_LEN, TcpFrameParams, build_tcp_rst_frame, build_tcp_rst_only_frame,
+};
 use std::net::IpAddr;
 
 impl TcpBridge {
+    /// Returns a CLOSED-state reply to a guest Ethernet frame whose flow the bridge does not track.
+    ///
+    /// Covers segments of connections the bridge never saw, such as those a restored
+    /// guest still holds, and of flows whose state was already released.
+    /// Bare SYNs, tracked flows, and frames before the guest MAC is learned produce no reply.
+    #[must_use]
+    pub fn untracked_reply(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        let guest_mac = self.fast_path_guest_mac?;
+        let tcp = super::packet::tcp_at(frame, ETH_HEADER_LEN)?;
+        if tcp.flags() & 0x12 == 0x02 {
+            return None;
+        }
+        let key = SynFlowKey {
+            src_ip: tcp.ip().source(),
+            src_port: tcp.source_port(),
+            dst_ip: tcp.ip().destination(),
+            dst_port: tcp.destination_port(),
+        };
+        if self.fast_path_conns.contains_key(&key)
+            || self.handshake_conns.contains_key(&key)
+            || self.abandoned_conns.contains_key(&key)
+            || self.flow_controls.contains_key(&key)
+        {
+            return None;
+        }
+        Self::closed_reply_ip(
+            &frame[ETH_HEADER_LEN..],
+            self.fast_path_gateway_mac,
+            guest_mac,
+        )
+    }
+
     /// Returns an RFC 9293 CLOSED-state reply to a complete bare IP packet.
     ///
     /// Returns an Ethernet frame with reversed IP addresses and ports and the supplied MAC addresses.

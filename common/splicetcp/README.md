@@ -258,6 +258,8 @@ After dropping the bridge and upstream resources, callers may pass complete IP p
 
 The result is an Ethernet frame with the supplied MAC addresses. No flow or upstream resource is retained. Malformed packets, fragments, non-TCP packets, unspecified addresses, multicast addresses, and IPv4 limited-broadcast addresses produce no reply. Callers must exclude subnet-directed broadcasts using their interface configuration. Offload checksums are not validated on input.
 
+`TcpBridge::untracked_reply` applies the same reply to a guest Ethernet frame of a flow the bridge does not track (no fast-path, handshake or abandoned entry), using the learned MAC addresses; bare SYNs get none. `FrameClassifier::drain_tcp` sends it for every queued frame no flow claims, so a guest resumed from a checkpoint, whose connections this bridge never saw, learns at its next segment that they are gone instead of retransmitting into silence.
+
 ## Explicit TCP abort
 
 Stop business ingress and discard queued business packets before calling `TcpBridge::abort`. Keep guest output available until the reset callback completes. The bridge drains all flows without forwarding buffered bytes. Each flow releases its primary socket and cancels its reader before the callback. Retained sink owners may keep descriptors until cancellation completes. Established flow byte totals use the same observer path as normal close, once per removed flow.

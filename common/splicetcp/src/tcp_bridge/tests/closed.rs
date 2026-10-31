@@ -207,3 +207,52 @@ fn closed_reply_parses_ipv6_extensions_but_rejects_fragments_and_malformed_packe
         assert!(TcpBridge::closed_reply_ip(&packet, GW_MAC, GUEST_MAC).is_none());
     }
 }
+
+/// A restored guest keeps sockets the bridge never saw. Their segments must be
+/// reset, not dropped, or the guest retransmits until its own timeout. Tracked
+/// flows and bare SYNs keep their ordinary paths.
+#[tokio::test]
+async fn drain_resets_segments_of_untracked_flows_only() {
+    let mut bridge = TcpBridge::new(GW_IP);
+    let mut classifier = crate::classifier::FrameClassifier::with_pool_capacity(GW_IP, 1500, 64);
+    let stale = key();
+    let ethernet = |key, cursors, flags, payload: &[u8]| {
+        let mut frame = GW_MAC.to_vec();
+        frame.extend_from_slice(&GUEST_MAC);
+        frame.extend_from_slice(&[0x08, 0x00]);
+        frame.extend_from_slice(&guest_packet(key, cursors, flags, payload));
+        frame
+    };
+    let data = ethernet(stale, (5000, 731), 0x18, b"stale");
+    assert!(bridge.untracked_reply(&data).is_none(), "guest MAC unknown");
+    bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+    classifier.classify_frame(&data, &mut None);
+    let replies = classifier.drain_tcp(&mut bridge);
+    assert_eq!(replies.len(), 1);
+    assert_reset(&replies[0], stale, (731, 0, 0x04));
+    let fin = ethernet(stale, (5000, 0), 0x01, b"");
+    assert_reset(
+        &bridge.untracked_reply(&fin).unwrap(),
+        stale,
+        (0, 5001, 0x14),
+    );
+    for flags in [0x02, 0x04, 0x14] {
+        assert!(
+            bridge
+                .untracked_reply(&ethernet(stale, (1, 2), flags, b""))
+                .is_none()
+        );
+    }
+
+    let tracked = SynFlowKey {
+        src_port: 40401,
+        ..stale
+    };
+    let _server = fast_path_pair(&mut bridge, tracked, 1001).await;
+    assert!(
+        bridge
+            .untracked_reply(&ethernet(tracked, (1, 1001), 0x10, b""))
+            .is_none()
+    );
+}
