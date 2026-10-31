@@ -24,6 +24,7 @@ mod dispatch;
 mod mmio_state;
 pub(crate) mod net_worker;
 mod poll;
+mod resume;
 mod tree;
 
 #[cfg(test)]

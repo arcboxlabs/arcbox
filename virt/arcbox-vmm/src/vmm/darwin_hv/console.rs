@@ -27,7 +27,7 @@ impl HvMachine {
         let ctx = crate::console_rx_worker::ConsoleRxWorkerContext {
             device_manager: Arc::clone(device_manager),
             socket,
-            running: self.running.clone(),
+            running: self.io_running.clone(),
         };
         let handle = std::thread::Builder::new()
             .name("console-io".to_string())

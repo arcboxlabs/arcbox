@@ -207,12 +207,19 @@ impl HvMachine {
     }
 
     /// After `start`: waits until every vCPU has restored its state, and
-    /// fails if one could not.
+    /// fails if one could not. Then hands the resumed guest a reset for
+    /// every TCP flow it had.
     pub(in crate::vmm) fn finish_restore(&mut self) -> Result<()> {
         let restore = self
             .hv_restore
             .take()
             .ok_or_else(|| VmmError::invalid_state("no restore in progress"))?;
-        restore.wait_restored(self.config.vcpu_count as usize, PAUSE_TIMEOUT)
+        restore.wait_restored(self.config.vcpu_count as usize, PAUSE_TIMEOUT)?;
+        let resets = restore.state.tcp_resets.clone();
+        if let (false, Some(net)) = (resets.is_empty(), &self.net_control) {
+            net.send_to_guest(resets)
+                .map_err(|e| VmmError::Device(format!("sending TCP resets: {e}")))?;
+        }
+        Ok(())
     }
 }

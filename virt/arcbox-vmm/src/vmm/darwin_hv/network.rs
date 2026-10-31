@@ -142,6 +142,7 @@ impl HvMachine {
             self.proxy_env.clone(),
         );
         self.net_cancel = Some(cancel);
+        self.net_control = Some(datapath.control());
         self.inbound_listener_manager = Some(inbound);
 
         // Create bounded channel for RX frame injection. The datapath loop

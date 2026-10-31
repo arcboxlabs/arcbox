@@ -44,6 +44,8 @@ impl HvMachine {
         // thread that checks the flag before then exits immediately.
         self.running
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.io_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         let mut device_manager = Arc::new(
             self.device_manager
@@ -152,7 +154,7 @@ impl HvMachine {
                             irq,
                             irq_cb.clone(),
                         ),
-                        running: self.running.clone(),
+                        running: self.io_running.clone(),
                         flush_barrier: flush_barrier.clone(),
                     };
 
@@ -207,11 +209,22 @@ impl HvMachine {
                 dm.set_net_rx_hooks(net_irq_cb);
             }
 
-            dm.set_running(self.running.clone());
+            dm.set_running(self.io_running.clone());
         }
 
         // Store a shared reference for connect_vsock_hv to use after start.
         self.hv_device_manager = Some(Arc::clone(&device_manager));
+
+        // A resumed guest's NIC is already live, and its vsock connections
+        // ended with the checkpointed process. The vsock event raises its
+        // line again once the vCPUs restore the GIC.
+        #[cfg(feature = "gic")]
+        if restore.is_some() {
+            device_manager.resume_net_rx_worker();
+            if !device_manager.reset_vsock_transport() && device_manager.vsock().is_some() {
+                tracing::warn!("restore: no vsock event buffer for TRANSPORT_RESET");
+            }
+        }
 
         // --- vsock-io worker: event-driven host→guest injection ---
         // Without it, packets enqueued by the daemon wait for the BSP's
@@ -397,8 +410,10 @@ impl HvMachine {
     /// Stops the HV backend by signaling vCPU threads and cleaning up resources.
     #[allow(clippy::unnecessary_wraps)]
     pub(in crate::vmm) fn stop_darwin_hv(&mut self) -> Result<()> {
-        // Signal all vCPU threads to exit.
+        // Signal all vCPU and I/O worker threads to exit.
         self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.io_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Close the PSCI power registry. Secondary vCPU threads park on

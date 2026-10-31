@@ -8,15 +8,16 @@
 //! and an APFS clone of every disk are written to the checkpoint directory.
 //! The machine is left stopped in place; the caller stops it.
 //!
-//! Only the block devices are quiesced so far; a machine with a NIC or
-//! vsock device is not checkpointed consistently yet.
-//!
 //! A restore builds the same machine in a fresh process (Hypervisor.framework
 //! allows one VM per process), maps the RAM image copy-on-write, writes the
 //! device state back, creates every vCPU in id order and resumes them where
 //! they stopped. The caller provides the disks, cloned from the checkpoint.
+//! Host-side connections do not survive: the guest gets a vsock
+//! TRANSPORT_RESET and an RST for every TCP flow the checkpoint aborted, and
+//! later segments of flows the new datapath never saw are answered with RST.
 //!
-//! Method and results: `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`.
+//! Method and results: `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`
+//! and `docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -82,4 +83,9 @@ struct MachineState {
     cpu_on: Vec<bool>,
     pl031: Pl031,
     devices: Vec<DeviceState>,
+    /// Guest-bound Ethernet RSTs for every TCP flow the datapath carried,
+    /// sent to the guest once it resumes: the flows' host sockets end with
+    /// the checkpointed process.
+    #[serde(default)]
+    tcp_resets: Vec<Vec<u8>>,
 }

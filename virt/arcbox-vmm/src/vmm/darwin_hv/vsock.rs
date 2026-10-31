@@ -132,7 +132,7 @@ impl HvMachine {
         let ctx = crate::vsock_rx_worker::VsockRxWorkerContext {
             device_manager: Arc::clone(device_manager),
             doorbell_rd,
-            running: self.running.clone(),
+            running: self.io_running.clone(),
         };
         let handle = std::thread::Builder::new()
             .name("vsock-io".to_string())

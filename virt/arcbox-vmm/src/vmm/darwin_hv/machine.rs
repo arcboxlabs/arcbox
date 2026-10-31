@@ -26,6 +26,11 @@ pub struct HvMachine {
     pub(super) config: VmmConfig,
     /// Running flag for graceful shutdown.
     pub(super) running: Arc<AtomicBool>,
+    /// Gates the threads that write guest RAM on their own (block, net RX,
+    /// vsock and console workers). Set and cleared with `running`, and
+    /// cleared alone by a checkpoint, which stops them while the vCPUs
+    /// stay parked.
+    pub(super) io_running: Arc<AtomicBool>,
     /// Memory manager.
     pub(super) memory_manager: Option<MemoryManager>,
     /// Device manager.
@@ -36,6 +41,8 @@ pub struct HvMachine {
     pub(super) event_loop: Option<EventLoop>,
     /// Cancellation token for the network datapath task (Darwin only).
     pub(super) net_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Requests to the primary NIC's datapath (checkpoint TCP resets).
+    pub(super) net_control: Option<arcbox_net::darwin::datapath_loop::DatapathControl>,
     /// Inbound listener manager for port forwarding (Darwin only).
     pub(super) inbound_listener_manager:
         Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
@@ -183,11 +190,13 @@ impl HvMachine {
         Self {
             config,
             running,
+            io_running: Arc::new(AtomicBool::new(false)),
             memory_manager: None,
             device_manager: None,
             irq_chip: None,
             event_loop: None,
             net_cancel: None,
+            net_control: None,
             inbound_listener_manager: None,
             shared_dns: None,
             proxy_env: None,
@@ -282,6 +291,7 @@ impl HvMachine {
         if let Some(cancel) = self.net_cancel.take() {
             cancel.cancel();
         }
+        self.net_control = None;
         let _ = self.hv_bridge_net_fd.take();
         #[cfg(feature = "vmnet")]
         {

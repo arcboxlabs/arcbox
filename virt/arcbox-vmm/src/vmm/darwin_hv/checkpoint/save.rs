@@ -19,6 +19,8 @@ use super::{MachineState, PAUSE_TIMEOUT};
 
 /// Granularity of the sparse RAM image.
 const PAGE: usize = 16 << 10;
+/// How long the network datapath gets to abort its TCP flows.
+const ABORT_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl HvMachine {
     /// Checkpoints the running machine into `dir` and returns a timing
@@ -63,17 +65,35 @@ impl HvMachine {
         let paused_at = mach_time();
         let t_pause = t0.elapsed();
 
-        // Stop the block workers: each finishes what it took from its queue
-        // once its doorbell drops.
+        // Stop every thread that writes guest RAM on its own. The block
+        // workers finish what they took from their queue once their
+        // doorbells drop; the net RX, vsock and console workers exit at
+        // their next poll.
         let dm = self
             .hv_device_manager
             .clone()
             .ok_or_else(|| VmmError::invalid_state("device manager not started"))?;
+        self.io_running.store(false, Ordering::SeqCst);
         dm.clear_blk_workers();
-        for t in self.hv_blk_worker_threads.drain(..) {
+        let workers = self
+            .hv_blk_worker_threads
+            .drain(..)
+            .chain(dm.take_net_rx_worker_handle())
+            .chain(self.hv_vsock_worker.take())
+            .chain(self.hv_console_worker.take());
+        for t in workers {
             let _ = t.join();
         }
         let t_drain = t0.elapsed();
+
+        // With nothing writing the RX queue any more, each flow's SND.NXT
+        // is what the guest has received.
+        let tcp_resets = match &self.net_control {
+            Some(net) => net
+                .abort_tcp(ABORT_TIMEOUT)
+                .map_err(|e| VmmError::Device(format!("aborting TCP flows: {e}")))?,
+            None => Vec::new(),
+        };
 
         let gic = gic_capture().map_err(|e| VmmError::Device(format!("GIC capture: {e}")))?;
         let vcpus = ctl
@@ -124,6 +144,7 @@ impl HvMachine {
             cpu_on,
             pl031,
             devices,
+            tcp_resets,
         };
         fs::write(
             dir.join("state.json"),
@@ -133,8 +154,9 @@ impl HvMachine {
 
         let on = state.cpu_on.iter().filter(|&&on| on).count();
         Ok(format!(
-            "checkpoint: {on}/{n} vCPUs on; pause {:.1} ms, I/O drain {:.1} ms, \
+            "checkpoint: {on}/{n} vCPUs on, {} TCP flows; pause {:.1} ms, I/O drain {:.1} ms, \
              disk fsync+clone {:.1} ms, RAM {} pages ({} MiB on disk) {:.0} ms, total {:.0} ms",
+            state.tcp_resets.len(),
             ms(t_pause),
             ms(t_drain.saturating_sub(t_pause)),
             ms(t_disk.saturating_sub(t_drain)),
