@@ -193,11 +193,10 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, doorbell: std::sync::mpsc::Rece
         ctx.queue_idx
     );
 
-    // The avail cursor persists across kicks. This worker is the SOLE owner of
-    // its queue — it consumes avail, performs I/O, publishes used, and raises
-    // the IRQ, all in one thread (the libkrun/virtio-queue model). The vCPU only
-    // rings the doorbell on QUEUE_NOTIFY; it no longer touches the ring.
-    let mut last_avail: u16 = 0;
+    // This worker is the SOLE owner of its queue — it consumes avail, performs
+    // I/O, publishes used, and raises the IRQ, all in one thread (the
+    // libkrun/virtio-queue model). The vCPU only rings the doorbell on
+    // QUEUE_NOTIFY; it no longer touches the ring.
     while doorbell.recv().is_ok() {
         if !ctx.running.load(Ordering::Relaxed) {
             break;
@@ -205,7 +204,7 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, doorbell: std::sync::mpsc::Rece
         // Coalesce kicks that piled up while we were busy: one drain handles
         // them all, and a spurious extra wake just finds the ring empty.
         while doorbell.try_recv().is_ok() {}
-        drain_queue(&ctx, &mut last_avail);
+        drain_queue(&ctx);
     }
 
     tracing::info!("blk-io worker exiting (q={})", ctx.queue_idx);
@@ -219,7 +218,7 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, doorbell: std::sync::mpsc::Rece
 /// avail-consume onto the vCPU and completion onto a separate worker) is what
 /// closes the EVENT_IDX kick-suppression race that wedged guest page-in
 /// (`folio_wait_bit_common`) on cold boot — ABX-386.
-fn drain_queue(ctx: &BlkWorkerContext, last_avail: &mut u16) {
+fn drain_queue(ctx: &BlkWorkerContext) {
     let qi = ctx.queue_idx as usize;
     let cfg = {
         let Ok(mmio) = ctx.mmio_state.read() else {
@@ -248,7 +247,11 @@ fn drain_queue(ctx: &BlkWorkerContext, last_avail: &mut u16) {
         )
     });
     let mut queue = arcbox_virtio::SplitQueue::new(mem, ctx.queue_idx, &cfg, true);
-    queue.set_last_avail_idx(*last_avail);
+    // Every chain popped below is completed before this drain returns, so
+    // between drains the avail cursor equals the used index, which lives in
+    // guest memory. Deriving it here leaves the queue no host-side state: a
+    // VM restored from a memory checkpoint resumes the queue where it was.
+    queue.set_last_avail_idx(queue.used_idx());
 
     loop {
         while let Some(chain) = queue.pop_avail() {
@@ -268,8 +271,6 @@ fn drain_queue(ctx: &BlkWorkerContext, last_avail: &mut u16) {
             break;
         }
     }
-
-    *last_avail = queue.last_avail_idx();
 }
 
 /// Parses a block request from an available descriptor chain. The first

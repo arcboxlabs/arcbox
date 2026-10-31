@@ -61,8 +61,6 @@ impl VirtioDevice for VirtioVsock {
         self.rx_queue = None;
         self.tx_queue = None;
         self.event_queue = None;
-        self.last_avail_idx_tx = 0;
-        self.last_avail_idx_rx = 0;
     }
 
     fn process_queue(
@@ -91,7 +89,9 @@ impl VirtioDevice for VirtioVsock {
         });
         let mut queue =
             arcbox_virtio_core::SplitQueue::new(mem, queue_idx, queue_config, event_idx);
-        queue.set_last_avail_idx(self.last_avail_idx_tx as u16);
+        // TX completes every chain it pops before returning, so the cursor is
+        // the guest-visible used.idx; a restored device resumes from it.
+        queue.set_last_avail_idx(queue.used_idx());
 
         let mut completions = Vec::new();
         while let Some(chain) = queue.pop_avail() {
@@ -149,7 +149,6 @@ impl VirtioDevice for VirtioVsock {
             completions.push((chain.head_idx, packet_data.len() as u32));
         }
 
-        self.last_avail_idx_tx = queue.last_avail_idx() as usize;
         Ok(completions)
     }
 }

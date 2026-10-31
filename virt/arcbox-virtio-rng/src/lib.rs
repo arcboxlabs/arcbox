@@ -12,8 +12,6 @@ pub struct VirtioRng {
     features: u64,
     /// Whether the device has been activated.
     active: bool,
-    /// Last processed avail index for the request queue.
-    last_avail: u16,
 }
 
 impl VirtioRng {
@@ -25,7 +23,6 @@ impl VirtioRng {
         Self {
             features: Self::FEATURE_VERSION_1,
             active: false,
-            last_avail: 0,
         }
     }
 }
@@ -91,7 +88,10 @@ impl VirtioDevice for VirtioRng {
             )
         });
         let mut queue = arcbox_virtio_core::SplitQueue::new(mem, queue_idx, queue_config, false);
-        queue.set_last_avail_idx(self.last_avail);
+        // Every chain popped below is completed before this call returns,
+        // so the avail cursor equals the used index in guest memory; keeping
+        // no copy on the host lets a memory checkpoint resume the queue.
+        queue.set_last_avail_idx(queue.used_idx());
 
         let mut completions = Vec::new();
         while let Some(chain) = queue.pop_avail() {
@@ -122,7 +122,6 @@ impl VirtioDevice for VirtioRng {
             completions.push((chain.head_idx, filled));
         }
 
-        self.last_avail = queue.last_avail_idx();
         Ok(completions)
     }
 }

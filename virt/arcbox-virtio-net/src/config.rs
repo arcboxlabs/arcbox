@@ -1,7 +1,6 @@
 //! Network device configuration, link status, and host-side `NetPort`.
 
 use std::os::unix::io::RawFd;
-use std::sync::atomic::AtomicU16;
 
 /// Network device configuration.
 #[derive(Debug, Clone)]
@@ -84,9 +83,6 @@ pub struct NetPort {
     /// Raw fd of the host-side socketpair peer. Reads pull inbound frames
     /// from the datapath; writes push guest TX frames to the datapath.
     pub host_fd: RawFd,
-    /// Cursor into the TX avail ring — the last avail index the device
-    /// has already drained. Wrapping u16 matches the VirtIO spec.
-    pub last_avail_tx: AtomicU16,
 }
 
 #[cfg(test)]

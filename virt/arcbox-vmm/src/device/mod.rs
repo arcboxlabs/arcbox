@@ -264,10 +264,7 @@ impl DeviceManager {
         self.net_rx_worker.set_host_fd(fd);
 
         if let Some(primary) = self.primary_net.as_ref() {
-            let port = NetPort {
-                host_fd: fd,
-                last_avail_tx: std::sync::atomic::AtomicU16::new(0),
-            };
+            let port = NetPort { host_fd: fd };
             if let Ok(dev) = primary.lock() {
                 if dev.bind_port(port).is_err() {
                     tracing::warn!("primary_net port already bound — ignoring rebind");
@@ -437,10 +434,7 @@ impl DeviceManager {
             tracing::error!("set_bridge_host_fd called before set_bridge_net");
             return;
         };
-        let port = NetPort {
-            host_fd: fd,
-            last_avail_tx: std::sync::atomic::AtomicU16::new(0),
-        };
+        let port = NetPort { host_fd: fd };
         if let Ok(dev) = bridge.lock() {
             if dev.bind_port(port).is_err() {
                 tracing::warn!("bridge_net port already bound — ignoring rebind");

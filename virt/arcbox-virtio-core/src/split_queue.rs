@@ -152,6 +152,13 @@ impl SplitQueue {
         self.last_avail_idx
     }
 
+    /// The device's `used.idx`: seeded from guest memory at construction and
+    /// advanced by every completion published since.
+    #[must_use]
+    pub const fn used_idx(&self) -> u16 {
+        self.used_idx
+    }
+
     /// Seeds the available-ring cursor. Used when a device persists its avail
     /// position across calls and reconstructs the queue transiently.
     pub const fn set_last_avail_idx(&mut self, idx: u16) {

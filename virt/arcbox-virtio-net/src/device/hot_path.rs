@@ -34,9 +34,12 @@ impl VirtioNet {
         let event_idx = (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0;
 
         // The queue is the sole accessor of these rings for this call; `ctx.mem`
-        // wraps the VM-lifetime guest RAM mapping.
+        // wraps the VM-lifetime guest RAM mapping. Every chain a drain pops is
+        // completed before it returns, so the avail cursor is the guest-visible
+        // used.idx. Keeping it in guest RAM rather than on the host is what
+        // lets a restored device resume it.
         let mut queue = arcbox_virtio_core::SplitQueue::new(ctx.mem.clone(), 1, qcfg, event_idx);
-        queue.set_last_avail_idx(port.last_avail_tx.load(Ordering::Relaxed));
+        queue.set_last_avail_idx(queue.used_idx());
 
         let mut notify = false;
         // Drain in a TOCTOU loop: after publishing avail_event the guest may
@@ -115,8 +118,6 @@ impl VirtioNet {
             }
         }
 
-        port.last_avail_tx
-            .store(queue.last_avail_idx(), Ordering::Relaxed);
         notify
     }
 

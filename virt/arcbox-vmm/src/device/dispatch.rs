@@ -337,7 +337,7 @@ impl DeviceManager {
                                         if is_vsock_tx {
                                             tracing::trace!(
                                                 "Vsock QUEUE_NOTIFY TX: kicked but 0 completions \
-                                                 (last_avail_idx_tx may already be current)",
+                                                 (the used ring may already be current)",
                                             );
                                         }
                                     }

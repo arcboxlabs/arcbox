@@ -300,8 +300,6 @@ fn drain_tx_queue_refreshes_avail_event_on_empty_drain() {
     // stale value makes the guest suppress future kicks and wedges
     // guest→host TX — the flaky cold-boot "stuck at Starting Docker engine"
     // where the guest's DHCP DISCOVER never reaches the host.
-    use std::sync::atomic::AtomicU16;
-
     use arcbox_virtio_core::{DeviceCtx, QueueConfig};
 
     use crate::config::NetPort;
@@ -314,9 +312,12 @@ fn drain_tx_queue_refreshes_avail_event_on_empty_drain() {
     let mut mem = vec![0u8; 0x1000];
 
     // The device has already drained everything the guest produced
-    // (last_avail_tx == avail_idx == 3) → this kick drains nothing.
+    // (used.idx == avail.idx == 3) → this kick drains nothing. The device is
+    // fresh, as after a restore: its cursor must come from used.idx, or it
+    // would replay chains 0..3.
     let drained: u16 = 3;
     mem[avail_addr + 2..avail_addr + 4].copy_from_slice(&drained.to_le_bytes());
+    mem[used_addr + 2..used_addr + 4].copy_from_slice(&drained.to_le_bytes());
     // Stale avail_event (what the pre-fix empty-drain path leaves behind).
     mem[avail_event_off..avail_event_off + 2].copy_from_slice(&0u16.to_le_bytes());
 
@@ -334,7 +335,6 @@ fn drain_tx_queue_refreshes_avail_event_on_empty_drain() {
     net.bind_ctx(ctx);
     net.bind_port(NetPort {
         host_fd: -1, // unused: the empty drain writes no frame
-        last_avail_tx: AtomicU16::new(drained),
     })
     .expect("bind port");
 
@@ -611,7 +611,6 @@ fn test_handle_tx_normal_packet_uses_send() {
 /// poll result), with the used ring at 0x300.
 fn poll_rx_one_frame(descs: &[(u64, u32)], frame: &[u8]) -> (Vec<u8>, bool) {
     use std::os::unix::io::AsRawFd;
-    use std::sync::atomic::AtomicU16;
 
     use arcbox_virtio_core::queue::flags;
     use arcbox_virtio_core::{DeviceCtx, QueueConfig};
@@ -657,7 +656,6 @@ fn poll_rx_one_frame(descs: &[(u64, u32)], frame: &[u8]) -> (Vec<u8>, bool) {
     net.bind_ctx(ctx);
     net.bind_port(NetPort {
         host_fd: rx.as_raw_fd(),
-        last_avail_tx: AtomicU16::new(0),
     })
     .expect("bind port");
 

@@ -134,10 +134,6 @@ pub struct VirtioVsock {
     /// Used by the guest-memory `process_queue` path to forward data
     /// between host sockets and guest vsock queues.
     host_connections: HashMap<u32, std::os::unix::io::RawFd>,
-    /// Last processed avail index for TX queue (guest-memory path).
-    last_avail_idx_tx: usize,
-    /// Last processed avail index for RX queue (guest-memory path).
-    last_avail_idx_rx: usize,
     /// Guest memory + IRQ context. Bound at registration time on the
     /// HV backend; remains `None` on the VZ backend (which does not use
     /// the custom-VMM `poll_rx_injection` path).
@@ -183,8 +179,6 @@ impl VirtioVsock {
             tx_queue: None,
             event_queue: None,
             host_connections: HashMap::new(),
-            last_avail_idx_tx: 0,
-            last_avail_idx_rx: 0,
             ctx: None,
             conns: None,
             conn_mgr: None,
@@ -206,8 +200,6 @@ impl VirtioVsock {
             tx_queue: None,
             event_queue: None,
             host_connections: HashMap::new(),
-            last_avail_idx_tx: 0,
-            last_avail_idx_rx: 0,
             ctx: None,
             conns: None,
             conn_mgr: None,
