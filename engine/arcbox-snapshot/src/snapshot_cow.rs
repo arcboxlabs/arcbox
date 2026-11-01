@@ -1,4 +1,9 @@
-//! Block-level copy-on-write for sandbox rootfs via dm-snapshot.
+//! Block-level copy-on-write for sandbox rootfs.
+//!
+//! Two backends, chosen through [`CowOptions::backend`]: dm-snapshot over
+//! loop devices (below), for Firecracker inside a Linux VM, and APFS
+//! `clonefile` ([`CowBackend::Clonefile`], `clonefile.rs`), for sandboxes
+//! that run as their own VM on the macOS host.
 //!
 //! Instead of copying the full rootfs ext4 image for every sandbox,
 //! `CowManager` creates a dm-snapshot backed by a sparse COW file.
@@ -27,11 +32,13 @@ use tracing::{debug, info, warn};
 use crate::error::{Result, SnapshotError};
 
 mod block_tools;
+mod clonefile;
 mod persistence;
 
 pub use block_tools::{
     BlockTools, BusyboxBlockTools, UtilLinuxBlockTools, device_major_minor, mknod_blkdev,
 };
+use clonefile::CloneStore;
 use persistence::{
     SetupOrphan, clear_owner_marker, loop_backs_path, loop_devices_for_backing_sync,
     remove_file_durable,
@@ -147,15 +154,23 @@ struct TemplateEntry {
 ///
 /// Intentionally `!Clone`: every handle owns a refcount on its template,
 /// and a stray clone would double-decrement on teardown.
+///
+/// Under [`CowBackend::Clonefile`] the same fields describe one file:
+/// `dm_device` and `cow_file` are both the clone the VM opens, `cow_loop`
+/// is empty, and `dm_name` keeps the `arcbox-snap-<sandbox_id>` form so the
+/// owner reads back out of it the same way.
 #[derive(Debug)]
 pub struct CowHandle {
     /// dm device name, e.g. `arcbox-snap-<sandbox_id>`.
     pub dm_name: String,
-    /// Absolute device path, e.g. `/dev/mapper/arcbox-snap-<sandbox_id>`.
+    /// Absolute device path, e.g. `/dev/mapper/arcbox-snap-<sandbox_id>`;
+    /// the clone file under [`CowBackend::Clonefile`].
     pub dm_device: String,
-    /// Loop device backing the sparse COW file.
+    /// Loop device backing the sparse COW file; empty under
+    /// [`CowBackend::Clonefile`].
     pub cow_loop: String,
-    /// Path to the sparse COW file on disk.
+    /// Path to the sparse COW file on disk; the clone under
+    /// [`CowBackend::Clonefile`].
     pub cow_file: PathBuf,
     /// Original template rootfs path (used to release the template refcount).
     pub template_path: PathBuf,
@@ -195,6 +210,22 @@ impl CowTestProbe {
     }
 }
 
+/// How a [`CowManager`] gives each sandbox its own disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CowBackend {
+    /// A dm-snapshot over a shared read-only template loop and a sparse
+    /// overlay file: the Linux path, for Firecracker inside a VM. Needs
+    /// [`CowOptions::block_tools`] and a usable `dmsetup`.
+    #[default]
+    DeviceMapper,
+    /// An APFS `clonefile(2)` copy of the template that the VM opens as a
+    /// plain file: the macOS host path. Needs the template and the data
+    /// directory on one APFS volume; ignores `block_tools` and
+    /// `dmsetup_candidates`. Off macOS every setup fails, and the caller
+    /// falls back to a full copy.
+    Clonefile,
+}
+
 /// What a [`CowManager`] needs from its environment.
 ///
 /// [`CowOptions::new`] fills in the reference environment — the System
@@ -209,6 +240,8 @@ pub struct CowOptions {
     /// `dmsetup version` is used; none usable degrades the manager to
     /// copy-mode fallback (every setup fails with an actionable error).
     pub dmsetup_candidates: Vec<PathBuf>,
+    /// Which copy-on-write mechanism to use.
+    pub backend: CowBackend,
 }
 
 impl CowOptions {
@@ -219,6 +252,7 @@ impl CowOptions {
             data_dir: data_dir.into(),
             block_tools: Arc::new(BusyboxBlockTools::default()),
             dmsetup_candidates: DMSETUP_CANDIDATES.iter().map(PathBuf::from).collect(),
+            backend: CowBackend::DeviceMapper,
         }
     }
 }
@@ -238,6 +272,9 @@ pub struct CowManager {
     cow_dir: PathBuf,
     tools: Arc<dyn BlockTools>,
     dmsetup_bin: Option<PathBuf>,
+    /// Set under [`CowBackend::Clonefile`]; every public operation then
+    /// goes to it and none of the dm state above is used.
+    clones: Option<CloneStore>,
     #[cfg(any(test, feature = "test-probe"))]
     test_probe: Option<Arc<CowTestProbe>>,
 }
@@ -254,8 +291,27 @@ impl CowManager {
             data_dir,
             block_tools,
             dmsetup_candidates,
+            backend,
         } = options;
         let cow_dir = data_dir.join("cow");
+        if backend == CowBackend::Clonefile {
+            std::fs::create_dir_all(&cow_dir)?;
+            std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&cow_dir, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::File::open(&cow_dir)?.sync_all()?;
+            std::fs::File::open(&data_dir)?.sync_all()?;
+            return Ok(Self {
+                templates: Mutex::new(HashMap::new()),
+                setup_orphans: Mutex::new(HashMap::new()),
+                losetup_lock: AsyncMutex::new(()),
+                clones: Some(CloneStore::new(cow_dir.clone())),
+                cow_dir,
+                tools: block_tools,
+                dmsetup_bin: None,
+                #[cfg(any(test, feature = "test-probe"))]
+                test_probe: None,
+            });
+        }
         let marker_dir = cow_dir.join(TEMPLATE_LOOP_DIR);
         std::fs::create_dir_all(&marker_dir)?;
         std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
@@ -291,6 +347,7 @@ impl CowManager {
             cow_dir,
             tools: block_tools,
             dmsetup_bin,
+            clones: None,
             #[cfg(any(test, feature = "test-probe"))]
             test_probe: None,
         })
@@ -354,6 +411,13 @@ impl CowManager {
         #[cfg(any(test, feature = "test-probe"))]
         if let Some(probe) = &self.test_probe {
             return Ok(probe.setup(sandbox_id, rootfs_path, &self.cow_dir));
+        }
+        if let Some(clones) = &self.clones {
+            return if reuse_existing_cow {
+                clones.reattach(sandbox_id, Path::new(rootfs_path))
+            } else {
+                clones.setup(sandbox_id, Path::new(rootfs_path)).await
+            };
         }
         if self.setup_orphans.lock().unwrap().contains_key(sandbox_id) {
             return Err(SnapshotError::Unavailable(format!(
@@ -613,6 +677,9 @@ impl CowManager {
             probe.teardown(handle);
             return Ok(());
         }
+        if let Some(clones) = &self.clones {
+            return clones.teardown(handle);
+        }
         let dmsetup = self
             .dmsetup_bin
             .as_deref()
@@ -697,6 +764,9 @@ impl CowManager {
             probe.teardown(handle);
             return Ok(());
         }
+        if let Some(clones) = &self.clones {
+            return clones.detach_keep(handle);
+        }
         let dmsetup = self
             .dmsetup_bin
             .as_deref()
@@ -730,6 +800,9 @@ impl CowManager {
     /// Idempotent: a missing file is success. Any loop still backing the
     /// file is detached first so the unlink actually frees the space.
     pub async fn remove_preserved_cow(&self, sandbox_id: &str) -> Result<()> {
+        if let Some(clones) = &self.clones {
+            return clones.remove_preserved(sandbox_id);
+        }
         let cow_file = self
             .cow_dir
             .join(format!("{COW_FILE_PREFIX}{sandbox_id}{COW_FILE_SUFFIX}"));
@@ -929,6 +1002,7 @@ mod tests {
             cow_dir: cow_dir.to_path_buf(),
             tools: Arc::new(BusyboxBlockTools::default()),
             dmsetup_bin: None,
+            clones: None,
             test_probe: None,
         }
     }
