@@ -79,6 +79,10 @@ impl SandboxHost for Runtime {
     }
 
     fn agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient> {
+        #[cfg(target_os = "macos")]
+        if machine == super::HOST_SANDBOX_ROUTE {
+            return self.connect_host_sandboxes();
+        }
         self.machine_manager().connect_agent(machine)
     }
 

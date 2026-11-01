@@ -5,6 +5,8 @@ mod dns_reservations;
 mod engine_config;
 mod host_network;
 #[cfg(target_os = "macos")]
+mod host_sandboxes;
+#[cfg(target_os = "macos")]
 mod inbound_listeners;
 mod initialization;
 mod kubeconfig;
@@ -23,6 +25,8 @@ mod tests;
 #[cfg(any(test, feature = "test-support"))]
 pub use host_network::NetworkFixture;
 pub use host_network::{ContainerChange, ContainerNetwork, HostMutationLease, HostNetworkSnapshot};
+#[cfg(target_os = "macos")]
+pub use host_sandboxes::RuntimeSandboxNames;
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 pub use web_services::{CapturedMachineWeb, CapturedWebGuest};
@@ -67,6 +71,28 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as 
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 const HOST_DNS_OWNER: &str = "system:host";
+
+/// The name [`Runtime::get_agent`] takes for the host sandbox location
+/// (ADR 0010), where the Sandbox API is otherwise routed by machine. No
+/// machine can have it: `$` is not a machine-name character.
+pub const HOST_SANDBOX_ROUTE: &str = "$host";
+
+/// What the host sandbox location can do now (`GetCapabilities`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSandboxCapabilities {
+    /// The driver its sandboxes run under, `hv` or `vz`.
+    pub backend: &'static str,
+    /// Whether its sandboxes can pause and resume at all.
+    pub pause_resume: bool,
+    /// Why a pause cannot run right now, or `None` when one can.
+    pub pause_unavailable: Option<String>,
+    /// Whether restores claim pre-spawned VMMs.
+    pub warm_prespawn: bool,
+    /// Whether a sandbox's ports can be published on the host.
+    pub port_publishing: bool,
+    /// Whether a sandbox can be created with bind mounts.
+    pub bind_mounts: bool,
+}
 
 /// Smallest memory a System VM may be given, in MiB.
 const MIN_SYSTEM_VM_MEMORY_MB: u64 = 512;
@@ -217,6 +243,10 @@ pub struct Runtime {
     /// Generation fence for cleanup racing RPC-created host state.
     /// ponytail: keep one fence until unrelated cleanup retries are measurable.
     sandbox_host_state: TokioMutex<u64>,
+    /// The host sandbox location (ADR 0010), once the daemon composed it.
+    /// Reached as the agent of [`HOST_SANDBOX_ROUTE`].
+    #[cfg(target_os = "macos")]
+    host_sandboxes: OnceLock<Arc<arcbox_host_sandbox::HostSandboxes>>,
     /// Authoritative resource claims, addresses, and revisions shared with DNS consumers.
     dns_registry: Arc<RwLock<Registry>>,
     /// Lifecycle operations for one canonical container ID share the same lock.
@@ -389,6 +419,8 @@ impl Runtime {
             kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
+            #[cfg(target_os = "macos")]
+            host_sandboxes: OnceLock::new(),
             dns_registry,
             container_lifecycle: Mutex::default(),
             host_network: host_network::HostNetwork::default(),
@@ -866,6 +898,11 @@ impl Runtime {
     /// # Errors
     /// Returns an error if storage is protected, reserved, or its hold cannot be read.
     pub fn ensure_storage_writes_available(&self, machine_name: &str) -> arcbox_engine::Result<()> {
+        // The host location writes the daemon's data directory, not a
+        // machine's disk.
+        if machine_name == HOST_SANDBOX_ROUTE {
+            return Ok(());
+        }
         if matches!(machine_name, DEFAULT_MACHINE_NAME | "rosetta")
             && self.storage_writes_protected()
         {
@@ -960,14 +997,40 @@ impl Runtime {
     ///
     /// # Errors
     /// Returns an error if the machine is not found or connection fails.
+    /// [`HOST_SANDBOX_ROUTE`] names the host sandbox location instead of a
+    /// machine.
     #[cfg(target_os = "macos")]
     pub fn get_agent(
         &self,
         machine_name: &str,
     ) -> Result<arcbox_engine::agent_client::AgentClient> {
+        if machine_name == HOST_SANDBOX_ROUTE {
+            return self.connect_host_sandboxes().map_err(CoreError::from);
+        }
         self.machine_manager
             .connect_agent(machine_name)
             .map_err(CoreError::from)
+    }
+
+    /// Whether sandbox `id` lives at the host location: never, off macOS.
+    #[cfg(not(target_os = "macos"))]
+    #[must_use]
+    pub const fn owns_host_sandbox(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// Whether checkpoint `id` lives at the host location: never, off macOS.
+    #[cfg(not(target_os = "macos"))]
+    #[must_use]
+    pub const fn owns_host_snapshot(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// The host location runs only on macOS.
+    #[cfg(not(target_os = "macos"))]
+    #[must_use]
+    pub const fn host_sandbox_capabilities(&self) -> Option<HostSandboxCapabilities> {
+        None
     }
 
     /// Gets an agent client for a machine (Linux version).
@@ -1874,14 +1937,23 @@ impl Runtime {
             .read()
             .expect("DNS registry lock poisoned")
             .owners()
-            .filter(|owner| owner.starts_with("sandbox:"))
+            // The nested location's startup handshake: the host location's
+            // sandboxes did not restart with the System VM's agent.
+            .filter(|owner| {
+                owner
+                    .strip_prefix("sandbox:")
+                    .is_some_and(|id| !self.owns_host_sandbox(id))
+            })
             .map(str::to_owned)
             .collect();
         for owner in dns_owners {
             self.deregister_dns_by_id_raw(&owner).await;
         }
         self.sandbox_port_keys.write().await.clear();
-        self.sandbox_dns_ids.write().await.clear();
+        self.sandbox_dns_ids
+            .write()
+            .await
+            .retain(|id| self.owns_host_sandbox(id));
     }
 
     fn sandbox_port_key(sandbox_id: &str, sandbox_port: u16, protocol: &str) -> String {

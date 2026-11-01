@@ -52,6 +52,8 @@ arcbox-local-ca.workspace = true
 arcbox-storage.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+arcbox-host-sandbox.workspace = true
 arcbox-route.workspace = true
 arcbox-vz.workspace = true
 ifbridge = { workspace = true }

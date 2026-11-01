@@ -525,6 +525,7 @@ dependencies = [
 name = "arcbox-core"
 version = "0.11.3"
 dependencies = [
+ "anyhow",
  "arcbox-atomic-file",
  "arcbox-computer",
  "arcbox-connect",
@@ -535,6 +536,7 @@ dependencies = [
  "arcbox-fakeip",
  "arcbox-fs",
  "arcbox-helper",
+ "arcbox-host-sandbox",
  "arcbox-hypervisor",
  "arcbox-image",
  "arcbox-local-ca",
