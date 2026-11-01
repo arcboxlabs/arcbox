@@ -18,10 +18,13 @@
 //! clones those files (or its own copies taken while the VM was held) for
 //! each restore — one image restores into any number of clones.
 
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 
-use arcbox_vm_driver::{Error, Result, VmSpec};
+use arcbox_vm_driver::{
+    CheckpointFormat, CheckpointImage, CheckpointKind, Error, RestoreSpec, Result, VmSpec,
+};
 use arcbox_vz::SessionState;
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +71,96 @@ impl Manifest {
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, dir.join(MANIFEST))?;
         Ok(())
+    }
+
+    /// Reads the manifest of `image`, refusing images this driver did not
+    /// write and images from another macOS build.
+    pub fn read(image: &CheckpointImage) -> Result<Self> {
+        if image.format.as_str() != FORMAT {
+            return Err(Error::ForeignCheckpoint(image.format.clone()));
+        }
+        if image.kind != CheckpointKind::Full {
+            return Err(Error::InvalidSpec(format!(
+                "{NAME}: diff checkpoints are not supported"
+            )));
+        }
+        let path = image.dir.join(MANIFEST);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| driver_error(format!("read {}", path.display()), e))?;
+        let manifest: Self =
+            serde_json::from_slice(&bytes).map_err(|e| driver_error("manifest", e))?;
+        if manifest.format != FORMAT {
+            return Err(Error::ForeignCheckpoint(CheckpointFormat::new(
+                manifest.format,
+            )));
+        }
+        let here = os_build()?;
+        if manifest.os_build != here {
+            return Err(Error::PreconditionFailed(format!(
+                "{NAME}: the checkpoint was written on macOS build {}, this Mac runs {here}; \
+                 its memory cannot be restored, its disks can boot cold",
+                manifest.os_build
+            )));
+        }
+        Ok(manifest)
+    }
+
+    /// The identifier a restore must present.
+    pub fn machine_identifier(&self) -> Result<Vec<u8>> {
+        unhex(&self.machine_identifier)
+            .ok_or_else(|| Error::InvalidSpec(format!("{NAME}: manifest machine identifier")))
+    }
+
+    /// The spec a restore under `restore` runs: the saved one with the new
+    /// id, NICs and disk paths.
+    ///
+    /// Everything else is fixed by the state file. The NICs replace the
+    /// saved ones one for one and keep their MACs (their attachments may
+    /// change); every saved disk must be named, by id, and keeps its saved
+    /// flags.
+    pub fn restore_spec(&self, restore: RestoreSpec) -> Result<VmSpec> {
+        let mut spec = self.spec.clone();
+        if restore.nics.len() != spec.nics.len() {
+            return Err(Error::InvalidSpec(format!(
+                "{NAME}: the checkpoint has {} NICs, the restore names {}",
+                spec.nics.len(),
+                restore.nics.len()
+            )));
+        }
+        // VZ refuses a restore whose NIC addresses differ from the saved
+        // configuration with a bare "invalid argument": the guest's driver
+        // read the MAC at boot. Clones keep it; each has its own datapath.
+        for (saved, new) in spec.nics.iter().zip(&restore.nics) {
+            if saved.mac != new.mac {
+                return Err(Error::InvalidSpec(format!(
+                    "{NAME}: NIC `{}` must keep the MAC {} it was checkpointed with, not {}",
+                    saved.id, saved.mac, new.mac
+                )));
+            }
+        }
+        let mut paths: HashMap<String, PathBuf> = restore
+            .disks
+            .into_iter()
+            .map(|disk| (disk.id, disk.path))
+            .collect();
+        for disk in &mut spec.disks {
+            disk.path = paths.remove(&disk.id).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "{NAME}: the restore names no path for disk `{}`",
+                    disk.id
+                ))
+            })?;
+        }
+        if let Some(extra) = paths.keys().next() {
+            return Err(Error::InvalidSpec(format!(
+                "{NAME}: the checkpoint has no disk `{extra}`"
+            )));
+        }
+        spec.id = restore.id;
+        spec.nics = restore.nics;
+        spec.isolation = restore.isolation;
+        spec.validate()?;
+        Ok(spec)
     }
 }
 
@@ -143,3 +236,16 @@ fn hex(bytes: &[u8]) -> String {
         s
     })
 }
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

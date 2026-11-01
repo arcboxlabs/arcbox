@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use arcbox_net::darwin::proxy_detect::ProxyEnvironment;
 use arcbox_net::dns::SharedDns;
 use arcbox_vm_driver::{
-    Adopt, CheckpointImage, DriverCapabilities, Error, NestedVirt, RestoreSpec, Result, VmDriver,
+    Adopt, CheckpointImage, DriverCapabilities, NestedVirt, RestoreSpec, Result, VmDriver,
     VmHandle, VmRecord, VmSpec,
 };
-use arcbox_vz::{GenericPlatform, SessionState, VirtualMachine, VirtualMachineState};
+use arcbox_vz::{GenericPlatform, SessionState, VZError, VirtualMachine, VirtualMachineState};
 use async_trait::async_trait;
 
+use crate::checkpoint::{Manifest, STATE_FILE, session_locked};
 use crate::handle::{Parts, VzHandle};
 use crate::net::HostServices;
 use crate::render::{Rendered, render};
@@ -47,6 +48,60 @@ impl VzDriver {
         let session = SessionState::current();
         (!session.allows_checkpoint()).then_some(session)
     }
+
+    /// Builds the VM a rendered spec describes and starts it, from
+    /// `state` when it restores a checkpoint.
+    async fn run(
+        &self,
+        spec: VmSpec,
+        rendered: Rendered,
+        state: Option<&Path>,
+        runtime_dir: &Path,
+    ) -> Result<Box<dyn VmHandle>> {
+        let Rendered {
+            config,
+            net,
+            mut console,
+            mut agent_log,
+            machine_identifier,
+        } = rendered;
+        let vm = config.build().map_err(|e| driver_error("build", e))?;
+        match state {
+            None => vm.start().await.map_err(|e| driver_error("start", e))?,
+            Some(state) => {
+                vm.restore_state(state).await.map_err(|e| match e {
+                    VZError::SessionLocked { state, .. } => session_locked(state),
+                    e => driver_error("restore state", e),
+                })?;
+                vm.resume().await.map_err(|e| driver_error("resume", e))?;
+            }
+        }
+        wait_running(&vm).await?;
+        // VZ's helper holds its own copies of the console pipes now.
+        for console in [&mut console, &mut agent_log].into_iter().flatten() {
+            console.release_guest_ends();
+        }
+        tracing::info!(vm = %spec.id, cpus = spec.cpus, memory_mib = spec.memory_mib,
+            restored = state.is_some(), "VZ VM running");
+        Ok(Box::new(VzHandle::new(
+            vm,
+            Parts {
+                record: VmRecord {
+                    id: spec.id.clone(),
+                    driver: NAME.to_owned(),
+                    runtime_dir: runtime_dir.to_path_buf(),
+                    process: None,
+                },
+                console,
+                agent_log,
+                net,
+                vsock: spec.vsock.is_some(),
+                balloon: spec.balloon,
+                machine_identifier,
+                spec,
+            },
+        )))
+    }
 }
 
 #[async_trait]
@@ -74,49 +129,26 @@ impl VmDriver for VzDriver {
     }
 
     async fn boot(&self, spec: VmSpec, runtime_dir: &Path) -> Result<Box<dyn VmHandle>> {
-        let Rendered {
-            config,
-            net,
-            mut console,
-            mut agent_log,
-            machine_identifier,
-        } = render(&spec, &self.host, None)?;
-        let vm = config.build().map_err(|e| driver_error("build", e))?;
-        vm.start().await.map_err(|e| driver_error("start", e))?;
-        wait_running(&vm).await?;
-        // VZ's helper holds its own copies of the console pipes now.
-        for console in [&mut console, &mut agent_log].into_iter().flatten() {
-            console.release_guest_ends();
-        }
-        tracing::info!(vm = %spec.id, cpus = spec.cpus, memory_mib = spec.memory_mib, "VZ VM running");
-        Ok(Box::new(VzHandle::new(
-            vm,
-            Parts {
-                record: VmRecord {
-                    id: spec.id.clone(),
-                    driver: NAME.to_owned(),
-                    runtime_dir: runtime_dir.to_path_buf(),
-                    process: None,
-                },
-                console,
-                agent_log,
-                net,
-                vsock: spec.vsock.is_some(),
-                balloon: spec.balloon,
-                machine_identifier,
-                spec,
-            },
-        )))
+        let rendered = render(&spec, &self.host, None)?;
+        self.run(spec, rendered, None, runtime_dir).await
     }
 
-    /// This driver restores no checkpoints yet, so every image is foreign.
+    /// Restores a `vz/v1` image into a new VM: the saved configuration
+    /// with the restore's id, NICs and disks, and the saved machine
+    /// identifier, which VZ requires. An image from another macOS build is
+    /// refused with `PreconditionFailed` before VZ is asked.
     async fn restore(
         &self,
         image: &CheckpointImage,
-        _spec: RestoreSpec,
-        _runtime_dir: &Path,
+        restore: RestoreSpec,
+        runtime_dir: &Path,
     ) -> Result<Box<dyn VmHandle>> {
-        Err(Error::ForeignCheckpoint(image.format.clone()))
+        let manifest = Manifest::read(image)?;
+        let spec = manifest.restore_spec(restore)?;
+        let machine_identifier = manifest.machine_identifier()?;
+        let rendered = render(&spec, &self.host, Some(&machine_identifier))?;
+        let state = image.dir.join(STATE_FILE);
+        self.run(spec, rendered, Some(&state), runtime_dir).await
     }
 
     fn adopt(&self) -> Option<&dyn Adopt> {
