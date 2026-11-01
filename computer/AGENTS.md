@@ -2,7 +2,9 @@
 
 Two different things live here, and most rules below bind only one of
 them: `arcbox-computer`, the transport-free protocols, and
-`arcbox-computer-runtime`, the runtime that actually boots Computers. Read
+`arcbox-computer-runtime`, the runtime that actually boots Computers.
+`arcbox-oci`, the OCI runtime-spec model, sits beside the runtime as its
+workload contract's vocabulary. Read
 the Crates section before assuming a rule applies to your crate. The
 restructure plan and its locked decisions live in
 `docs/architecture/charter.md`.
@@ -59,6 +61,20 @@ restructure plan and its locked decisions live in
   vm-stack-redesign R3 moved it here; the in-sandbox init is
   `arcbox-vm-agent` and the wire vocabulary `arcbox-vm-proto`, both still
   under `virt/`. Its own README has the crate map.
+  - **Workload contract** (`workload` module, ADR 0010): an image config
+    and a create request become one OCI `config.json` through
+    `arcbox-oci` (`bundle_spec`), and `Workload::from_spec` translates a
+    spec into the guest agent's `StartCommand`. The VM is the isolation
+    boundary, so hooks, namespaces, seccomp, capabilities, rlimits and
+    devices are refused (`WorkloadError::Rejected`), and so is every other
+    field the agent cannot carry out (`WorkloadError::Unsupported`),
+    instead of running without them. A field `arcbox-oci` gains is
+    accepted by nothing until `workload/start.rs` checks it (see
+    `computer/arcbox-oci/AGENTS.md`). The module also
+    qualifies and, with the `remote-image` feature, pulls `docker:<ref>`
+    templates (`ImageRef`, `pull`), and locates and checks the `vm-agent`
+    every rootfs carries (`vm_agent_path`, `check_vm_agent`). Nothing here
+    models lifecycle: pause belongs to `ComputerManager`.
   - **Rootfs consumers**: node image builders also use `RootfsBuilder`. Keep the agent path and resolver convention in this crate. Use `VM_AGENT_PATH` in `init=` when booting converted images; preserve the distribution's `/sbin/init`.
   - **Rootfs capacity**: `build_rootfs` requires a positive multiple of `ROOTFS_CAPACITY_GRANULARITY` (128 MiB). Verify that written geometry and file length match the requested capacity before injection and publication. Start cached templates at 512 MiB and allow the formatter to grow the image to fit the source. Retain the `rootfs-<layer>-<agent>.ext4` stem because template catalogs use that stem as digest input.
   - **It names no adapter at all** — the last two edges
@@ -83,6 +99,14 @@ restructure plan and its locked decisions live in
   - **Runtime naming**: use `Computer*` names for computer-domain types.
     The guest agent converts runtime types to public `Sandbox*` wire
     types. Keep the TOML section name `firecracker` unchanged.
+- `arcbox-oci` — the OCI runtime-spec model (`config.json`, bundle
+  directory, OCI state, hooks), host-side and `std`-only. It moved here
+  from `runtime/` when the workload contract became its one consumer
+  (ADR 0010, `docs/architecture/charter.md`). It is not image code: no
+  manifest, layer or pull lives here. Hooks are parsed but never run and
+  `Spec::validate` is shallow, so neither is a security boundary; the
+  consumer's check is. Its own rules are in
+  `computer/arcbox-oci/AGENTS.md`.
 
 ## Reaching the platform without a `#[cfg]`
 
