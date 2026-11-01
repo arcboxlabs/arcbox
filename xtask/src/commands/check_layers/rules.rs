@@ -72,6 +72,7 @@ pub const RULES: &[Rule] = &[
             "arcbox-fc-driver",
             "arcbox-vz-driver",
             "arcbox-tap-net",
+            "arcbox-host-net",
             "arcbox-ch-driver",
         ]),
         reason: "vm-stack-redesign D-VM4 / charter D4 — orchestrators depend on the \
