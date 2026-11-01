@@ -121,11 +121,17 @@ impl RootfsBuilder {
         Ok(())
     }
 
-    /// Loop mounts are a Linux operation; the builder compiles elsewhere but
-    /// cannot inject.
+    /// Off Linux there is no loop mount, and the image must be written while
+    /// it is built instead. That needs an append hook oci2rootfs 0.2.1 lacks:
+    /// `Converter::convert` finalizes the image itself and its `Ext4Writer`
+    /// is private.
     #[cfg(not(target_os = "linux"))]
     pub(super) async fn inject_agent(&self, _image: &Path) -> Result<()> {
-        bail!("vm-agent injection needs a Linux loop mount")
+        bail!(
+            "writing vm-agent into a rootfs on this host needs oci2rootfs 0.3 \
+             (`Converter::convert_with` and a public `Ext4Writer`); 0.2.1 has neither, \
+             and the Linux path injects through a loop mount instead"
+        )
     }
 
     /// [`BlockTools::attach_loop`](arcbox_snapshot::snapshot_cow::BlockTools::attach_loop) on a blocking thread.
