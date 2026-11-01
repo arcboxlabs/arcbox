@@ -7,8 +7,10 @@
 //! GIC, the virtio transport state and each device's host-owned
 //! configuration (a NIC's MAC, the balloon's target), PSCI power states, the
 //! PL031, guest RAM and an APFS clone of every disk are written to the
-//! checkpoint directory, with the macOS build that wrote it. The machine is
-//! left stopped in place; the caller stops it.
+//! checkpoint directory, with the macOS build that wrote it. Only the pages
+//! the guest wrote since boot or since its restore are written
+//! (`save::write_ram`). The machine is left stopped in place; the caller
+//! stops it.
 //!
 //! A restore builds the same machine in a fresh process (Hypervisor.framework
 //! allows one VM per process), maps the RAM image copy-on-write, writes the
