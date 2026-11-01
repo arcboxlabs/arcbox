@@ -139,6 +139,7 @@ from memory. Every new file is added to the index below.
 - [2026-11-02 — A Mac without hardware virtualization no longer crash-loops the daemon](logs/2026-11-02-no-virtualization-host.md)
 - [2026-11-01 — HV VMs run in one arcbox-hv-vmm process each, with checkpoints](logs/2026-11-01-hv-driver-process-per-vm.md)
 - [2026-11-01 — Large-frame retransmits with more than 64 KiB in flight panicked splicetcp](logs/2026-11-01-splicetcp-large-frame-retransmit.md)
+- [2026-11-01 — The daemon runs host sandboxes, HV by default](logs/2026-11-01-host-sandbox-composition.md) — composition, routing, D5, and the first real HV/VZ host boots; e2e: `host_sandbox`
 - [2026-10-31 — nfsdcld lets nfsd skip the NFSv4 grace period](logs/2026-10-31-nfs-grace-nfsdcld.md)
 - [2026-10-30 — Container CA injection retries archive requests that hit a busy overlay](logs/2026-10-30-ca-injection-overlay-busy.md)
 - [2026-10-30 — The consumerless arcbox-net-virtio crate is removed](logs/2026-10-30-remove-net-virtio.md)
