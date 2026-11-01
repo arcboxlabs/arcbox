@@ -1,5 +1,5 @@
-//! [`VmSpec`] → the [`VmmConfig`] the HV machine boots from. Pure: it
-//! opens no file and starts nothing.
+//! [`VmSpec`] → the [`VmmConfig`] the HV machine boots from, and the spec a
+//! restore boots. Pure: it opens no file and starts nothing.
 //!
 //! What the HV machine always has, whatever the spec says: the
 //! virtio-console device (the guest console ABI) and the entropy device
@@ -7,7 +7,8 @@
 //! machine, as today; the spec's MAC applies to the host NAT NIC.
 
 use arcbox_vm_driver::{
-    BootSpec, CacheMode, ConsoleSpec, IsolationSpec, NicAttachment, Result, VmSpec,
+    BootSpec, CacheMode, ConsoleSpec, IsolationSpec, NicAttachment, NicSpec, RestoreSpec, Result,
+    VmSpec,
 };
 
 use super::unsupported;
@@ -73,6 +74,53 @@ pub fn vmm_config(spec: &VmSpec) -> Result<VmmConfig> {
         debug_console_socket: spec.debug_console.clone(),
         qemu: None,
     })
+}
+
+/// The spec a restore of a checkpoint `taken` from that spec boots:
+/// `restore`'s id, isolation and NICs, and the image's disks at the paths
+/// `restore` names for their ids. Everything else is the image's.
+///
+/// The NICs must have the image's attachments in its bus order, and every
+/// disk of the image must be named exactly once, by no disk it lacks: the
+/// machine is rebuilt device for device, and a device that moved is a
+/// different machine.
+pub fn restored_spec(mut taken: VmSpec, restore: RestoreSpec) -> Result<VmSpec> {
+    let attachments = |nics: &[NicSpec]| {
+        nics.iter()
+            .map(|n| n.attachment.clone())
+            .collect::<Vec<_>>()
+    };
+    if attachments(&taken.nics) != attachments(&restore.nics) {
+        return Err(unsupported(
+            "a restore's NICs must have the checkpoint's attachments in its order",
+        ));
+    }
+    if let Some(extra) = restore
+        .disks
+        .iter()
+        .find(|d| !taken.disks.iter().any(|t| t.id == d.id))
+    {
+        return Err(unsupported(&format!(
+            "disk {} is not in the checkpoint",
+            extra.id
+        )));
+    }
+    for disk in &mut taken.disks {
+        let mut named = restore.disks.iter().filter(|d| d.id == disk.id);
+        match (named.next(), named.next()) {
+            (Some(new), None) => disk.path.clone_from(&new.path),
+            _ => {
+                return Err(unsupported(&format!(
+                    "a restore must name disk {} exactly once",
+                    disk.id
+                )));
+            }
+        }
+    }
+    taken.id = restore.id;
+    taken.nics = restore.nics;
+    taken.isolation = restore.isolation;
+    Ok(taken)
 }
 
 fn refuse(spec: &VmSpec) -> Result<()> {
@@ -225,6 +273,93 @@ mod tests {
         assert!(!config.networking);
         assert_eq!(config.bridge_nic_mac, None);
         assert_eq!((config.vsock, config.guest_cid), (false, None));
+    }
+
+    fn disk(id: &str, path: &str) -> DiskSpec {
+        DiskSpec {
+            id: id.into(),
+            path: PathBuf::from(path),
+            read_only: id == "seed",
+            root: id == "root",
+            cache: CacheMode::Unsafe,
+        }
+    }
+
+    fn restore(disks: Vec<DiskSpec>, nics: Vec<NicSpec>) -> RestoreSpec {
+        RestoreSpec {
+            id: VmId::new("hv-restored").unwrap(),
+            nics,
+            disks,
+            isolation: IsolationSpec::None,
+        }
+    }
+
+    #[test]
+    fn a_restore_moves_each_disk_by_id_and_keeps_the_rest_of_the_image() {
+        let mut taken = spec();
+        taken.disks = vec![disk("root", "/old/root.img"), disk("seed", "/old/seed.img")];
+        taken.nics = vec![nic("nat", "02:00:00:00:00:01", NicAttachment::UserNat)];
+        let new_nic = nic("nat", "02:00:00:00:00:09", NicAttachment::UserNat);
+        // Named in the other order: disks follow their id, not position.
+        let spec = restored_spec(
+            taken,
+            restore(
+                vec![disk("seed", "/new/seed.img"), disk("root", "/new/root.img")],
+                vec![new_nic.clone()],
+            ),
+        )
+        .unwrap();
+        assert_eq!(spec.id.as_str(), "hv-restored");
+        let disks: Vec<_> = spec
+            .disks
+            .iter()
+            .map(|d| (d.id.as_str(), d.path.to_str().unwrap(), d.read_only))
+            .collect();
+        assert_eq!(
+            disks,
+            [
+                ("root", "/new/root.img", false),
+                ("seed", "/new/seed.img", true)
+            ]
+        );
+        assert_eq!(spec.nics, [new_nic]);
+        assert_eq!((spec.cpus, spec.memory_mib), (4, 2048));
+    }
+
+    #[test]
+    fn a_restore_that_moves_a_device_is_refused() {
+        let mut taken = spec();
+        taken.disks = vec![disk("root", "/old/root.img")];
+        let nat = || vec![nic("nat", "02:00:00:00:00:01", NicAttachment::UserNat)];
+        taken.nics = nat();
+        let cases = [
+            ("missing disk", restore(vec![], nat())),
+            (
+                "twice",
+                restore(vec![disk("root", "/a"), disk("root", "/b")], nat()),
+            ),
+            (
+                "unknown disk",
+                restore(vec![disk("root", "/a"), disk("data", "/b")], nat()),
+            ),
+            ("missing nic", restore(vec![disk("root", "/a")], vec![])),
+            (
+                "other attachment",
+                restore(
+                    vec![disk("root", "/a")],
+                    vec![nic("nat", "02:00:00:00:00:01", NicAttachment::HostNat)],
+                ),
+            ),
+        ];
+        for (name, restore) in cases {
+            assert!(
+                matches!(
+                    restored_spec(taken.clone(), restore),
+                    Err(arcbox_vm_driver::Error::InvalidSpec(_))
+                ),
+                "{name} was not refused"
+            );
+        }
     }
 
     #[test]
