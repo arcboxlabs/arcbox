@@ -41,6 +41,89 @@ const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DEFAULT_IMAGE: &str = "public.ecr.aws/docker/library/alpine:latest";
 const ID: &str = "host1";
+/// The image the SDK runs' built-in template is converted from.
+const DEFAULT_BUSYBOX_IMAGE: &str = "public.ecr.aws/docker/library/busybox:latest";
+
+/// The daemon env that keeps every sandbox in the nested location: the
+/// nested targets' scenarios, templates and catalog calls would otherwise
+/// default to the host (D2).
+#[must_use]
+pub fn nested_only_env() -> (String, String) {
+    ("ARCBOX_SANDBOX_ENABLED".to_owned(), "false".to_owned())
+}
+
+/// Whether the SDK targets run against the host location
+/// (`ARCBOX_E2E_SANDBOX_LOCATION=host`) rather than the nested one.
+#[must_use]
+pub fn sdk_on_host() -> bool {
+    std::env::var("ARCBOX_E2E_SANDBOX_LOCATION").is_ok_and(|v| v == "host")
+}
+
+/// A data directory for a daemon that runs host sandboxes: under /tmp,
+/// not $TMPDIR, because the HV VMM's control socket lives in each
+/// sandbox's runtime dir and a /var/folders path overflows sun_path.
+///
+/// # Errors
+/// Fails when the directory cannot be created.
+pub fn host_data_dir(prefix: &str) -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in("/tmp")
+        .context("creating test directory")
+}
+
+/// Stages the host location's built-in template from the busybox image.
+///
+/// It stands in for the static Linux busybox the host does not ship: the
+/// image (`ARCBOX_E2E_BUSYBOX_IMAGE`) is converted by the daemon itself
+/// through a throwaway host sandbox and copied to where the built-in
+/// template lives.
+///
+/// # Errors
+/// Fails when the conversion sandbox does not become ready.
+pub fn stage_default_template(socket: &Path, data_dir: &Path) -> Result<()> {
+    let image = std::env::var("ARCBOX_E2E_BUSYBOX_IMAGE")
+        .unwrap_or_else(|_| DEFAULT_BUSYBOX_IMAGE.to_owned());
+    info!(%image, "staging the host location's built-in template");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let mut sandboxes = SandboxServiceClient::new(connect_unix(socket).await?);
+        sandboxes
+            .create(CreateSandboxRequest {
+                id: ID.into(),
+                template: format!("docker:{image}"),
+                run_location: RunLocation::Host.into(),
+                ..Default::default()
+            })
+            .await
+            .context("Create from the busybox image failed")?;
+        wait_for_state(&mut sandboxes, SandboxState::Ready, SANDBOX_READY_TIMEOUT).await?;
+        sandboxes
+            .remove(RemoveSandboxRequest {
+                id: ID.into(),
+                force: true,
+            })
+            .await
+            .context("Remove failed")?;
+        anyhow::Ok(())
+    })?;
+    let images = data_dir.join("sandbox/images");
+    let converted = std::fs::read_dir(&images)?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rootfs-"))
+                && path.extension().is_some_and(|ext| ext == "ext4")
+        })
+        .max_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+        .context("the daemon converted no image")?;
+    std::fs::copy(&converted, images.join("default.ext4"))?;
+    Ok(())
+}
 
 /// Runs the scenario on HV, then on VZ unless the session is locked.
 pub fn run(config: SandboxSmokeConfig) -> Result<()> {
@@ -63,12 +146,7 @@ pub fn run(config: SandboxSmokeConfig) -> Result<()> {
 
 fn run_backend(root: &Path, version: &str, backend: &str, keep: bool) -> Result<()> {
     info!(backend, "starting host sandbox scenario");
-    // Under /tmp, not $TMPDIR: the HV VMM's control socket lives in the
-    // sandbox's runtime dir, and a /var/folders path overflows sun_path.
-    let temp_dir = tempfile::Builder::new()
-        .prefix("arcbox-hs-")
-        .tempdir_in("/tmp")
-        .context("creating test directory")?;
+    let temp_dir = host_data_dir("arcbox-hs-")?;
     let data_dir = temp_dir.path().to_owned();
     crate::boot_assets::stage_dev_boot_assets(root, &data_dir, version)?;
 

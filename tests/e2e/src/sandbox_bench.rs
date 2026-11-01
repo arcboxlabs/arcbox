@@ -58,6 +58,7 @@ pub fn run(
             env: vec![
                 ("ARCBOX_BOOT_ASSET_VERSION".into(), version),
                 ("ARCBOX_VM_BACKEND".into(), "vz".into()),
+                crate::host_sandbox::nested_only_env(),
             ],
         })?;
         let result = (|| {

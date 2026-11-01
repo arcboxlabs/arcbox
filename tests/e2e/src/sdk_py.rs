@@ -61,10 +61,14 @@ pub fn run(config: SdkPyConfig) -> Result<()> {
         None => crate::boot_assets::boot_version(&root.join("assets.lock"))?,
     };
 
-    let temp_dir = tempfile::Builder::new()
-        .prefix("arcbox-sdk-py-e2e-")
-        .tempdir()
-        .context("creating SDK e2e test directory")?;
+    let temp_dir = if crate::host_sandbox::sdk_on_host() {
+        crate::host_sandbox::host_data_dir("arcbox-sdk-py-e2e-")?
+    } else {
+        tempfile::Builder::new()
+            .prefix("arcbox-sdk-py-e2e-")
+            .tempdir()
+            .context("creating SDK e2e test directory")?
+    };
     let data_dir = temp_dir.path().to_owned();
 
     crate::boot_assets::stage_dev_boot_assets(&root, &data_dir, &version)?;
@@ -103,20 +107,29 @@ fn run_scenario(
     let sdk_dir = root.join("sdk/python");
     ensure_venv(&sdk_dir)?;
 
-    // The sandbox surface needs nested virtualization, which VZ provides.
+    // The sandbox surface needs nested virtualization, which VZ provides;
+    // with ARCBOX_E2E_SANDBOX_LOCATION=host the SDK's creates go to the
+    // host location (the default, D2) instead.
+    let on_host = crate::host_sandbox::sdk_on_host();
     let mut daemon = DaemonHandle::spawn(DaemonConfig {
         binary: root.join("target/release/arcbox-daemon"),
         data_dir: data_dir.to_owned(),
         args: vec![],
-        env: vec![
+        env: [
             ("ARCBOX_BOOT_ASSET_VERSION".to_owned(), version.to_owned()),
             ("ARCBOX_VM_BACKEND".to_owned(), "vz".to_owned()),
-        ],
+        ]
+        .into_iter()
+        .chain((!on_host).then(crate::host_sandbox::nested_only_env))
+        .collect(),
     })?;
 
     let ready_started = Instant::now();
     daemon.wait_ready_blocking(READY_TIMEOUT)?;
     metrics.record("daemon_ready", ready_started.elapsed().as_secs_f64());
+    if on_host {
+        crate::host_sandbox::stage_default_template(&daemon.grpc_socket(), data_dir)?;
+    }
     info!(
         elapsed_seconds = ready_started.elapsed().as_secs(),
         "daemon ready"

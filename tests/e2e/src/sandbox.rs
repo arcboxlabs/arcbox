@@ -187,6 +187,7 @@ fn run_scenario(
         env: vec![
             ("ARCBOX_BOOT_ASSET_VERSION".to_owned(), version.to_owned()),
             ("ARCBOX_VM_BACKEND".to_owned(), "vz".to_owned()),
+            crate::host_sandbox::nested_only_env(),
         ],
     })?;
 

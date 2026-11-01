@@ -158,6 +158,12 @@ Environment variables read by the tests:
 - `ARCBOX_E2E_HOST_BACKENDS=hv,vz` — which host sandbox backends the
   `host_sandbox` target runs (default both). Its VZ half skips with the
   daemon's reason while the macOS session is locked.
+- `ARCBOX_E2E_SANDBOX_LOCATION=host` — run the `sdk_py`/`sdk_ts` suites
+  against the host location (pick its backend with
+  `ARCBOX_SANDBOX_BACKEND=hv|vz`). The harness first stages the host's
+  built-in template from `ARCBOX_E2E_BUSYBOX_IMAGE` (default
+  `public.ecr.aws/docker/library/busybox:latest`). Unset, the SDK suites
+  and the nested sandbox targets run with `ARCBOX_SANDBOX_ENABLED=false`.
 - `ARCBOX_GUEST_DOCKER_VSOCK_PORT=<port>` — pass a custom guest Docker vsock
   port to `arcbox-daemon`.
 - `ARCBOX_IDLE_TIMEOUT_SECS=<secs>` — shorten the daemon's VM idle timeout
