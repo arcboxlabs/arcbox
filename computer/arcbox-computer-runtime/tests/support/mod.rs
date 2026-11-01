@@ -9,6 +9,9 @@
 //! expire → remove paths run on any host with no KVM, no root and no
 //! Firecracker.
 //!
+//! Shared by every test binary here, each of which uses only some of it.
+#![allow(dead_code)]
+//!
 //! What is *not* faked is the manager: these tests reach it only through
 //! its public API, so nothing here can put a computer in a state a real
 //! flow does not produce.
@@ -23,7 +26,7 @@ use arcbox_computer_runtime::testkit::agent::FakeAgentFactory;
 use arcbox_computer_runtime::testkit::fake_environment;
 use arcbox_computer_runtime::{
     ComputerEvent, ComputerId, ComputerManager, ComputerSpec, ComputerState, NodeEnvironment,
-    OutputChunk,
+    OutputChunk, Placement,
 };
 use arcbox_vm_driver::testkit::{FakeDriver, FakeNetwork};
 use tokio::sync::broadcast;
@@ -54,6 +57,8 @@ pub struct Setup {
     jailer: bool,
     warm: bool,
     cow_probe: bool,
+    driver: Option<FakeDriver>,
+    placement: Placement,
 }
 
 impl Setup {
@@ -70,6 +75,8 @@ impl Setup {
             jailer: true,
             warm: false,
             cow_probe: false,
+            driver: None,
+            placement: Placement::nested(),
         }
     }
 
@@ -80,6 +87,21 @@ impl Setup {
             jailer: false,
             warm: false,
             cow_probe: false,
+            driver: None,
+            placement: Placement::nested(),
+        }
+    }
+
+    /// The host location: no jailer, `driver` narrowed to what a host
+    /// driver claims, and the location's checkpoint rules in `placement`.
+    #[must_use]
+    pub fn host(driver: FakeDriver, placement: Placement) -> Self {
+        Self {
+            jailer: false,
+            warm: false,
+            cow_probe: false,
+            driver: Some(driver),
+            placement,
         }
     }
 
@@ -142,7 +164,8 @@ impl Setup {
         });
 
         let ports = Ports {
-            driver: FakeDriver::new(),
+            driver: self.driver.unwrap_or_default(),
+            placement: self.placement,
             agent: FakeAgentFactory::new(),
             cow_probe: self
                 .cow_probe
@@ -163,6 +186,7 @@ impl Setup {
 /// adopts the same guest.
 struct Ports {
     driver: FakeDriver,
+    placement: Placement,
     agent: FakeAgentFactory,
     cow_probe: Option<Arc<arcbox_computer_runtime::snapshot_cow::CowTestProbe>>,
 }
@@ -181,7 +205,7 @@ impl Ports {
                 .expect("a probe-backed cow manager over the data dir"),
             );
         }
-        let manager = ComputerManager::new(
+        let manager = ComputerManager::new_at(
             config.clone(),
             NodeEnvironment {
                 // The fixture's own clones, so a restart hands its
@@ -192,6 +216,7 @@ impl Ports {
                 agent: Arc::new(self.agent.clone()),
                 ..environment
             },
+            self.placement.clone(),
         )
         .expect("the fakes offer every capability the manager requires")
         .into_shared();
@@ -278,12 +303,20 @@ impl Fixture {
     /// dropping without it kills them, which is the difference the two
     /// recovery paths turn on.
     pub async fn restart(self) -> Self {
+        let placement = self.ports.placement.clone();
+        self.restart_at(placement).await
+    }
+
+    /// [`Self::restart`] under another [`Placement`] — the same Mac after
+    /// a macOS update, say.
+    pub async fn restart_at(self, placement: Placement) -> Self {
         let Self {
             manager,
-            ports,
+            mut ports,
             config,
             dir,
         } = self;
+        ports.placement = placement;
         // Dropped before the successor sweeps, not after: the registry the
         // manager owns holds every mailbox, so letting it go is what stops
         // the old actors and releases the VM handles they hold.
