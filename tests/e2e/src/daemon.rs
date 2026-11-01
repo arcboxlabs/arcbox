@@ -189,6 +189,12 @@ impl DaemonHandle {
     pub fn spawn(config: DaemonConfig) -> Result<Self> {
         assert_isolated(&config.data_dir)?;
         ensure_signed(&config.binary)?;
+        // The host sandbox location's HV backend spawns one of these per
+        // sandbox from next to the daemon; it needs the same entitlements.
+        let hv_vmm = config.binary.with_file_name("arcbox-hv-vmm");
+        if hv_vmm.is_file() {
+            ensure_signed(&hv_vmm)?;
+        }
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating {}", config.data_dir.display()))?;
 

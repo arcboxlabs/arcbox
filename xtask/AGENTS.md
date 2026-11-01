@@ -35,7 +35,7 @@ Current recipe ↔ self-build mapping (keep both columns identical):
 | `hv_vmm`         | `cargo build --release -p arcbox-e2e --bin hv_e2e`| `hv_vmm.rs` (same)                           |
 | `stats_watch`    | release daemon + musl `arcbox-agent`              | `stats_watch.rs` (same)                      |
 | `kubernetes_lb`  | release daemon + musl `arcbox-agent`              | `kubernetes_lb.rs` (agent) + `scenario.rs` (daemon) |
-| `sandbox`        | release cli+daemon + musl `arcbox-agent`/`arcbox-vm-agent` bins | `sandbox.rs::build_binaries` (same)   |
+| `sandbox`, `host_sandbox` | release cli+daemon+`arcbox-hv-driver` + musl `arcbox-agent`/`arcbox-vm-agent` bins | `sandbox.rs::build_binaries` (same) |
 | `egress_throughput` | `cargo build --release -p arcbox-daemon`       | `scenario.rs::run_vz_scenario_with_log` (same) |
 | `docker_build`   | same as above                                     | `scenario.rs::run_vz_scenario_with_log` (same) |
 | `docker_build_external` | same as above                              | `scenario.rs::run_vz_scenario_with_log` (same) |

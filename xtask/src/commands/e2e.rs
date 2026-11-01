@@ -275,11 +275,12 @@ fn prebuild(root: &std::path::Path, test: &str) -> Result<bool> {
         }
         // Must match tests/e2e/src/sandbox.rs::build_binaries exactly
         // (packages AND profiles), or SKIP_BUILD runs stale binaries.
-        // sandbox_coldstart reuses that same build_binaries().
-        "sandbox" | "sandbox_coldstart" => {
+        // sandbox_coldstart and host_sandbox reuse that same build_binaries();
+        // arcbox-hv-driver is the host location's per-sandbox VMM process.
+        "sandbox" | "sandbox_coldstart" | "host_sandbox" => {
             xshell::cmd!(
                 shell,
-                "cargo build --release -p arcbox-cli -p arcbox-daemon"
+                "cargo build --release -p arcbox-cli -p arcbox-daemon -p arcbox-hv-driver"
             )
             .run()?;
             xshell::cmd!(

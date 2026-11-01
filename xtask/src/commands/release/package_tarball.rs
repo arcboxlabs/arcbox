@@ -23,6 +23,10 @@ pub fn run(args: PackageTarballArgs) -> Result<()> {
         staging.join("arcbox-daemon"),
     )?;
     super::stage_executable(
+        args.host_artifacts.join("target/release/arcbox-hv-vmm"),
+        staging.join("arcbox-hv-vmm"),
+    )?;
+    super::stage_executable(
         args.host_artifacts.join("target/release/arcbox-helper"),
         staging.join("arcbox-helper"),
     )?;
@@ -112,7 +116,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let host = dir.path().join("host");
         let agent = dir.path().join("agent");
-        for bin in ["abctl", "arcbox-daemon", "arcbox-helper"] {
+        for bin in ["abctl", "arcbox-daemon", "arcbox-hv-vmm", "arcbox-helper"] {
             write_mode_644(&host.join("target/release").join(bin), b"bin");
         }
         write_mode_644(&host.join("bundle/arcbox.entitlements"), b"plist");

@@ -15,7 +15,7 @@ SIGN_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| grep -o '"Developer ID Application: ArcBox, Inc\.[^"]*"' \
 	| head -1 | tr -d '"')
 
-BINARIES := arcbox-daemon arcbox-helper abctl
+BINARIES := arcbox-daemon arcbox-hv-vmm arcbox-helper abctl
 
 ifeq ($(PROFILE),release)
   CARGO_FLAGS := --release
@@ -42,8 +42,10 @@ build-release:
 build-cli:
 	cargo build -p arcbox-cli $(CARGO_FLAGS)
 
+# arcbox-hv-vmm is the per-sandbox VMM process of the host sandbox
+# location's HV backend; the daemon spawns it from its own directory.
 build-daemon:
-	cargo build -p arcbox-daemon $(CARGO_FLAGS)
+	cargo build -p arcbox-daemon -p arcbox-hv-driver --bin arcbox-daemon --bin arcbox-hv-vmm $(CARGO_FLAGS)
 
 build-helper:
 	cargo build -p arcbox-helper $(CARGO_FLAGS)
@@ -93,7 +95,13 @@ sign-daemon: build-daemon
 		--entitlements $(ENTITLEMENTS) \
 		--sign "$(SIGN_IDENTITY)" \
 		$(TARGET_DIR)/arcbox-daemon
+	codesign --force --options runtime \
+		--identifier com.arcboxlabs.desktop.hv-vmm \
+		--entitlements $(ENTITLEMENTS) \
+		--sign "$(SIGN_IDENTITY)" \
+		$(TARGET_DIR)/arcbox-hv-vmm
 	@codesign -v --deep --strict $(TARGET_DIR)/arcbox-daemon && echo "✓ arcbox-daemon signed"
+	@codesign -v --deep --strict $(TARGET_DIR)/arcbox-hv-vmm && echo "✓ arcbox-hv-vmm signed"
 
 sign-all: build
 	@if [ -z "$(SIGN_IDENTITY)" ]; then \
@@ -105,6 +113,11 @@ sign-all: build
 		--entitlements $(ENTITLEMENTS) \
 		--sign "$(SIGN_IDENTITY)" \
 		$(TARGET_DIR)/arcbox-daemon
+	codesign --force --options runtime \
+		--identifier com.arcboxlabs.desktop.hv-vmm \
+		--entitlements $(ENTITLEMENTS) \
+		--sign "$(SIGN_IDENTITY)" \
+		$(TARGET_DIR)/arcbox-hv-vmm
 	codesign --force --options runtime \
 		--identifier com.arcboxlabs.desktop.helper \
 		--sign "$(SIGN_IDENTITY)" \
@@ -122,6 +135,9 @@ sign:
 	codesign --force --options runtime \
 		--entitlements $(ENTITLEMENTS) \
 		-s - $(TARGET_DIR)/arcbox-daemon
+	codesign --force --options runtime \
+		--entitlements $(ENTITLEMENTS) \
+		-s - $(TARGET_DIR)/arcbox-hv-vmm
 
 verify:
 	@for bin in $(BINARIES); do \

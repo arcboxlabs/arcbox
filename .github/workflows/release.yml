@@ -286,7 +286,7 @@ jobs:
       # of last resort, not a budget.
       - name: Build arcbox binaries (release)
         timeout-minutes: 40
-        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon -p arcbox-helper
+        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon -p arcbox-helper -p arcbox-hv-driver
 
       - name: Codesign arcbox-daemon
         run: |
@@ -296,6 +296,18 @@ jobs:
             --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
             target/release/arcbox-daemon
           codesign -v --deep --strict target/release/arcbox-daemon
+
+      # The host sandbox location's per-sandbox HV VMM process (ADR 0010).
+      # It runs a VM, so it carries the daemon's entitlements, and ships
+      # next to the daemon, where the daemon spawns it from.
+      - name: Codesign arcbox-hv-vmm
+        run: |
+          codesign --force --options runtime \
+            --identifier com.arcboxlabs.desktop.hv-vmm \
+            --entitlements bundle/arcbox.entitlements \
+            --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
+            target/release/arcbox-hv-vmm
+          codesign -v --deep --strict target/release/arcbox-hv-vmm
 
       - name: Codesign arcbox-helper
         run: |
@@ -316,7 +328,7 @@ jobs:
       - name: Verify artifacts
         run: |
           echo "=== Build artifacts ==="
-          for bin in abctl arcbox-daemon arcbox-helper; do
+          for bin in abctl arcbox-daemon arcbox-hv-vmm arcbox-helper; do
             ls -lh "target/release/$bin"
             file "target/release/$bin"
             codesign -d -v "target/release/$bin"
@@ -330,6 +342,7 @@ jobs:
           path: |
             target/release/abctl
             target/release/arcbox-daemon
+            target/release/arcbox-hv-vmm
             target/release/arcbox-helper
             bundle/arcbox.entitlements
             bundle/com.arcboxlabs.desktop.helper.plist

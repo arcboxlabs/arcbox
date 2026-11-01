@@ -116,7 +116,7 @@ pub fn build_binaries() -> Result<()> {
     shell.change_dir(repo_root());
     xshell::cmd!(
         shell,
-        "cargo build --release -p arcbox-cli -p arcbox-daemon"
+        "cargo build --release -p arcbox-cli -p arcbox-daemon -p arcbox-hv-driver"
     )
     .run()?;
     xshell::cmd!(
