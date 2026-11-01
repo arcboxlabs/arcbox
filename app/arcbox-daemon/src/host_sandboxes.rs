@@ -31,6 +31,10 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Composes the location into `runtime` and starts serving its cleanup
 /// stream. Never fails the daemon.
 pub fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+    if !runtime.config().sandbox.enabled {
+        info!("host sandboxes are disabled ([sandbox] enabled = false)");
+        return;
+    }
     let host = match compose(runtime) {
         Ok(host) => Arc::new(host),
         Err(error) => {

@@ -613,6 +613,10 @@ impl Default for LoggingConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
+    /// Whether the daemon runs the host location at all (default true).
+    /// `false` leaves sandboxes to the nested location, which then is the
+    /// default (D2). Settable via `ARCBOX_SANDBOX_ENABLED`.
+    pub enabled: bool,
     /// The hypervisor host sandboxes run under: `"hv"` (the default, D4)
     /// or `"vz"`. Settable via `ARCBOX_SANDBOX_BACKEND`. Independent of
     /// the System VM's `[vm] backend`.
@@ -622,6 +626,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             backend: arcbox_vmm::VmBackend::Hv,
         }
     }
@@ -899,13 +904,16 @@ registry-mirrors = ["https://ignored.example.com"]
     #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
     fn sandbox_backend_defaults_to_hv_and_parses_from_env() {
         assert_eq!(Config::default().sandbox.backend, arcbox_vmm::VmBackend::Hv);
+        assert!(Config::default().sandbox.enabled);
         figment::Jail::expect_with(|jail| {
             jail.set_env("ARCBOX_SANDBOX_BACKEND", "vz");
+            jail.set_env("ARCBOX_SANDBOX_ENABLED", "false");
             let config: Config = Figment::new()
                 .merge(Serialized::defaults(Config::default()))
                 .merge(Env::prefixed("ARCBOX_").split("_"))
                 .extract()?;
             assert_eq!(config.sandbox.backend, arcbox_vmm::VmBackend::Vz);
+            assert!(!config.sandbox.enabled);
             Ok(())
         });
     }
