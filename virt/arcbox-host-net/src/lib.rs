@@ -10,20 +10,28 @@
 //! # What lives here
 //!
 //! - [`HostNetwork`] — the port's `GuestNetwork` and `NetworkReconcile`:
-//!   the address ledger, the quarantine protocol, and a `UserNat` NIC per
-//!   lease whose datapath the driver builds in the VMM's process.
+//!   the address ledger, the quarantine protocol, and per lease either a
+//!   datapath of its own ([`DatapathPlacement::Network`], a
+//!   `FileHandle` NIC, for VZ) or a `UserNat` NIC whose datapath the
+//!   driver builds in the VMM's process ([`DatapathPlacement::Driver`],
+//!   for HV).
 //! - [`Pool`] — the subnet leases are taken from.
 //! - [`DnsPublisher`] — the composer's callback that publishes a live
 //!   lease's name.
+//! - [`DatapathServices`] — what every datapath shares with the host: DNS
+//!   ownership, the egress proxy, the NIC MTU.
 //!
 //! The crate is empty on other platforms.
 
 #![cfg(target_os = "macos")]
 
+mod datapath;
 mod dns;
 mod network;
 mod pool;
+mod port_forward;
 
+pub use datapath::{DEFAULT_MTU, DatapathServices};
 pub use dns::{DnsPublisher, NoDns};
-pub use network::{HostNetwork, NIC_ID};
+pub use network::{DatapathPlacement, HostNetwork, NIC_ID};
 pub use pool::Pool;

@@ -5,16 +5,19 @@ use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use arcbox_net::darwin::datapath_loop::DatapathControl;
 use arcbox_net::darwin::guest_nat;
 use arcbox_vm_driver::net::{
     AttachMode, GuestNetwork, HostIngress, NetworkIdentity, NetworkLease, NetworkMode,
     NetworkPolicy, NetworkReconcile,
 };
-use arcbox_vm_driver::{Error, NicAttachment, NicSpec, Result, VmId};
+use arcbox_vm_driver::{Error, NicAttachment, NicSpec, PortForward, Result, VmId};
 use async_trait::async_trait;
 
+use crate::datapath::{DatapathServices, VmDatapath};
 use crate::dns::DnsPublisher;
 use crate::pool::Pool;
+use crate::port_forward::InboundForward;
 
 mod reconcile;
 
@@ -24,34 +27,58 @@ pub const NIC_ID: &str = "eth0";
 /// The prefix of the guest link: the datapath's DHCP hands out a /24.
 const GUEST_PREFIX_LEN: u8 = 24;
 
+/// Where a VM's datapath runs, which decides the NIC its driver boots with.
+///
+/// Either way each VM gets a datapath of its own, built by
+/// `arcbox_net::darwin::guest_nat` on the same fixed guest link, so what
+/// [`GuestNetwork::identity`] tells the guest holds under both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatapathPlacement {
+    /// This network runs the datapath in the calling process and lends the
+    /// VMM the other end of its socketpair as
+    /// [`NicAttachment::FileHandle`]. Port forwarding and checkpoint
+    /// resets come from [`HostNetwork::take_port_forward`] and
+    /// [`HostNetwork::datapath_control`]. For VZ, whose VMs run in this
+    /// process.
+    Network,
+    /// The driver builds the datapath inside the VMM's process from
+    /// [`NicAttachment::UserNat`] and serves port forwarding and checkpoint
+    /// resets there. For HV, whose VMM is a process per sandbox and injects
+    /// guest-bound frames straight into guest memory from that process.
+    Driver,
+}
+
 /// The macOS guest network for host sandboxes.
 ///
 /// Every guest boots on the same fixed link — `10.0.2.2/24` behind
 /// `10.0.2.1`, which is also its resolver — alone behind its own datapath,
-/// which the driver builds in the VMM's process from the
-/// [`NicAttachment::UserNat`] NIC this network hands out. There is no host
-/// bridge between guests, no guest can address another (ADR 0010, D1), and
-/// a checkpoint restores into any lease. The lease's pool address is the
-/// VM's identity on the host: it is what the [`DnsPublisher`] publishes and
-/// what the sandbox API reports, and it is never routed.
+/// so there is no host bridge between guests and no guest can address
+/// another (ADR 0010, D1), and a checkpoint restores into any lease. The
+/// lease's pool address is the VM's identity on the host: it is what the
+/// [`DnsPublisher`] publishes and what the sandbox API reports, and it is
+/// never routed.
 ///
-/// Cheap to clone; clones share one ledger.
+/// Cheap to clone; clones share one ledger. [`HostNetwork::with_placement`]
+/// gives a second view on the same ledger for the other backend, so VZ and
+/// HV sandboxes never share a pool address.
 ///
-/// Nothing this network installs outlives its process — the datapath is
-/// the VMM's and DNS lives in the composer — so it has no startup sweep:
-/// [`NetworkReconcile::startup_cleanup_token`] is always `None`. Quarantine
-/// still holds an address until the composer confirms its own host state
-/// for that lease (port forwards, DNS it published by other means) is
-/// gone. `reserve` waits for [`NetworkReconcile::replay_complete`], so a
-/// fresh lease cannot take the address of a guest that is still running
-/// and not yet adopted.
+/// Nothing this network installs outlives its process — datapaths and the
+/// listeners they forward from die with it, and DNS lives in the composer —
+/// so it has no startup sweep: [`NetworkReconcile::startup_cleanup_token`]
+/// is always `None`. Quarantine still holds an address until the composer
+/// confirms its own host state for that lease (port forwards, DNS it
+/// published by other means) is gone. `reserve` waits for
+/// [`NetworkReconcile::replay_complete`], so a fresh lease cannot take the
+/// address of a guest that is still running and not yet adopted.
 #[derive(Clone)]
 pub struct HostNetwork {
     shared: Arc<Shared>,
+    placement: DatapathPlacement,
 }
 
 struct Shared {
     pool: Pool,
+    services: DatapathServices,
     dns: Arc<dyn DnsPublisher>,
     state: Mutex<State>,
 }
@@ -68,19 +95,74 @@ struct State {
 
 struct Live {
     lease: NetworkLease,
+    /// The datapath this network runs for the lease, once activated under
+    /// [`DatapathPlacement::Network`].
+    datapath: Option<VmDatapath>,
 }
 
 impl HostNetwork {
-    /// A network leasing from `pool`, whose live leases are published
-    /// through `dns`.
-    pub fn new(pool: Pool, dns: Arc<dyn DnsPublisher>) -> Self {
+    /// A network leasing from `pool`, whose datapaths share `services` and
+    /// whose live leases are published through `dns`.
+    pub fn new(
+        pool: Pool,
+        placement: DatapathPlacement,
+        services: DatapathServices,
+        dns: Arc<dyn DnsPublisher>,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 pool,
+                services,
                 dns,
                 state: Mutex::new(State::default()),
             }),
+            placement,
         }
+    }
+
+    /// This network, attaching NICs the way `placement` says, over the same
+    /// ledger.
+    #[must_use]
+    pub fn with_placement(&self, placement: DatapathPlacement) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            placement,
+        }
+    }
+
+    /// Where this view runs its VMs' datapaths.
+    pub const fn placement(&self) -> DatapathPlacement {
+        self.placement
+    }
+
+    /// The control handle of the datapath this network runs for `vm`: the
+    /// TCP resets a checkpoint collects and a restore hands back
+    /// ([`DatapathControl::abort_tcp`], [`DatapathControl::send_to_guest`]).
+    /// `None` unless `vm` holds a live lease activated under
+    /// [`DatapathPlacement::Network`].
+    pub fn datapath_control(&self, vm: &VmId) -> Option<DatapathControl> {
+        self.state()
+            .live
+            .get(vm)
+            .and_then(|live| live.datapath.as_ref())
+            .map(VmDatapath::control)
+    }
+
+    /// Port forwarding into `vm` through the datapath this network runs for
+    /// it, once per activation. `None` when it was taken already or `vm`
+    /// has no datapath here (see [`Self::datapath_control`]).
+    ///
+    /// Its listeners are host forwarding state that outlives the lease:
+    /// [`PortForward::clear`] them before finalizing the lease's cleanup.
+    pub fn take_port_forward(&self, vm: &VmId) -> Option<Box<dyn PortForward>> {
+        let manager = self
+            .state()
+            .live
+            .get_mut(vm)?
+            .datapath
+            .as_mut()?
+            .take_inbound()?;
+        Some(Box::new(InboundForward::new(manager)))
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -214,12 +296,16 @@ impl GuestNetwork for HostNetwork {
             vm.clone(),
             Live {
                 lease: lease.clone(),
+                datapath: None,
             },
         );
         Ok(lease)
     }
 
-    /// Publishes the lease's name and hands the driver a `UserNat` NIC.
+    /// Starts the lease's datapath (under [`DatapathPlacement::Network`])
+    /// and publishes its name. Activating again replaces the datapath: the
+    /// previous VMM's link goes dead, and so does a port forward taken from
+    /// it.
     async fn activate(&self, lease: &NetworkLease, mode: AttachMode) -> Result<NicSpec> {
         require_invariant(lease, mode)?;
         {
@@ -241,9 +327,27 @@ impl GuestNetwork for HostNetwork {
                 Some(_) => {}
             }
         }
+        let datapath = match self.placement {
+            DatapathPlacement::Network => Some(VmDatapath::start(&self.shared.services)?),
+            DatapathPlacement::Driver => None,
+        };
+        let attachment = match &datapath {
+            Some(datapath) => NicAttachment::FileHandle {
+                fd: datapath.vm_fd(),
+            },
+            None => NicAttachment::UserNat,
+        };
         self.shared.dns.register(&lease.vm, lease.ip).await?;
-        if !self.state().is_live(lease) {
+
+        let installed = match self.state().live.get_mut(&lease.vm) {
+            Some(live) if live.lease == *lease => {
+                Ok(std::mem::replace(&mut live.datapath, datapath))
+            }
+            _ => Err(datapath),
+        };
+        if let Err(unused) = installed {
             // Quarantined or released while the name was being published.
+            drop(unused);
             self.deregister_unless_live(&lease.vm).await;
             return Err(Error::Network(format!(
                 "vm {} lease changed while it was being activated",
@@ -253,14 +357,22 @@ impl GuestNetwork for HostNetwork {
         Ok(NicSpec {
             id: NIC_ID.to_owned(),
             mac: lease.mac,
-            attachment: NicAttachment::UserNat,
+            attachment,
         })
     }
 
     /// Re-registers a lease whose guest is still running and republishes
-    /// its name; the datapath lives in the VMM's process and survived.
+    /// its name. Only a driver-placed datapath survives this process: under
+    /// [`DatapathPlacement::Network`] the datapath died with the previous
+    /// process, so adoption is refused and the owner tears the VM down.
     async fn adopt(&self, lease: &NetworkLease, mode: AttachMode) -> Result<()> {
         require_invariant(lease, mode)?;
+        if self.placement == DatapathPlacement::Network {
+            return Err(Error::Network(format!(
+                "vm {}: its datapath ran in the previous process and cannot be re-established",
+                lease.vm
+            )));
+        }
         let host = self.host_of(lease)?;
         {
             let mut state = self.state();
@@ -289,6 +401,7 @@ impl GuestNetwork for HostNetwork {
                 lease.vm.clone(),
                 Live {
                     lease: lease.clone(),
+                    datapath: None,
                 },
             );
         }
@@ -303,11 +416,11 @@ impl GuestNetwork for HostNetwork {
         Ok(())
     }
 
-    /// Withdraws the lease's name and keeps the address until the cleanup
-    /// protocol finalizes it. Idempotent.
+    /// Stops the lease's datapath, withdraws its name, and keeps the
+    /// address until the cleanup protocol finalizes it. Idempotent.
     async fn quarantine(&self, lease: NetworkLease) -> Result<()> {
         let host = self.host_of(&lease)?;
-        {
+        let datapath = {
             let mut state = self.state();
             if let Some(existing) = state.quarantined.get(&lease.vm) {
                 if existing.cleanup_token == lease.cleanup_token {
@@ -318,9 +431,9 @@ impl GuestNetwork for HostNetwork {
                     lease.vm
                 )));
             }
-            match state.live.get(&lease.vm) {
+            let datapath = match state.live.get(&lease.vm) {
                 Some(live) if live.lease == lease => {
-                    state.live.remove(&lease.vm);
+                    state.live.remove(&lease.vm).and_then(|live| live.datapath)
                 }
                 Some(_) => return Err(state.stale(&lease)),
                 // A lease replayed from a durable record after a restart is
@@ -330,18 +443,22 @@ impl GuestNetwork for HostNetwork {
                     if !state.used.insert(host) {
                         return Err(state.stale(&lease));
                     }
+                    None
                 }
-            }
+            };
             state.quarantined.insert(lease.vm.clone(), lease.clone());
-        }
+            datapath
+        };
+        drop(datapath);
         self.shared.dns.deregister(&lease.vm).await;
         Ok(())
     }
 
-    /// Withdraws the lease's name and returns the address outright. Releasing what is already released does nothing.
+    /// Stops the lease's datapath, withdraws its name, and returns the
+    /// address outright. Releasing what is already released does nothing.
     async fn release(&self, lease: NetworkLease) -> Result<()> {
         let host = self.host_of(&lease)?;
-        {
+        let datapath = {
             let mut state = self.state();
             let current = state
                 .live
@@ -352,13 +469,14 @@ impl GuestNetwork for HostNetwork {
                 Some(current) if *current == lease => {
                     state.quarantined.remove(&lease.vm);
                     state.used.remove(&host);
-                    state.live.remove(&lease.vm);
+                    state.live.remove(&lease.vm).and_then(|live| live.datapath)
                 }
                 Some(_) => return Err(state.stale(&lease)),
                 None if state.used.contains(&host) => return Err(state.stale(&lease)),
                 None => return Ok(()),
             }
-        }
+        };
+        drop(datapath);
         self.shared.dns.deregister(&lease.vm).await;
         Ok(())
     }
@@ -386,7 +504,7 @@ impl GuestNetwork for HostNetwork {
 
     /// Refused: nothing on the host routes to a host VM, so there is no
     /// address a DNAT rule could target. Ports reach the guest through a
-    /// `PortForward`: the driver's.
+    /// `PortForward` — the driver's, or [`HostNetwork::take_port_forward`].
     fn host_ingress(&self, lease: &NetworkLease) -> Result<HostIngress> {
         Err(Error::Network(format!(
             "vm {}: host VMs take no DNAT ingress; forward ports through PortForward",

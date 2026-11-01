@@ -14,7 +14,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use arcbox_host_net::{HostNetwork, NoDns, Pool};
+use arcbox_host_net::{DatapathPlacement, DatapathServices, HostNetwork, NoDns, Pool};
 use arcbox_vm_driver::net::{AttachMode, GuestNetwork, NetworkLease, NetworkMode, NetworkPolicy};
 use arcbox_vm_driver::testkit::FakeNetwork;
 use arcbox_vm_driver::{Error, VmId};
@@ -59,8 +59,12 @@ impl Settled for FakeNetwork {
 
 impl Settled for HostNetwork {
     fn settled() -> Self {
+        // Driver placement: adoption is part of the contract, and only a
+        // driver-placed datapath survives the process that started it.
         let net = Self::new(
             Pool::new(Ipv4Addr::new(10, 200, 0, 0), 16).unwrap(),
+            DatapathPlacement::Driver,
+            DatapathServices::default(),
             Arc::new(NoDns),
         );
         net.reconcile().unwrap().replay_complete();
