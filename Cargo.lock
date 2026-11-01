@@ -901,6 +901,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-hv-driver"
+version = "0.10.5"
+dependencies = [
+ "arcbox-fakeip",
+ "arcbox-vm-driver",
+ "arcbox-vmm",
+ "async-trait",
+ "libc",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arcbox-hypervisor"
 version = "0.11.3"
 dependencies = [

@@ -43,6 +43,7 @@ members = [
     "virt/arcbox-vm-driver",
     "virt/arcbox-fc-driver",
     "virt/arcbox-vz-driver",
+    "virt/arcbox-hv-driver",
     "virt/arcbox-tap-net",
     "virt/arcbox-host-net",
     "virt/arcbox-vm-agent",
@@ -285,6 +286,7 @@ arcbox-vm-proto = { version = "0.11.3", path = "virt/arcbox-vm-proto" } # x-rele
 arcbox-vm-driver = { version = "0.11.3", path = "virt/arcbox-vm-driver" } # x-release-please-version
 arcbox-fc-driver = { version = "0.11.3", path = "virt/arcbox-fc-driver" } # x-release-please-version
 arcbox-vz-driver = { version = "0.11.3", path = "virt/arcbox-vz-driver" } # x-release-please-version
+arcbox-hv-driver = { version = "0.11.3", path = "virt/arcbox-hv-driver" } # x-release-please-version
 arcbox-tap-net = { version = "0.11.3", path = "virt/arcbox-tap-net" } # x-release-please-version
 arcbox-host-net = { version = "0.11.3", path = "virt/arcbox-host-net" } # x-release-please-version
 arcbox-fs = { version = "0.11.3", path = "virt/arcbox-fs" } # x-release-please-version
