@@ -27,10 +27,10 @@ use crate::snapshot_cow::CowManager;
 pub struct NodeEnvironment {
     /// The VMM the sandboxes run under, behind the driver port
     /// (`arcbox_vm_driver::VmDriver`). It must offer `vsock`, which the
-    /// guest agent is reached over, and `Prepare`: the boot and warm-pool
-    /// flows spawn the VMM ahead of the guest. `Staging` is optional: a
-    /// driver without it (VZ, HV) is handed host paths. A driver missing
-    /// one of these, or what the agent's readiness gate needs, is refused by
+    /// guest agent is reached over. `Prepare` and `Staging` are optional: a
+    /// driver without `Prepare` (VZ) starts its VMM at boot and gets no warm
+    /// pool, and one without `Staging` (VZ, HV) is handed host paths. A
+    /// driver missing what the agent's readiness gate needs is refused by
     /// [`ComputerManager::new`](crate::ComputerManager::new) rather than at
     /// the first boot.
     pub driver: Arc<dyn VmDriver>,

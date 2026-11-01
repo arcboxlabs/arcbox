@@ -176,7 +176,14 @@ async fn stage_slot(
     slot_id: &str,
     vm_dir: &Path,
 ) -> std::result::Result<StagedSlot, SlotFailure> {
-    let prepare = super::vmm::prepare_capability(driver);
+    // A slot is a VMM spawned ahead of its restore; a driver that spawns at
+    // boot has nothing to pre-warm (`spawn_pool_refill` never asks it).
+    let prepare = driver.prepare().ok_or_else(|| {
+        ComputerError::Config(format!(
+            "restore slot pooling needs a driver with Prepare; `{}` has none",
+            driver.name()
+        ))
+    })?;
     let prepared: Arc<dyn PreparedVm> = Arc::from(
         prepare
             .prepare(
@@ -347,7 +354,9 @@ pub fn spawn_pool_refill(
     snapshots: &Arc<SnapshotCatalog>,
     snapshot_id: &str,
 ) {
-    if !super::relocatable_checkpoints(config, driver.as_ref()) {
+    // Warm prespawn is the one thing a driver without `Prepare` cannot do:
+    // its VMM starts at boot, so a slot would hold nothing.
+    if driver.prepare().is_none() || !super::relocatable_checkpoints(config, driver.as_ref()) {
         return;
     }
     {

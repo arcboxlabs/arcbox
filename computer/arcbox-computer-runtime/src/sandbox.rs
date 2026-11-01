@@ -130,14 +130,15 @@ impl ComputerManager {
     /// Create a new manager from the given configuration, over the
     /// environment-specific components the composer supplies.
     ///
-    /// `Staging` is optional (see [`vmm`]): without it the VM is handed
-    /// host paths.
+    /// `Prepare` and `Staging` are optional (see [`vmm`]): without
+    /// `Prepare` the VMM starts at boot and the warm pool stays empty,
+    /// without `Staging` the VM is handed host paths.
     ///
     /// Fails with [`ComputerError::Config`] when the environment's driver lacks a
-    /// capability every sandbox needs — `Prepare` (the flows spawn the VMM
-    /// ahead of the guest), `Vsock` (the guest agent is reached over it), or
-    /// whatever the agent factory's readiness gate needs (`VsockListen` for
-    /// the guest's dial-out) — or when its guest
+    /// capability every sandbox needs — `Vsock` (the guest agent is reached
+    /// over it), or whatever the agent factory's readiness gate needs (a
+    /// dial-out is listened for on a VMM spawned ahead of the guest, so it
+    /// needs `Prepare` and `VsockListen`) — or when its guest
     /// network offers no `NetworkReconcile` (the cleanup-token protocol is
     /// how a host releases the addresses a previous process held), so an
     /// environment missing one is refused here instead of at the first boot
@@ -153,9 +154,10 @@ impl ComputerManager {
         let dial_out = matches!(agent.readiness(), Readiness::DialOut { .. });
         for (missing, capability, need) in [
             (
-                driver.prepare().is_none(),
+                dial_out && driver.prepare().is_none(),
                 "prepare",
-                "the boot and pool flows spawn the VMM ahead of the guest",
+                "the readiness gate is the guest's vsock dial-out, which is listened for on a \
+                 VMM spawned ahead of the guest",
             ),
             // The last hard-wired transport assumption in this layer: every
             // agent implementation the crate ships reaches its guest through
