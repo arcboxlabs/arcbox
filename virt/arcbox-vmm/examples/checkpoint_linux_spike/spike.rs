@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -36,11 +36,11 @@ struct Spec {
     append: String,
     /// The last tick line the guest printed before the checkpoint.
     last_tick: String,
-    /// Host ports of the echo, idle and stream servers the guest's TCP
-    /// clients dial (`SPIKE_NET=1`); the machine then has virtio-net and
+    /// Host ports of the echo, idle, stream and stall servers the guest's
+    /// TCP clients dial (`SPIKE_NET=1`); the machine then has virtio-net and
     /// virtio-vsock.
     #[serde(default)]
-    net_ports: Option<[u16; 3]>,
+    net_ports: Option<[u16; 4]>,
     /// The balloon inflation at the checkpoint.
     #[serde(default)]
     balloon_bytes: u64,
@@ -70,7 +70,7 @@ fn config(spec: &Spec, disk: &Path) -> VmmConfig {
         memory_size: spec.memory,
         kernel_path: spec.kernel.clone(),
         kernel_cmdline: match spec.net_ports {
-            Some([a, b, c]) => format!("{CMDLINE} {} spike_net={a},{b},{c}", spec.append),
+            Some([a, b, c, d]) => format!("{CMDLINE} {} spike_net={a},{b},{c},{d}", spec.append),
             None => format!("{CMDLINE} {}", spec.append),
         },
         initrd_path: Some(spec.initrd.clone()),
@@ -104,7 +104,7 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         balloon_bytes: BALLOON_BYTES,
     };
     let echo = if std::env::var("SPIKE_NET").as_deref() == Ok("1") {
-        let servers = Servers::serve([0; 3])?;
+        let servers = Servers::serve([0; 4])?;
         spec.net_ports = Some(servers.ports());
         Some(servers)
     } else {
@@ -318,7 +318,11 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         ticks.len()
     );
     if let (Some(echo), Some(driver)) = (&echo, &driver) {
-        check_net(&saved, last, &lines, t, echo, driver, &mut problems);
+        let pend_saved = spec
+            .net_ports
+            .is_some_and(|p| saved_reset_from(dir, p[3]).unwrap_or(false));
+        let ticks = (&saved, last);
+        check_net(ticks, console, t, echo, driver, pend_saved, &mut problems);
     }
     if problems.is_empty() {
         println!("[restore] OK");
@@ -364,14 +368,15 @@ fn check_saved_mac(dir: &Path, console: &Console) -> Result<()> {
 /// Spike 4: the stale connections of the checkpointed process end in the
 /// guest at once, and new ones carry traffic.
 fn check_net(
-    saved: &Tick,
-    last: &Tick,
-    lines: &[String],
+    (saved, last): (&Tick, &Tick),
+    console: &Console,
     t: Instant,
     servers: &Servers,
     driver: &VsockDriver,
+    pend_saved: bool,
     problems: &mut Vec<String>,
 ) {
+    let lines = console.lines();
     let (Some(before), Some(after)) = (saved.net, last.net) else {
         problems.push("tick lines carry no net counters".into());
         return;
@@ -409,7 +414,7 @@ fn check_net(
     };
     if !lines
         .iter()
-        .filter(|l| l.contains("-end "))
+        .filter(|l| l.contains("-end ") && !l.starts_with("pend-end"))
         .all(|l| reset(&l))
     {
         problems.push("a connection ended other than by a reset".into());
@@ -446,6 +451,64 @@ fn check_net(
     if d(4) != 1 {
         problems.push(format!("{} vsock connections ended, expected 1", d(4)));
     }
+    check_handshake_and_lease(&d, console, t, pend_saved, problems);
+}
+
+/// Whether the checkpoint in `dir` saved a reset from host port `port`, that
+/// is, whether the guest's dial to it was pending in the datapath. The
+/// pend client sleeps between dials and its SYN takes a moment to reach the
+/// host, so a checkpoint can land outside a pending dial.
+fn saved_reset_from(dir: &Path, port: u16) -> Result<bool> {
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("state.json"))?)?;
+    let resets = state["tcp_resets"].as_array().ok_or("no tcp_resets")?;
+    // Ethernet (14) + IPv4 without options (20), then the TCP source port.
+    Ok(resets.iter().any(|frame| {
+        let byte = |i: usize| frame[i].as_u64().unwrap_or(0) as u16;
+        ((byte(34) << 8) | byte(35)) == port
+    }))
+}
+
+/// The gap follow-up: a connect pending in the datapath at the checkpoint
+/// fails at once after the restore, and the new datapath renews the lease
+/// the old one granted.
+fn check_handshake_and_lease(
+    d: &dyn Fn(usize) -> u64,
+    console: &Console,
+    t: Instant,
+    pend_saved: bool,
+    problems: &mut Vec<String>,
+) {
+    println!(
+        "[restore] dhcp: {} renewals acked, {} timed out after restore",
+        d(8),
+        d(9)
+    );
+    if d(8) == 0 {
+        problems.push("no DHCP renewal was acked after restore".into());
+    }
+    // The new datapath never saw the pending dial, so only the reset the
+    // checkpoint saved can end it at once. Without that reset the guest
+    // retransmits its SYN into a fresh 5 s dial. The guest's own wait
+    // includes the time before the checkpoint, so it is no evidence.
+    if !pend_saved {
+        println!("[restore] pending connect: none was pending at the checkpoint");
+        return;
+    }
+    match console.first(|l| l.starts_with("pend-end ")) {
+        Some((at, line)) => {
+            println!(
+                "[restore] pending connect: {line}, {:.0} ms after hv_restore was called",
+                ms(at.duration_since(t))
+            );
+            if !line.contains("errno 111") {
+                problems.push(format!("pending connect ended by {line}"));
+            }
+            if at.duration_since(t) > Duration::from_secs(1) {
+                problems.push("pending connect ended more than 1 s after the restore".into());
+            }
+        }
+        None => problems.push("the pending connect did not end".into()),
+    }
 }
 
 /// One `tick` line from `guest/init.c`.
@@ -455,19 +518,22 @@ struct Tick {
     ops: [u64; 4],
     fails: u64,
     /// TCP echo ok, reset, timeout; vsock ok, ended; idle ended; download
-    /// KiB, ended (`spike_net`).
-    net: Option<[u64; 8]>,
+    /// KiB, ended; DHCP renewals acked, timed out; pending connects ended
+    /// (`spike_net`).
+    net: Option<[u64; 11]>,
 }
 
 impl Tick {
     fn parse(line: &str) -> Option<Self> {
         let f: Vec<&str> = line.split_whitespace().collect();
-        if !matches!(f.len(), 13 | 25) || f[0] != "tick" || f[2] != "mono_ms" || f[6] != "ops" {
+        if !matches!(f.len(), 13 | 30) || f[0] != "tick" || f[2] != "mono_ms" || f[6] != "ops" {
             return None;
         }
         let n = |i: usize| f[i].parse::<u64>().ok();
-        let net = if f.len() == 25 {
-            if (f[13], f[17], f[20], f[22]) != ("net", "vsock", "idle", "down") {
+        let net = if f.len() == 30 {
+            if (f[13], f[17], f[20], f[22], f[25], f[28])
+                != ("net", "vsock", "idle", "down", "dhcp", "pend")
+            {
                 return None;
             }
             Some([
@@ -479,6 +545,9 @@ impl Tick {
                 n(21)?,
                 n(23)?,
                 n(24)?,
+                n(26)?,
+                n(27)?,
+                n(29)?,
             ])
         } else {
             None
@@ -499,19 +568,89 @@ struct Servers {
     echo: Server,
     idle: Server,
     stream: Server,
+    stall: Stall,
 }
 
 impl Servers {
-    fn serve([echo, idle, stream]: [u16; 3]) -> Result<Self> {
+    fn serve([echo, idle, stream, stall]: [u16; 4]) -> Result<Self> {
         Ok(Self {
             echo: Server::serve(echo, Behavior::Echo)?,
             idle: Server::serve(idle, Behavior::Idle)?,
             stream: Server::serve(stream, Behavior::Stream)?,
+            stall: Stall::serve(stall)?,
         })
     }
 
-    fn ports(&self) -> [u16; 3] {
-        [self.echo.port, self.idle.port, self.stream.port]
+    fn ports(&self) -> [u16; 4] {
+        [
+            self.echo.port,
+            self.idle.port,
+            self.stream.port,
+            self.stall.port,
+        ]
+    }
+}
+
+/// A listener whose one-slot backlog the probe fills itself, so the kernel
+/// drops every further SYN: a connect to it stays pending until it times
+/// out.
+struct Stall {
+    port: u16,
+    _listener: TcpListener,
+    _queued: Vec<TcpStream>,
+}
+
+impl Stall {
+    fn serve(port: u16) -> Result<Self> {
+        // SAFETY: plain socket calls on a descriptor this function owns;
+        // `addr` outlives the bind.
+        let listener = unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let listener = TcpListener::from_raw_fd(fd);
+            let one: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                (&raw const one).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let addr = libc::sockaddr_in {
+                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: port.to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
+                },
+                sin_zero: [0; 8],
+            };
+            if libc::bind(
+                fd,
+                (&raw const addr).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            ) != 0
+                || libc::listen(fd, 1) != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            listener
+        };
+        let addr = listener.local_addr()?;
+        let mut queued = Vec::new();
+        while let Ok(conn) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+            queued.push(conn);
+            if queued.len() > 16 {
+                return Err("the stall listener's backlog never filled".into());
+            }
+        }
+        Ok(Self {
+            port: addr.port(),
+            _listener: listener,
+            _queued: queued,
+        })
     }
 }
 
@@ -676,7 +815,7 @@ impl VsockDriver {
 /// Collects the guest's hvc0 lines (the `guest_console` tracing target)
 /// and echoes them.
 #[derive(Clone, Default)]
-struct Console(Arc<Mutex<Vec<String>>>);
+struct Console(Arc<Mutex<Vec<(Instant, String)>>>);
 
 impl Console {
     fn install() -> Self {
@@ -694,11 +833,27 @@ impl Console {
     }
 
     fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap().clone()
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, l)| l.clone())
+            .collect()
     }
 
     fn last(&self, f: impl Fn(&str) -> bool) -> Option<String> {
-        self.0.lock().unwrap().iter().rev().find(|l| f(l)).cloned()
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(_, l)| f(l))
+            .map(|(_, l)| l.clone())
+    }
+
+    /// The first matching line and when it arrived.
+    fn first(&self, f: impl Fn(&str) -> bool) -> Option<(Instant, String)> {
+        self.0.lock().unwrap().iter().find(|(_, l)| f(l)).cloned()
     }
 
     fn wait_for(&self, f: impl Fn(&str) -> bool, timeout: Duration) -> Result<String> {
@@ -731,7 +886,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Console {
         let mut m = Message(String::new());
         event.record(&mut m);
         println!("  guest| {}", m.0);
-        self.0.lock().unwrap().push(m.0);
+        self.0.lock().unwrap().push((Instant::now(), m.0));
     }
 }
 

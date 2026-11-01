@@ -25,9 +25,9 @@
  *
  * A console thread reads lines from hvc0 and prints each as "rx <line>".
  *
- * With spike_net=<echo>,<idle>,<stream> (spikes 4 and 5, host TCP ports),
- * eth0 comes up as 10.0.2.2/24 and four more threads run, each
- * reconnecting when its connection ends:
+ * With spike_net=<echo>,<idle>,<stream>,<stall> (spikes 4 and 5 and the
+ * gap follow-up, host TCP ports), eth0 comes up as 10.0.2.2/24 and six more
+ * threads run, each reconnecting when its connection ends:
  *
  * - echo: sends an 8-byte counter to 10.0.2.1:<echo> every 10 ms and
  *   checks the echo, with a 5 s receive timeout;
@@ -35,12 +35,18 @@
  *   recv with no timeout, so it sends nothing a host could answer;
  * - download: reads the host's endless little-endian u64 counter stream
  *   from 10.0.2.1:<stream> and checks every word;
- * - a vsock echo server on port 5000, one host connection at a time.
+ * - a vsock echo server on port 5000, one host connection at a time;
+ * - dhcp: renews 10.0.2.2's lease every 300 ms the way a renewing client
+ *   does, from a UDP socket bound to 10.0.2.2:68 with ciaddr set, and
+ *   checks the ACK keeps the address; a NAK or another address is a FAIL;
+ * - pend: dials 10.0.2.1:<stall>, whose host listener never completes a
+ *   handshake, so the connect is pending in the datapath almost all the
+ *   time; prints how long each connect took to fail.
  *
  * The tick line gains
  *
  *   ... net <ok> <reset> <timeout> vsock <ok> <ended> idle <ended>
- *       down <kib> <ended>
+ *       down <kib> <ended> dhcp <ok> <timeout> pend <ended>
  *
  * <reset> counts ECONNRESET/EPIPE and <timeout> counts receive timeouts of
  * the echo client; every <ended> counts connections that ended, by EOF or
@@ -187,7 +193,8 @@ static uint64_t now_ms(clockid_t c) {
 
 static volatile uint64_t net_ok, net_reset, net_timeout, vsock_ok, vsock_ended;
 static volatile uint64_t idle_ended, down_bytes, down_ended;
-static uint16_t ports[3];
+static volatile uint64_t dhcp_ok, dhcp_timeout, pend_ended;
+static uint16_t ports[4];
 
 static int if_set(int fd, unsigned long req, const char *addr) {
     struct ifreq ifr = {0};
@@ -325,6 +332,78 @@ static void *tcp_client(void *arg) {
     }
 }
 
+/* Connects to the host's stalled listener; the connect fails only by a
+ * reset (ECONNREFUSED), from the datapath's dial timeout or a restore. */
+static void *pend_client(void *arg) {
+    (void)arg;
+    struct sockaddr_in to = {.sin_family = AF_INET, .sin_port = htons(ports[3])};
+    inet_pton(AF_INET, "10.0.2.1", &to.sin_addr);
+    for (;;) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        uint64_t t = now_ms(CLOCK_MONOTONIC);
+        int r = connect(fd, (struct sockaddr *)&to, sizeof to);
+        int e = r ? errno : 0;
+        pend_ended++;
+        printf("pend-end errno %d after %llu ms\n", e,
+               (unsigned long long)(now_ms(CLOCK_MONOTONIC) - t));
+        close(fd);
+        usleep(100000);
+    }
+}
+
+/* A BOOTP/DHCP message with the options a renewing client sends. */
+struct dhcp_msg {
+    uint8_t op, htype, hlen, hops;
+    uint32_t xid;
+    uint16_t secs, flags;
+    uint32_t ciaddr, yiaddr, siaddr, giaddr;
+    uint8_t chaddr[16], sname[64], file[128];
+    uint8_t magic[4], options[60];
+};
+
+/* Renews 10.0.2.2's lease as a client in RENEWING does (RFC 2131 4.4.5):
+ * unicast to the server from the leased address, which is the only address
+ * the client listens on. */
+static void *dhcp_client(void *arg) {
+    (void)arg;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in me = {.sin_family = AF_INET, .sin_port = htons(68)};
+    inet_pton(AF_INET, "10.0.2.2", &me.sin_addr);
+    struct timeval tmo = {.tv_sec = 2};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof tmo);
+    struct ifreq ifr = {0};
+    strcpy(ifr.ifr_name, "eth0");
+    if (bind(fd, (struct sockaddr *)&me, sizeof me) || ioctl(fd, SIOCGIFHWADDR, &ifr)) {
+        printf("FAIL dhcp socket errno %d\n", errno);
+        fails++;
+        return NULL;
+    }
+    struct sockaddr_in server = {.sin_family = AF_INET, .sin_port = htons(67)};
+    inet_pton(AF_INET, "10.0.2.1", &server.sin_addr);
+    for (uint32_t xid = 1;; xid++) {
+        struct dhcp_msg m = {.op = 1, .htype = 1, .hlen = 6, .xid = htonl(xid)};
+        m.ciaddr = me.sin_addr.s_addr;
+        memcpy(m.chaddr, ifr.ifr_hwaddr.sa_data, 6);
+        memcpy(m.magic, "\x63\x82\x53\x63", 4);
+        memcpy(m.options, "\x35\x01\x03\xff", 4); /* DHCPREQUEST, end */
+        sendto(fd, &m, sizeof m, 0, (struct sockaddr *)&server, sizeof server);
+        struct dhcp_msg r;
+        ssize_t n;
+        /* Skip replies to earlier requests. */
+        while ((n = recv(fd, &r, sizeof r, 0)) >= 240 && r.xid != m.xid)
+            ;
+        if (n < 240) {
+            dhcp_timeout++;
+        } else if (r.options[0] != 0x35 || r.options[2] != 5 || r.yiaddr != m.ciaddr) {
+            printf("FAIL dhcp reply type %d yiaddr %08x\n", r.options[2], ntohl(r.yiaddr));
+            fails++;
+        } else {
+            dhcp_ok++;
+        }
+        usleep(300000);
+    }
+}
+
 static void *console_reader(void *arg) {
     (void)arg;
     char line[256];
@@ -388,7 +467,7 @@ int main(void) {
             printf("FAIL eth0 errno %d\n", errno);
             fails++;
         }
-        if (sscanf(net, "%hu,%hu,%hu", &ports[0], &ports[1], &ports[2]) != 3) {
+        if (sscanf(net, "%hu,%hu,%hu,%hu", &ports[0], &ports[1], &ports[2], &ports[3]) != 4) {
             printf("FAIL spike_net=%s\n", net);
             fails++;
         }
@@ -397,6 +476,8 @@ int main(void) {
         pthread_create(&t, NULL, idle_client, NULL);
         pthread_create(&t, NULL, download_client, NULL);
         pthread_create(&t, NULL, vsock_server, NULL);
+        pthread_create(&t, NULL, dhcp_client, NULL);
+        pthread_create(&t, NULL, pend_client, NULL);
     }
     pthread_t console;
     pthread_create(&console, NULL, console_reader, NULL);
@@ -409,14 +490,17 @@ int main(void) {
     for (uint64_t n = 1;; n++) {
         next.tv_sec += 1;
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
-        char extra[200] = "";
+        char extra[300] = "";
         if (net)
             snprintf(extra, sizeof extra,
-                     " net %llu %llu %llu vsock %llu %llu idle %llu down %llu %llu",
+                     " net %llu %llu %llu vsock %llu %llu idle %llu down %llu %llu"
+                     " dhcp %llu %llu pend %llu",
                      (unsigned long long)net_ok, (unsigned long long)net_reset,
                      (unsigned long long)net_timeout, (unsigned long long)vsock_ok,
                      (unsigned long long)vsock_ended, (unsigned long long)idle_ended,
-                     (unsigned long long)(down_bytes >> 10), (unsigned long long)down_ended);
+                     (unsigned long long)(down_bytes >> 10), (unsigned long long)down_ended,
+                     (unsigned long long)dhcp_ok, (unsigned long long)dhcp_timeout,
+                     (unsigned long long)pend_ended);
         printf("tick %llu mono_ms %llu real %llu ops %llu %llu %llu %llu fails %llu%s\n",
                (unsigned long long)n, (unsigned long long)(now_ms(CLOCK_MONOTONIC) - start),
                (unsigned long long)(now_ms(CLOCK_REALTIME) / 1000), (unsigned long long)ops[0],

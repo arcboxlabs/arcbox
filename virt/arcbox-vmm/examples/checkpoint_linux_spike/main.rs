@@ -23,7 +23,8 @@
 //! after the restore), `SPIKE_NET=1` (save: add virtio-net and vsock, keep a
 //! guest TCP connection to a host echo server and a host vsock connection to
 //! a guest echo server busy, and check after the restore that both stale
-//! connections end at once and new ones work; spike 4),
+//! connections end at once and new ones work; spike 4; with it the guest
+//! also renews its DHCP lease and keeps a connect pending in the datapath),
 //! `SPIKE_RESAVE=<dir2>` (restore: checkpoint the restored machine into
 //! `<dir2>` at the end of the run, a second generation that `restore`
 //! resumes like any other). Every run also holds a balloon inflation and

@@ -2,12 +2,14 @@
 # HV checkpoint spikes 4 and 5 matrix: the spike 3 Linux guest with
 # virtio-net and virtio-vsock carrying live connections across the
 # checkpoint: a TCP echo client, an idle TCP client blocked in recv, a TCP
-# download and a vsock echo server. Builds the
-# initramfs and the probe, signs it, then runs the baseline, repeated
-# save/restore cycles, a vCPU-count sweep and the spike 3 block-only mode as
-# a regression check. The code-level negative controls are manual; see
-# docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md and
-# docs/experiments/2026-10-31-hv-checkpoint-tcp-reset-spike.md.
+# download and a vsock echo server, plus a DHCP renewal client and a connect
+# left pending in the datapath. Builds the initramfs and the probe, signs it,
+# then runs the baseline, repeated save/restore cycles, a second-generation
+# checkpoint, a vCPU-count sweep and the spike 3 block-only mode as a
+# regression check. The code-level negative controls are manual; see
+# docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md,
+# docs/experiments/2026-10-31-hv-checkpoint-tcp-reset-spike.md and
+# docs/experiments/2026-11-01-hv-checkpoint-gaps.md.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -41,11 +43,14 @@ for i in $(seq 20); do
       sed -n 's/.*hv_restore returned in \([0-9.]*\) ms.*/\1/p' "$work/restore.out"
       sed -n 's/.*first reconnect Some(\([0-9]*\).*first echo Some(\([0-9]*\).*/\1 \2/p' "$work/restore.out"
       sed -n 's/.*idle: 1 ended, reconnect Some(\([0-9]*\).*download.*reconnect Some(\([0-9]*\).*/\1 \2/p' "$work/restore.out"
+      sed -n -e 's/.*pending connect: none.*/-/p' \
+        -e 's/.*pending connect: .*, \([0-9]*\) ms after hv_restore.*/\1/p' "$work/restore.out"
+      sed -n 's/.*dhcp: \([0-9]*\) renewals acked.*/\1/p' "$work/restore.out"
     } | tr '\n' ' ' >>"$work/lat"
     echo >>"$work/lat"
   else
     fail=$((fail + 1))
-    grep -E '^error' "$work/restore.out"
+    grep -E '^error|panicked' "$work/restore.out" || tail -n 3 "$work/restore.out"
   fi
 done
 echo "failed restores: $fail of 20"
@@ -55,9 +60,17 @@ awk '{print $2}' "$work/lat" | stat "TCP reconnect after hv_restore call, ms"
 awk '{print $3}' "$work/lat" | stat "first vsock echo after hv_restore call, ms"
 awk '{print $4}' "$work/lat" | stat "idle TCP reconnect after hv_restore call, ms"
 awk '{print $5}' "$work/lat" | stat "download reconnect after hv_restore call, ms"
+awk '$6 != "-" {print $6}' "$work/lat" | stat "pending connect refused after hv_restore call, ms"
+awk '$6 == "-"' "$work/lat" | wc -l | sed 's/ *\(.*\)/checkpoints with no pending connect: \1/'
+awk '{print $7}' "$work/lat" | stat "DHCP renewals acked in 3 s after restore"
 grep -o '[0-9]* TCP flows' "$work/save" | sort | uniq -c | sed 's/^/flows aborted per checkpoint: /'
 awk '{print $5}' "$work/save" | stat "vCPU pause, ms"
 sed -n 's/.*I\/O drain \([0-9.]*\) ms.*/\1/p' "$work/save" | stat "I/O worker stop, ms"
+
+section "second generation: checkpoint the restored machine, restore that"
+rm -rf "$work/gen2"
+SPIKE_RESAVE="$work/gen2" "$bin" restore "$work/base" 4 | grep -E '^\[restore\] (resaved|OK)'
+"$bin" restore "$work/gen2" 4 | grep -E '^\[restore\] (pending|dhcp|OK)'
 
 section "vCPU count sweep"
 for n in 1 2 8; do
