@@ -161,14 +161,50 @@ impl RootfsBuilder {
         if !Path::new(layer_path).exists() {
             bail!("layer path not found: {layer_path}");
         }
+        // The layer's directory name carries the image digest for either
+        // source kind, making the path a stable identifier.
+        self.convert_cached(
+            RootfsSource::Directory(PathBuf::from(layer_path)),
+            layer_path,
+            pinned,
+        )
+        .await
+    }
 
-        // The cached image has two ingredients, so the key names both: the layer
-        // (whose directory name carries the image digest for either source kind,
-        // making the path a stable identifier) and the `vm-agent` binary injected
-        // below. Keying on the layer alone meant a newer agent never reached an
-        // already-converted image — the sandbox kept booting the old init with no
-        // sign anything was stale.
-        let layer_key = path_hash(layer_path);
+    /// Convert an image the caller resolved (a registry pull) to a bootable
+    /// ext4 rootfs, cached the way [`Self::convert_layer_to_rootfs`] caches
+    /// a layer directory. `digest` names the image's content — the pulled
+    /// platform manifest's digest — and keys the cache.
+    ///
+    /// Returns the path to the generated (or cached) ext4 image.
+    pub async fn convert_image_to_rootfs(
+        &self,
+        image: oci2rootfs::ImageSource,
+        digest: &str,
+        pinned: &BTreeSet<PathBuf>,
+    ) -> crate::error::Result<String> {
+        if digest.is_empty() {
+            return Err(rootfs_err(anyhow::anyhow!(
+                "an image without a manifest digest has no stable cache key"
+            )));
+        }
+        self.convert_cached(RootfsSource::Image(image), digest, pinned)
+            .await
+            .map_err(rootfs_err)
+    }
+
+    async fn convert_cached(
+        &self,
+        source: RootfsSource,
+        source_key: &str,
+        pinned: &BTreeSet<PathBuf>,
+    ) -> Result<String> {
+        // The cached image has two ingredients, so the key names both: the
+        // source and the `vm-agent` binary injected below. Keying on the
+        // source alone meant a newer agent never reached an already-converted
+        // image — the sandbox kept booting the old init with no sign anything
+        // was stale.
+        let layer_key = path_hash(source_key);
         let agent_key = self.vm_agent_key().await?;
         let cache_dir = &self.paths.cache_dir;
         let ext4_path = cache_dir
@@ -182,13 +218,9 @@ impl RootfsBuilder {
             return Ok(ext4_path);
         }
 
-        tracing::info!(layer = %layer_path, ext4 = %ext4_path, "converting image layer to ext4");
-        self.write_and_publish(
-            RootfsSource::Directory(PathBuf::from(layer_path)),
-            Path::new(&ext4_path),
-            TEMPLATE_ROOTFS_SIZE,
-        )
-        .await?;
+        tracing::info!(source = %source_key, ext4 = %ext4_path, "converting image to ext4");
+        self.write_and_publish(source, Path::new(&ext4_path), TEMPLATE_ROOTFS_SIZE)
+            .await?;
 
         sweep_superseded(cache_dir, &layer_key, &agent_key, pinned).await;
 
