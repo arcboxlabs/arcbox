@@ -2,7 +2,7 @@
 
 - Type: experiment
 - Area: `virt/arcbox-vz` (shim save/restore exports, `GenericPlatform` machine identifier); input to the host-side sandbox checkpoint design
-- Outcome: open (spike), stopped by a host condition. Every device set the production System VM attaches supports save/restore. Saving failed every time it was tried, because the Mac's screen was locked. Decision: **a VZ checkpoint is available only while the user's session is unlocked**
+- Outcome: open (spike), stopped by a host condition. Every device set the production System VM attaches supports save/restore. Saving failed every time it was tried, because the Mac's screen was locked. Decision: **a VZ checkpoint is available only while the user's session is unlocked**. Follow-up 2026-11-01: with the session unlocked the same probe saves (16 MiB, ~130 ms for an idle 1 GiB guest) and restores, one state file restores into four VMs at once, and `VzDriver` passes the driver contract's checkpoint checks
 - Probe: `virt/arcbox-vz/examples/checkpoint_vz_spike.rs`, with the guest of [the HV Linux spike](2026-10-31-hv-checkpoint-linux-spike.md)
 - Follows: [the HV TCP-reset spike](2026-10-31-hv-checkpoint-tcp-reset-spike.md)
 - Host / guest: Apple M5 Pro (Mac17,9), 48 GB, macOS 26.5 (25F71). Release
@@ -132,3 +132,76 @@ Record this decision in an ADR when the checkpoint design is written.
 - Whether restore works while locked, and on another Mac or user account.
 - Save size and time for a 1 GiB guest, to compare with HV's 300 ms
   sparse RAM write.
+
+## Follow-up (2026-11-01): the unlocked runs, restore, and the driver
+
+Same host and build (Mac17,9, macOS 26.5 25F71), same kernel and guest,
+release builds. The console session was unlocked throughout:
+`IOConsoleLocked` false and no `CGSSessionScreenIsLocked` key in
+`ioreg -n Root -d1 -a`. Two probes:
+
+- the spike probe above, unchanged;
+- `virt/arcbox-vz-driver/examples/checkpoint_probe.rs`, the same guest
+  through `VzDriver`'s `Checkpoint` capability and `VmDriver::restore`
+  (`clones <dir> <n>`: boot, checkpoint with `Resume`, keep the source
+  writing its disk for 2 s, then restore `n` VMs at once, each on its own
+  copy of the image's disk clone).
+
+The "300 MiB touched" rows boot an initramfs with a 300 MiB random file
+appended as a second, uncompressed cpio archive
+(`head -c $((300<<20)) /dev/urandom > blob; echo blob | cpio -o -H newc`),
+which the kernel unpacks into RAM.
+
+| Run | Result |
+|---|---|
+| spike `save`, idle guest (3 runs) | OK; save 128–138 ms, 16 MiB state file, pause 0.2 ms, disk fsync + clone 6 ms |
+| spike `save`, 300 MiB touched | OK; save 177 ms, 320 MiB state file (not sparse: 655 368 blocks) |
+| spike `restore`, idle | OK; `restore_state` 178 ms, resume 0.2 ms, tick n+1, no read-back failure |
+| spike `restore`, 300 MiB touched | OK; `restore_state` 412 ms |
+| spike `restore` twice at once, one state file | both OK; 199 and 190 ms |
+| `SPIKE_TAMPER=machine-id` / `memory` / `state` | refused: "failed to restore with error “invalid argument”" |
+| `SPIKE_TAMPER=disk` (empty disk) | restored; the guest counted 15 755 read-back failures |
+| driver checkpoint, idle, `Resume` | 146–147 ms (pause, save, 256 MiB disk clone, manifest) |
+| driver, 4 restores at once from one image | all OK; 252–266 ms each, every clone's first tick n+1, no failures |
+| driver checkpoint, 300 MiB touched / 2 restores at once | 247 ms / 544 and 599 ms, both OK |
+| driver restore with another NIC MAC | VZ: "invalid argument" (the driver now refuses it first) |
+| `driver_contract!` against `VzDriver` (`tests/contract.rs`) | 18/18 pass, the 4 checkpoint checks included |
+
+In the helper's log, every save first loads a stored Secure Enclave key
+(`SEPClientObject: getKey`, `SecKeyCreateWithData`) and then calls
+`SecKeyCreateRandomKey` twice; that call is what failed while locked.
+
+### Findings
+
+4. **With the screen unlocked, the same probe, signature and host save
+   and restore.** This confirms finding 2's inference as far as an
+   unlocked run can: the lock state is the only thing that changed.
+   Each save generates new keys, so an earlier unlocked save is not
+   expected to let a later locked save through. A locked save and
+   restore through the new code are below.
+5. **The state file holds the guest's resident memory, and restore
+   reads all of it.** 16 MiB for an idle 1 GiB guest, 320 MiB with
+   300 MiB touched. The initrd buffer the kernel freed after unpacking
+   (another ~300 MiB the guest had written) was not in the file, so VZ
+   writes less than the guest ever touched; whether it skips freed pages
+   or zeroed ones, this probe cannot tell. Save cost ~0.15 ms/MiB on top
+   of a ~130 ms base. Unlike HV's lazy `MAP_PRIVATE` restore, restore time
+   grows with the file: 178 ms → 412 ms.
+6. **One state file restores into several VMs at once.** Every clone
+   keeps the source's machine identifier and NIC MAC; VZ refuses a
+   restore with another MAC. Clone identity (address, CID, entropy) on
+   VZ therefore has to change inside the guest, after the restore.
+7. **VZ checks the configuration but not the disk.** The disk paired
+   with a state file must be the one cloned while the VM was paused; the
+   driver clones writable disks into the image for that reason.
+8. **The guest wall clock is frozen across a restore** (realtime +1 s
+   at the first tick, whatever the gap), as on HV: the clock push after
+   every restore is needed on VZ too.
+
+### Still open
+
+- A save and a restore while locked through the new code
+  (`checkpoint_probe locked <dir>`, `checkpoint_probe restore <dir> <n>`):
+  the driver refuses a save with `Error::Unavailable` before it pauses
+  the guest, and whether VZ can restore while locked is unmeasured.
+- Restore on another Mac or user account.
