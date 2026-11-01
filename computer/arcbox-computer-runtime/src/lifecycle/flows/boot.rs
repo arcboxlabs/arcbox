@@ -49,6 +49,7 @@ impl ComputerFlows {
             &services.cow_manager,
             &self.computer,
             handed_off,
+            services.placement.dirty_tracking(),
         )
         .await;
 

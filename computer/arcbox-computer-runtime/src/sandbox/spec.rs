@@ -40,6 +40,7 @@ pub fn build_vm_spec(
     kernel: PathBuf,
     rootfs: PathBuf,
     isolation: IsolationSpec,
+    dirty_tracking: bool,
 ) -> Result<VmSpec> {
     let cmdline = match net {
         Some(net) if !spec.boot_args.contains("ip=") => {
@@ -75,8 +76,9 @@ pub fn build_vm_spec(
         console: ConsoleSpec::Off,
         balloon: false,
         entropy: false,
-        // Dirty-page tracking so checkpointing is always available.
-        dirty_tracking: true,
+        // Firecracker tracks dirty pages so checkpointing is always
+        // available; the host drivers refuse the flag.
+        dirty_tracking,
         isolation,
         rosetta: false,
         nested_virt: false,
@@ -195,6 +197,7 @@ mod tests {
             PathBuf::from("/jail/vmlinux"),
             PathBuf::from("/jail/rootfs.ext4"),
             IsolationSpec::None,
+            true,
         )
         .unwrap();
         assert_eq!(vm.id.as_str(), "box");
@@ -240,6 +243,7 @@ mod tests {
             "/k".into(),
             "/r".into(),
             IsolationSpec::None,
+            true,
         )
         .unwrap();
         let BootSpec::Kernel { cmdline, .. } = &vm.boot else {
@@ -253,6 +257,7 @@ mod tests {
             "/k".into(),
             "/r".into(),
             IsolationSpec::None,
+            true,
         )
         .unwrap();
         assert_eq!(vm.nics, []);

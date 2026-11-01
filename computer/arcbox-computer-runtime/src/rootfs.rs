@@ -349,6 +349,13 @@ impl RootfsBuilder {
             );
         }
 
+        if !self.paths.busybox.exists() {
+            bail!(
+                "busybox not found at {}; the built-in template needs a static Linux busybox \
+                 (boot a `docker:<ref>` or catalog template instead)",
+                self.paths.busybox.display()
+            );
+        }
         let applets = self.busybox_applets().await?;
 
         let parent = image

@@ -133,6 +133,7 @@ pub async fn do_boot(
     cow_manager: &CowManager,
     computer: &Arc<Mutex<ComputerRuntime>>,
     resource_handoff: tokio::sync::oneshot::Sender<()>,
+    dirty_tracking: bool,
 ) -> std::result::Result<BootOutput, BootFailure> {
     let mut resource_handoff = Some(resource_handoff);
     let fc_cfg = &config.firecracker;
@@ -341,8 +342,16 @@ pub async fn do_boot(
         .await
         .map_err(failed)?;
 
-    let vm_spec =
-        build_vm_spec(id, spec, net, kernel_path, rootfs_path, isolation).map_err(failed)?;
+    let vm_spec = build_vm_spec(
+        id,
+        spec,
+        net,
+        kernel_path,
+        rootfs_path,
+        isolation,
+        dirty_tracking,
+    )
+    .map_err(failed)?;
     let handle = prepared
         .boot(vm_spec)
         .await

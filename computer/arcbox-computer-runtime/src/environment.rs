@@ -146,6 +146,13 @@ impl Placement {
         }
     }
 
+    /// Whether a boot asks the driver to track dirty pages. Firecracker
+    /// takes it for its snapshots; VZ and HV refuse the flag, and their
+    /// checkpoints are always full.
+    pub(crate) const fn dirty_tracking(&self) -> bool {
+        matches!(self.location, RunLocation::Nested)
+    }
+
     /// `Err` with the reason when a checkpoint cannot be taken right now.
     pub(crate) fn checkpoint_available(&self) -> Result<(), String> {
         self.checkpoint_gate
