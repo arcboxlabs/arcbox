@@ -62,7 +62,7 @@ impl ComputerManager {
             port_publishing: match placement.location {
                 // Guest DNAT plus a host listener, outside the driver.
                 RunLocation::Nested => true,
-                RunLocation::Host => claimed.port_forward,
+                RunLocation::Host => claimed.port_forward || placement.network_port_forward,
             },
             bind_mounts: false,
         }

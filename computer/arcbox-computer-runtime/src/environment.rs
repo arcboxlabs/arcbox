@@ -88,6 +88,12 @@ pub struct Placement {
     /// unlocked session (ADR 0010, decision 6), so a composer running VZ
     /// supplies the driver's lock query here; `None` means a save is never refused for the moment it is asked.
     pub checkpoint_gate: Option<Arc<dyn CheckpointGate>>,
+    /// Whether the guest network, rather than the driver, hands out port
+    /// forwarding. On the host the VM process owns the datapath under HV
+    /// and the network owns it under VZ, so only the composer knows which
+    /// one publishes ports; the nested location publishes through guest
+    /// DNAT regardless.
+    pub network_port_forward: bool,
 }
 
 impl Placement {
@@ -98,6 +104,7 @@ impl Placement {
             location: RunLocation::Nested,
             os_build: None,
             checkpoint_gate: None,
+            network_port_forward: false,
         }
     }
 
@@ -108,6 +115,7 @@ impl Placement {
             location: RunLocation::Host,
             os_build: Some(os_build.into()),
             checkpoint_gate: None,
+            network_port_forward: false,
         }
     }
 
@@ -115,6 +123,14 @@ impl Placement {
     #[must_use]
     pub fn with_checkpoint_gate(mut self, gate: Arc<dyn CheckpointGate>) -> Self {
         self.checkpoint_gate = Some(gate);
+        self
+    }
+
+    /// Publish ports through the guest network's forwarding rather than
+    /// the driver's.
+    #[must_use]
+    pub const fn with_network_port_forward(mut self) -> Self {
+        self.network_port_forward = true;
         self
     }
 
@@ -132,6 +148,7 @@ impl std::fmt::Debug for Placement {
             .field("location", &self.location)
             .field("os_build", &self.os_build)
             .field("checkpoint_gate", &self.checkpoint_gate.is_some())
+            .field("network_port_forward", &self.network_port_forward)
             .finish()
     }
 }

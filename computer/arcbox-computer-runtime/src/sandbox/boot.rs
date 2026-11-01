@@ -175,6 +175,9 @@ pub async fn stage_rootfs_cow_or_copy(
             if let Err(error) = journal(Some(&handle)) {
                 return Err(fail(error, Some(handle)));
             }
+            // `Device`: mirrored, never copied. On the host the clonefile
+            // backend's handle is a plain APFS clone, and host staging hands
+            // the path through unchanged, so the VM opens it in place.
             match staging
                 .stage_disk(
                     ROOTFS_DISK_ID,

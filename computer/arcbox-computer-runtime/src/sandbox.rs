@@ -491,7 +491,17 @@ impl ComputerManager {
     /// before asking. The gate this used to take could therefore only ever
     /// have fired for a sandbox that has no lease to report anyway, and it
     /// has no non-blocking form on the port.
+    ///
+    /// Nested only: a host sandbox's ports are published through a
+    /// `PortForward`, not DNAT, and a host network has no ingress to
+    /// report.
     pub fn computer_network_identity(&self, id: &str) -> Result<ComputerNetworkIdentity> {
+        if self.services.placement.location == crate::environment::RunLocation::Host {
+            return Err(ComputerError::FailedPrecondition(
+                "a host sandbox publishes ports through port forwarding and has no DNAT ingress"
+                    .into(),
+            ));
+        }
         let snapshot = self.snapshot(&id.to_owned())?;
         let lease = snapshot
             .lease

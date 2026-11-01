@@ -29,6 +29,8 @@ use support::{Fixture, Setup, action, drain_actions};
 
 const BUILD: &str = "25E5207k";
 
+/// VZ: the network, not the VM, runs the datapath, so port forwarding
+/// comes from `HostNetwork` and the driver claims none.
 fn vz_driver() -> FakeDriver {
     FakeDriver::builder()
         .capabilities(DriverCapabilities {
@@ -37,7 +39,6 @@ fn vz_driver() -> FakeDriver {
             balloon: true,
             console: true,
             agent_log: true,
-            port_forward: true,
             debug: true,
             ..DriverCapabilities::default()
         })
@@ -79,6 +80,11 @@ async fn full_cycle(fixture: &Fixture) {
     fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
     let id = fixture.ready("host").await;
     assert_eq!(fixture.run(&id, &["/bin/hello"]).await, b"hi");
+    // Ports are published through forwarding; there is no DNAT ingress.
+    assert!(matches!(
+        fixture.manager.computer_network_identity(&id),
+        Err(ComputerError::FailedPrecondition(_))
+    ));
 
     fixture.manager.pause_computer(&id).await.unwrap();
     fixture.await_state(&id, ComputerState::Paused).await;
@@ -127,15 +133,18 @@ async fn full_cycle(fixture: &Fixture) {
 /// area and comes back across a pause.
 #[tokio::test]
 async fn a_vz_shaped_driver_runs_the_whole_lifecycle() {
-    let fixture = Setup::host(vz_driver(), Placement::host(BUILD))
-        .build()
-        .await;
+    let fixture = Setup::host(
+        vz_driver(),
+        Placement::host(BUILD).with_network_port_forward(),
+    )
+    .build()
+    .await;
     let capabilities = fixture.manager.capabilities();
     assert_eq!(capabilities.location, RunLocation::Host);
     assert!(capabilities.pause_resume);
     assert_eq!(capabilities.pause_unavailable, None);
     assert!(!capabilities.warm_prespawn, "nothing to spawn ahead");
-    assert!(capabilities.port_publishing);
+    assert!(capabilities.port_publishing, "through the network");
     full_cycle(&fixture).await;
 }
 
