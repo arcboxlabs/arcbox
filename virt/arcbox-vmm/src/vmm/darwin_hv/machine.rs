@@ -360,6 +360,15 @@ impl HvMachine {
             .lock()
             .map_err(|e| VmmError::Device(format!("balloon lock poisoned: {e}")))?;
         guard.set_num_pages(pages);
+        drop(guard);
+        // The guest reads the target only when told the configuration
+        // changed.
+        if let Some(dm) = &self.hv_device_manager {
+            dm.raise_interrupt_for(
+                crate::device::DeviceType::VirtioBalloon,
+                crate::device::virtio_mmio::INT_CONFIG,
+            );
+        }
         Ok(())
     }
 
