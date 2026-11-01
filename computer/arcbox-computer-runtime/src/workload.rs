@@ -2,7 +2,7 @@
 //!
 //! An image's config (Entrypoint, Cmd, Env, WorkingDir, User) and the create
 //! request become one `config.json`, modeled by `arcbox-oci`
-//! (`bundle_spec`). [`Workload::from_spec`] checks that spec against what a
+//! ([`bundle_spec`]). [`Workload::from_spec`] checks that spec against what a
 //! computer can honor and translates it into the [`StartCommand`] the guest
 //! agent runs.
 //!
@@ -16,9 +16,11 @@
 //! [`StartCommand`]: crate::StartCommand
 
 mod check;
+mod spec;
 mod start;
 
 pub use check::Rejected;
+pub use spec::{ImageAccounts, WorkloadRequest, bundle_spec};
 pub use start::Workload;
 
 use crate::error::ComputerError;
@@ -35,6 +37,9 @@ pub enum WorkloadError {
     /// The spec sets a field the guest agent cannot carry out.
     #[error("OCI field {0} is not supported in a computer")]
     Unsupported(String),
+    /// The user or group does not resolve against the image.
+    #[error("{0}")]
+    User(String),
 }
 
 impl From<WorkloadError> for ComputerError {
