@@ -27,8 +27,9 @@ Control-plane calls manage the local sandbox collection and template catalog.
 Data-plane calls carry a specific sandbox's stdio and file bytes. The daemon
 serves every service on the same local socket, so clients can use one channel.
 
-Server implementation: `app/arcbox-api/src/grpc/sandbox/` (one module per
-service) and `.../grpc/snapshot.rs`.
+Server implementation: `app/arcbox-api/src/connect/`, one module per
+service: `control.rs` (`SandboxService`), `template.rs`, `process.rs`,
+`filesystem.rs` and `snapshot.rs`.
 
 For the end-user CLI feature built on this API — running a coding agent in a
 sandbox — see [agent-sandbox.md](agent-sandbox.md).
