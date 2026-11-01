@@ -1,22 +1,24 @@
-//! [`HvDriver`]: the `arcbox-vm-driver` port over this crate's
-//! Hypervisor.framework machine.
+//! [`HvMachineDriver`]: the `arcbox-vm-driver` port over this crate's
+//! Hypervisor.framework machine, in the calling process.
+//!
+//! Hypervisor.framework allows one VM per process, and the daemon's process
+//! holds the System VM, so nothing in the daemon boots through this driver.
+//! It is the engine of `arcbox-hv-driver`'s per-VM process
+//! (`arcbox-hv-vmm`), which serves the same port to the daemon over a
+//! socket (ADR 0010).
 //!
 //! - `render` — [`VmSpec`] → [`VmmConfig`](crate::VmmConfig), pure and
 //!   tested.
-//! - `handle` — the port's `VmHandle` over a running
-//!   [`HvMachine`]: exit and reset events from a watcher thread, shutdown,
-//!   and the vsock, balloon, debug and port-forward capabilities.
+//! - `handle` — the port's `VmHandle` over a running [`Vmm`]: exit and reset
+//!   events from a watcher thread, shutdown, and the vsock, balloon, debug
+//!   and port-forward capabilities.
 //! - `port_forward` — `PortForward` over the NAT datapath's inbound
 //!   listener manager.
 //!
-//! Checkpoint is absent: the machine cannot capture a snapshot yet, so
-//! there is nothing to put behind the capability (vm-stack-redesign, R4
-//! seam map). The guest console stays inside the machine, so there is no
-//! `Console` either.
+//! Checkpoint is not wired yet, so every image is foreign. The guest
+//! console stays inside the machine, so there is no `Console`.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use arcbox_net::dns::SharedDns;
@@ -26,35 +28,43 @@ use arcbox_vm_driver::{
 };
 use async_trait::async_trait;
 
-use crate::vmm::darwin_hv::HvMachine;
+use crate::vmm::Vmm;
 
 mod handle;
 mod port_forward;
 pub mod render;
 
-use handle::{HvHandle, Parts};
+use handle::HvHandle;
 
 /// The driver's name, as `VmDriver::name` and `VmRecord::driver` report it.
 pub const NAME: &str = "hv";
 
-/// Boots specs into Hypervisor.framework machines in this process.
-pub struct HvDriver {
+/// What every machine the driver builds shares with the host.
+#[derive(Clone, Default)]
+pub(crate) struct Env {
     dns: Option<SharedDns>,
     proxy: Option<ProxyEnvironment>,
 }
 
-impl HvDriver {
+/// Boots specs into Hypervisor.framework machines in this process.
+pub struct HvMachineDriver {
+    env: Env,
+}
+
+impl HvMachineDriver {
     /// A driver whose `UserNat` datapaths share `dns` with the host DNS
     /// service and tunnel guest egress through `proxy`. Without `dns` each
     /// VM's forwarder keeps its own names; without `proxy` guest flows
     /// connect directly from the host.
     pub const fn new(dns: Option<SharedDns>, proxy: Option<ProxyEnvironment>) -> Self {
-        Self { dns, proxy }
+        Self {
+            env: Env { dns, proxy },
+        }
     }
 }
 
 #[async_trait]
-impl VmDriver for HvDriver {
+impl VmDriver for HvMachineDriver {
     fn name(&self) -> &'static str {
         NAME
     }
@@ -73,43 +83,18 @@ impl VmDriver for HvDriver {
     }
 
     async fn boot(&self, spec: VmSpec, runtime_dir: &Path) -> Result<Box<dyn VmHandle>> {
-        let config = render::vmm_config(&spec)?;
-        let mut machine = HvMachine::new(config, Arc::new(AtomicBool::new(false)));
-        if let Some(dns) = &self.dns {
-            machine.set_shared_dns(dns.clone());
-        }
-        if let Some(proxy) = &self.proxy {
-            machine.set_proxy_env(proxy.clone());
-        }
+        let mut vmm = new_vmm(&spec, &self.env)?;
         // Building guest memory, loading the kernel and spawning the vCPU
         // threads block; keep them off the async workers.
-        let machine = tokio::task::spawn_blocking(move || -> Result<HvMachine> {
-            let started = machine.initialize().and_then(|()| machine.start());
-            if let Err(e) = started {
-                // Initialize may have spawned workers that hold guest memory.
-                if let Err(stop) = machine.stop() {
-                    tracing::warn!("teardown after a failed boot failed: {stop}");
-                }
-                return Err(driver_error("boot", e));
-            }
-            Ok(machine)
+        let vmm = tokio::task::spawn_blocking(move || -> Result<Vmm> {
+            vmm.start().map_err(|e| driver_error("boot", e))?;
+            Ok(vmm)
         })
         .await
         .map_err(|e| driver_error("boot task", e))??;
         tracing::info!(vm = %spec.id, cpus = spec.cpus, memory_mib = spec.memory_mib, "HV VM running");
-        Ok(Box::new(HvHandle::new(
-            machine,
-            Parts {
-                record: VmRecord {
-                    id: spec.id,
-                    driver: NAME.to_owned(),
-                    runtime_dir: runtime_dir.to_path_buf(),
-                    process: None,
-                },
-                vsock: spec.vsock.is_some(),
-                balloon: spec.balloon,
-            },
-        )))
+        let record = record(&spec, runtime_dir);
+        Ok(Box::new(HvHandle::new(vmm, spec, self.env.clone(), record)))
     }
 
     /// This driver writes no checkpoints, so every image is foreign.
@@ -124,6 +109,27 @@ impl VmDriver for HvDriver {
 
     fn adopt(&self) -> Option<&dyn Adopt> {
         None
+    }
+}
+
+/// An unstarted machine for `spec`.
+fn new_vmm(spec: &VmSpec, env: &Env) -> Result<Vmm> {
+    let mut vmm = Vmm::new(render::vmm_config(spec)?).map_err(|e| driver_error("create", e))?;
+    if let Some(dns) = &env.dns {
+        vmm.set_shared_dns(dns.clone());
+    }
+    if let Some(proxy) = &env.proxy {
+        vmm.set_proxy_env(proxy.clone());
+    }
+    Ok(vmm)
+}
+
+fn record(spec: &VmSpec, runtime_dir: &Path) -> VmRecord {
+    VmRecord {
+        id: spec.id.clone(),
+        driver: NAME.to_owned(),
+        runtime_dir: runtime_dir.to_path_buf(),
+        process: None,
     }
 }
 

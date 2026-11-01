@@ -47,9 +47,6 @@ tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arcbox-constants.workspace = true
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-arcbox-vm-driver = { workspace = true, features = ["testkit"] }
-
 [features]
 # `gic` is on by default so every binary linking arcbox-vmm
 # (daemon, hv_e2e example, tests) gets the hv_gic_* emulation.

@@ -1,5 +1,5 @@
-//! [`VmSpec`] → the [`VmmConfig`] an [`HvMachine`](crate::vmm::darwin_hv::HvMachine)
-//! boots from. Pure: it opens no file and starts nothing.
+//! [`VmSpec`] → the [`VmmConfig`] the HV machine boots from. Pure: it
+//! opens no file and starts nothing.
 //!
 //! What the HV machine always has, whatever the spec says: the
 //! virtio-console device (the guest console ABI) and the entropy device

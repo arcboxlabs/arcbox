@@ -26,7 +26,7 @@ use crate::vcpu::VcpuManager;
 #[cfg(target_os = "macos")]
 mod darwin;
 #[cfg(target_os = "macos")]
-pub(crate) mod darwin_hv;
+mod darwin_hv;
 #[cfg(target_os = "macos")]
 mod darwin_net;
 #[cfg(target_os = "macos")]
@@ -721,6 +721,18 @@ impl Vmm {
         Err(VmmError::invalid_state(
             "hypervisor VM handle is unavailable for restore".to_string(),
         ))
+    }
+
+    /// The channel the HV guest's PSCI SYSTEM_OFF completes, once the
+    /// machine has started. It disconnects without a message when every
+    /// vCPU thread exits for another reason: a SYSTEM_RESET, a host stop or
+    /// a vCPU failure. `None` on VZ and before [`Self::start`].
+    #[cfg(target_os = "macos")]
+    pub(crate) fn hv_poweroff_receiver(&self) -> Option<crossbeam_channel::Receiver<()>> {
+        match self.machine {
+            Machine::Hv(ref hv) => hv.hv_poweroff_rx.clone(),
+            _ => None,
+        }
     }
 
     /// Checkpoints a running HV machine into `dir` (spike; see

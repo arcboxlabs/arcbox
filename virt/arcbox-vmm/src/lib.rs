@@ -68,7 +68,7 @@ pub mod device;
 pub mod error;
 pub mod event;
 pub mod fdt;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "gic"))]
 pub mod hv_driver;
 pub mod irq;
 pub mod memory;
@@ -100,8 +100,6 @@ pub use device::{
 };
 pub use error::{Result, VmmError};
 pub use fdt::{FdtBuilder, FdtConfig};
-#[cfg(target_os = "macos")]
-pub use hv_driver::HvDriver;
 pub use snapshot::{
     SnapshotCreateOptions, SnapshotError, SnapshotInfo, SnapshotManager, SnapshotState,
     SnapshotTargetType, VmRestoreData, VmSnapshotContext,

@@ -1,4 +1,4 @@
-//! The port's `VmHandle` over a running [`HvMachine`].
+//! The port's `VmHandle` over a running [`Vmm`].
 //!
 //! A watcher thread blocks on the machine's PSCI SYSTEM_OFF channel, so an
 //! idle VM costs no wakeups. SYSTEM_OFF tears the machine down and records
@@ -7,25 +7,27 @@
 //! fresh `boot` from the same spec. Any other end of the vCPU threads that
 //! the host did not ask for is a failure, `Exited` with code 1.
 //!
+//! Each machine gets a generation, bumped when the host stops it, and a
+//! watcher whose generation moved on stands down.
+//!
 //! The machine is always stopped before it drops, also on the last
 //! reference's drop: its io workers hold guest memory (ABX-415).
 
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use arcbox_net::darwin::inbound_relay::InboundListenerManager;
 use arcbox_vm_driver::{
     Balloon, BalloonStats, DebugSnapshot, Error, ExitStatus, IoMode, PortForward, Result,
-    ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmState, Vsock, VsockConn,
+    ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmSpec, VmState, Vsock, VsockConn,
 };
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
-use super::driver_error;
 use super::port_forward::InboundForward;
-use crate::vcpu_stats::VmDebugSnapshot;
-use crate::vmm::darwin_hv::HvMachine;
+use super::{Env, driver_error};
+use crate::vmm::Vmm;
 
 /// A running HV VM. Dropping it stops the VM unless it already exited.
 pub struct HvHandle {
@@ -34,67 +36,53 @@ pub struct HvHandle {
 
 struct Inner {
     record: VmRecord,
+    /// What the running machine was built from.
+    spec: VmSpec,
+    #[allow(
+        dead_code,
+        reason = "a machine restored from a checkpoint is built from it"
+    )]
+    env: Env,
     /// `None` once the machine has been stopped and dropped.
-    machine: Mutex<Option<HvMachine>>,
-    exit: Mutex<Option<ExitStatus>>,
-    /// Set before a host-initiated stop, so the watcher does not read the
-    /// vCPU threads' exit as a guest failure.
-    stopping: AtomicBool,
+    vmm: Mutex<Option<Vmm>>,
+    /// Bumped whenever the machine is stopped; a watcher only acts for the
+    /// generation it was started for.
+    generation: AtomicU64,
+    state: Mutex<VmState>,
     events: broadcast::Sender<VmEvent>,
     port_forward: Mutex<Option<InboundListenerManager>>,
-    vsock: bool,
-    balloon: bool,
-}
-
-/// What a running VM keeps besides the machine itself.
-pub struct Parts {
-    pub record: VmRecord,
-    pub vsock: bool,
-    pub balloon: bool,
 }
 
 impl HvHandle {
-    /// Takes ownership of a started `machine`.
-    pub fn new(mut machine: HvMachine, parts: Parts) -> Self {
+    /// Takes ownership of a started `vmm`, built from `spec`.
+    pub(super) fn new(mut vmm: Vmm, spec: VmSpec, env: Env, record: VmRecord) -> Self {
         let (events, _) = broadcast::channel(16);
-        let poweroff = machine.poweroff_receiver();
-        let port_forward = machine.take_inbound_listener_manager();
+        let port_forward = vmm.take_inbound_listener_manager();
+        let poweroff = vmm.hv_poweroff_receiver();
         let inner = Arc::new(Inner {
-            record: parts.record,
-            machine: Mutex::new(Some(machine)),
-            exit: Mutex::new(None),
-            stopping: AtomicBool::new(false),
+            record,
+            spec,
+            env,
+            vmm: Mutex::new(Some(vmm)),
+            generation: AtomicU64::new(0),
+            state: Mutex::new(VmState::Running),
             events,
             port_forward: Mutex::new(port_forward),
-            vsock: parts.vsock,
-            balloon: parts.balloon,
         });
-        match poweroff {
-            Some(poweroff) => {
-                let weak = Arc::downgrade(&inner);
-                let spawned = std::thread::Builder::new()
-                    .name("hv-watch".into())
-                    .spawn(move || watch(&weak, &poweroff));
-                if let Err(e) = spawned {
-                    tracing::error!(vm = %inner.record.id, "watcher thread failed to start: {e}");
-                }
-            }
-            None => {
-                tracing::error!(vm = %inner.record.id, "started machine has no poweroff channel");
-            }
-        }
+        inner.spawn_watcher(0, poweroff);
         Self { inner }
     }
 }
 
-/// Turns the end of the vCPU threads into the VM's event.
-fn watch(inner: &Weak<Inner>, poweroff: &crossbeam_channel::Receiver<()>) {
+/// Turns the end of the vCPU threads of machine `generation` into the VM's
+/// event.
+fn watch(inner: &Weak<Inner>, generation: u64, poweroff: &crossbeam_channel::Receiver<()>) {
     let powered_off = poweroff.recv().is_ok();
     let Some(inner) = inner.upgrade() else { return };
-    if inner.stopping.load(Ordering::SeqCst) {
+    if inner.generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    if !powered_off && inner.with_machine(HvMachine::reset_requested) == Some(true) {
+    if !powered_off && inner.with_vmm(Vmm::reset_requested) == Some(true) {
         tracing::info!(vm = %inner.record.id, "guest requested a reset");
         // A send error only means nobody is subscribed.
         let _ = inner.events.send(VmEvent::ResetRequested);
@@ -106,38 +94,58 @@ fn watch(inner: &Weak<Inner>, poweroff: &crossbeam_channel::Receiver<()>) {
         tracing::error!(vm = %inner.record.id, "vCPU threads exited without PSCI SYSTEM_OFF");
         ExitStatus::exited(1)
     };
-    inner.stopping.store(true, Ordering::SeqCst);
-    if let Err(e) = inner.stop_machine() {
+    if let Err(e) = inner.stop_vmm() {
         tracing::warn!(vm = %inner.record.id, "teardown after guest exit failed: {e}");
     }
     inner.exit(status);
 }
 
 impl Inner {
-    fn exited(&self) -> Option<ExitStatus> {
-        *lock(&self.exit)
+    fn spawn_watcher(
+        self: &Arc<Self>,
+        generation: u64,
+        poweroff: Option<crossbeam_channel::Receiver<()>>,
+    ) {
+        let Some(poweroff) = poweroff else {
+            tracing::error!(vm = %self.record.id, "started machine has no poweroff channel");
+            return;
+        };
+        let weak = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("hv-watch".into())
+            .spawn(move || watch(&weak, generation, &poweroff));
+        if let Err(e) = spawned {
+            tracing::error!(vm = %self.record.id, "watcher thread failed to start: {e}");
+        }
     }
 
-    fn with_machine<T>(&self, f: impl FnOnce(&HvMachine) -> T) -> Option<T> {
-        lock(&self.machine).as_ref().map(f)
+    fn state(&self) -> VmState {
+        *lock(&self.state)
     }
 
-    /// Stops and drops the machine. A second call does nothing.
-    fn stop_machine(&self) -> Result<()> {
-        let Some(mut machine) = lock(&self.machine).take() else {
+    fn with_vmm<T>(&self, f: impl FnOnce(&Vmm) -> T) -> Option<T> {
+        lock(&self.vmm).as_ref().map(f)
+    }
+
+    /// Stops and drops the machine. A second call does nothing. The
+    /// generation moves first, so the watcher does not read the vCPU
+    /// threads' exit as the guest's.
+    fn stop_vmm(&self) -> Result<()> {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let Some(mut vmm) = lock(&self.vmm).take() else {
             return Ok(());
         };
-        machine.stop().map_err(|e| driver_error("stop", e))
+        vmm.stop().map_err(|e| driver_error("stop", e))
     }
 
     /// Records the exit once; later calls return the first status.
     fn exit(&self, status: ExitStatus) -> ExitStatus {
         {
-            let mut exit = lock(&self.exit);
-            if let Some(earlier) = *exit {
+            let mut state = lock(&self.state);
+            if let VmState::Exited(earlier) = *state {
                 return earlier;
             }
-            *exit = Some(status);
+            *state = VmState::Exited(status);
         }
         drop(lock(&self.port_forward).take());
         let _ = self.events.send(VmEvent::Exited(status));
@@ -145,25 +153,24 @@ impl Inner {
         status
     }
 
-    fn require_running(&self) -> Result<()> {
-        match self.exited() {
-            None => Ok(()),
-            Some(status) => Err(Error::WrongState {
+    fn require(&self, expected: VmState, name: &'static str) -> Result<()> {
+        match self.state() {
+            state if state == expected => Ok(()),
+            state => Err(Error::WrongState {
                 id: self.record.id.clone(),
-                state: VmState::Exited(status),
-                expected: "running",
+                state,
+                expected: name,
             }),
         }
     }
 
     /// Stops the VM without waiting for the guest.
     async fn kill(self: &Arc<Self>) -> Result<ExitStatus> {
-        if let Some(status) = self.exited() {
+        if let VmState::Exited(status) = self.state() {
             return Ok(status);
         }
-        self.stopping.store(true, Ordering::SeqCst);
         let inner = Arc::clone(self);
-        tokio::task::spawn_blocking(move || inner.stop_machine())
+        tokio::task::spawn_blocking(move || inner.stop_vmm())
             .await
             .map_err(|e| driver_error("stop task", e))??;
         Ok(self.exit(ExitStatus::signaled(libc::SIGKILL)))
@@ -172,7 +179,7 @@ impl Inner {
     /// Waits up to `timeout` for the guest to power off, then kills it.
     async fn graceful(self: &Arc<Self>, timeout: std::time::Duration) -> Result<ExitStatus> {
         let mut events = self.events.subscribe();
-        if let Some(status) = self.exited() {
+        if let VmState::Exited(status) = self.state() {
             return Ok(status);
         }
         let exited = tokio::time::timeout(timeout, async {
@@ -194,11 +201,10 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if lock(&self.machine).is_none() {
+        if lock(&self.vmm).is_none() {
             return;
         }
-        self.stopping.store(true, Ordering::SeqCst);
-        if let Err(e) = self.stop_machine() {
+        if let Err(e) = self.stop_vmm() {
             tracing::warn!(vm = %self.record.id, "stop on drop failed: {e}");
         }
     }
@@ -221,9 +227,7 @@ impl VmHandle for HvHandle {
     }
 
     fn state(&self) -> VmState {
-        self.inner
-            .exited()
-            .map_or(VmState::Running, VmState::Exited)
+        self.inner.state()
     }
 
     fn events(&self) -> broadcast::Receiver<VmEvent> {
@@ -241,11 +245,15 @@ impl VmHandle for HvHandle {
     }
 
     fn vsock(&self) -> Option<&dyn Vsock> {
-        self.inner.vsock.then_some(self as &dyn Vsock)
+        self.inner
+            .spec
+            .vsock
+            .is_some()
+            .then_some(self as &dyn Vsock)
     }
 
     fn balloon(&self) -> Option<&dyn Balloon> {
-        self.inner.balloon.then_some(self as &dyn Balloon)
+        self.inner.spec.balloon.then_some(self as &dyn Balloon)
     }
 
     fn take_port_forward(&self) -> Option<Box<dyn PortForward>> {
@@ -266,10 +274,12 @@ impl Vsock for HvHandle {
     /// EOF on the returned socket; the dial itself never reports
     /// `ConnectionRefused`.
     async fn dial(&self, port: u32) -> Result<VsockConn> {
-        self.inner.require_running()?;
-        let raw = self
-            .inner
-            .with_machine(|m| m.connect_vsock(port))
+        self.inner.require(VmState::Running, "running")?;
+        let inner = Arc::clone(&self.inner);
+        // The dial blocks until a vCPU has queued the request.
+        let raw = tokio::task::spawn_blocking(move || inner.with_vmm(|m| m.connect_vsock(port)))
+            .await
+            .map_err(|e| driver_error("vsock task", e))?
             .ok_or_else(|| driver_error("vsock", std::io::Error::other("machine stopped")))?
             .map_err(|e| driver_error(format!("vsock dial port {port}"), e))?;
         // SAFETY: `connect_vsock` hands over a fresh descriptor that nothing
@@ -285,36 +295,25 @@ impl Vsock for HvHandle {
 #[async_trait]
 impl Balloon for HvHandle {
     async fn set_target(&self, bytes: u64) -> Result<()> {
-        self.inner.require_running()?;
+        self.inner.require(VmState::Running, "running")?;
         self.inner
-            .with_machine(|m| m.set_balloon_target(bytes))
+            .with_vmm(|m| m.set_balloon_target(bytes))
             .ok_or_else(|| driver_error("balloon", std::io::Error::other("machine stopped")))?
             .map_err(|e| driver_error("balloon target", e))
     }
 
     async fn stats(&self) -> Result<BalloonStats> {
-        let (target_bytes, current_bytes) = self
-            .inner
-            .with_machine(HvMachine::balloon_bytes)
-            .unwrap_or_default();
+        let stats = self.inner.with_vmm(Vmm::get_balloon_stats);
         Ok(BalloonStats {
-            target_bytes,
-            current_bytes: Some(current_bytes),
+            target_bytes: stats.as_ref().map_or(0, |s| s.target_bytes),
+            current_bytes: stats.map(|s| s.current_bytes),
         })
     }
 }
 
 impl DebugSnapshot for HvHandle {
     fn snapshot(&self) -> serde_json::Value {
-        let snapshot = self
-            .inner
-            .with_machine(|m| VmDebugSnapshot {
-                devices: m.virtio_debug(),
-                vcpus: m.vcpu_snapshots(),
-                kick_broadcasts: 0,
-                unpark_broadcasts: 0,
-            })
-            .unwrap_or_default();
+        let snapshot = self.inner.with_vmm(Vmm::debug_snapshot).unwrap_or_default();
         serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null)
     }
 }
