@@ -153,9 +153,9 @@ impl ComputerManager {
         if matches!(warm_policy, WarmPolicy::Auto)
             && let Some(warm) = spec.template_warm.clone()
             && super::templates::template_restore_eligible(
-                &self.config,
                 &spec,
                 caller_supplied_boot,
+                super::relocatable_checkpoints(&self.config, &*self.services.driver),
                 &warm,
             )
         {

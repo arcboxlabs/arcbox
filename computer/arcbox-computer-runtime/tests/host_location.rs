@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arcbox_computer_runtime::testkit::agent::Reply;
 use arcbox_computer_runtime::{
     CheckpointGate, ComputerError, ComputerMountSpec, ComputerSpec, ComputerState, IdleAction,
-    Placement, RestoreComputerSpec, RunLocation, pause_reason,
+    Placement, RestoreComputerSpec, RunLocation, TemplateWarmRef, pause_reason,
 };
 use arcbox_vm_driver::testkit::FakeDriver;
 use arcbox_vm_driver::{DriverCapabilities, VmDriver as _, VmId};
@@ -384,5 +384,48 @@ async fn an_hv_warm_create_restores_the_published_snapshot() {
         fixture.driver().restored_vms(),
         vec![VmId::new(&second).unwrap()],
         "the second create of the same shape restores instead of booting"
+    );
+}
+
+/// A catalog template's pre-warmed snapshot serves a host create: neither
+/// host driver stages, so its checkpoints restore into a fresh VM without
+/// the jailer the nested location needs.
+#[tokio::test]
+async fn an_hv_template_create_restores_the_templates_snapshot() {
+    let fixture = Setup::host(hv_driver(), Placement::host(BUILD))
+        .build()
+        .await;
+    let shape = ComputerSpec {
+        vcpus: 1,
+        memory_mib: 256,
+        ..ComputerSpec::default()
+    };
+    let source = fixture
+        .booted(ComputerSpec {
+            id: Some("source".into()),
+            ..shape.clone()
+        })
+        .await;
+    fixture.await_state(&source, ComputerState::Ready).await;
+    let checkpoint = fixture
+        .manager
+        .checkpoint_computer(&source, "template".into(), HashMap::new())
+        .await
+        .unwrap();
+    let id = fixture
+        .booted(ComputerSpec {
+            id: Some("from-template".into()),
+            template_warm: Some(TemplateWarmRef {
+                snapshot_id: checkpoint.snapshot_id,
+                vcpus: 1,
+                memory_mib: 256,
+            }),
+            ..shape
+        })
+        .await;
+    assert_eq!(
+        fixture.driver().restored_vms(),
+        vec![VmId::new(&id).unwrap()],
+        "the template create restored the snapshot instead of booting"
     );
 }

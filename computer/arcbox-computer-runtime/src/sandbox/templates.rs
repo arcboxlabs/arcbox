@@ -342,7 +342,9 @@ pub struct PrewarmOutcome {
 }
 
 /// Whether a template's pre-warmed snapshot can serve this create: restore
-/// needs the jailer, the invariant tap identity, no caller-pinned boot
+/// needs relocatable checkpoints (the jailer, or a driver that does not
+/// stage — see [`super::relocatable_checkpoints`]), the invariant tap
+/// identity, no caller-pinned boot
 /// recipe, and an exactly matching geometry — a memory snapshot resumes
 /// only onto its capture shape. Checked against the effective
 /// (defaults-applied) spec. Deliberately NOT gated on
@@ -352,12 +354,12 @@ pub struct PrewarmOutcome {
 /// the cache off. Stopping restores from a bad snapshot = rebuild or delete
 /// the template.
 pub(super) fn template_restore_eligible(
-    config: &crate::config::RuntimeConfig,
     spec: &ComputerSpec,
     caller_supplied_boot: bool,
+    relocatable: bool,
     warm: &crate::sandbox::TemplateWarmRef,
 ) -> bool {
-    config.firecracker.jailer.is_some()
+    relocatable
         && !caller_supplied_boot
         && spec.network.mode == "tap"
         && !spec.boot_args.contains("ip=")
