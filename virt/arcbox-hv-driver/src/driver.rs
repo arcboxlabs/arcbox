@@ -156,6 +156,7 @@ impl VmDriver for HvDriver {
             adopt: true,
             prepare: true,
             balloon: true,
+            console: true,
             port_forward: true,
             debug: true,
             nested_virt: NestedVirt::unsupported(

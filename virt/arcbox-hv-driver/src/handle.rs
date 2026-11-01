@@ -4,14 +4,17 @@
 //! is `SIGKILL` to it. Everything else is a request on its control socket.
 //! Dropping the handle kills the process unless it was detached.
 
+use std::io::Read;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use arcbox_vm_driver::{
     AfterCheckpoint, Balloon, BalloonStats, Checkpoint, CheckpointImage, CheckpointKind,
-    CheckpointOptions, DebugSnapshot, Detach, Error, ExitStatus, ForwardRule, IoMode, PortForward,
-    Result, ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmState, Vsock, VsockConn,
+    CheckpointOptions, Console, DebugSnapshot, Detach, Error, ExitStatus, ForwardRule, IoMode,
+    PortForward, Result, ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmState, Vsock,
+    VsockConn,
 };
 use async_trait::async_trait;
 use tokio::sync::broadcast;
@@ -19,6 +22,7 @@ use tokio::sync::broadcast;
 use crate::control::{self, Control, unexpected};
 use crate::process::VmmProcess;
 use crate::proto::{Booted, Request, Response};
+use crate::{driver_error, set_nonblocking};
 
 /// A VM running in its own VMM process.
 pub struct HvHandle {
@@ -33,6 +37,8 @@ struct Inner {
     /// `Running` or `Quiesced` while the process lives.
     state: Mutex<VmState>,
     forward_taken: AtomicBool,
+    /// The console pipe's read end, once asked for.
+    console: Mutex<Option<OwnedFd>>,
 }
 
 impl HvHandle {
@@ -50,6 +56,7 @@ impl HvHandle {
                 booted,
                 state: Mutex::new(state),
                 forward_taken: AtomicBool::new(false),
+                console: Mutex::new(None),
             }),
         }
     }
@@ -71,6 +78,25 @@ impl Inner {
                 expected: "running",
             }),
         }
+    }
+
+    /// The console pipe, a duplicate of the one this handle keeps.
+    fn console_fd(&self) -> Result<OwnedFd> {
+        let mut slot = lock(&self.console);
+        if let Some(fd) = slot.as_ref() {
+            return Ok(fd.try_clone()?);
+        }
+        let fd = match self
+            .control
+            .call_blocking(&Request::Console, control::QUICK)?
+        {
+            (Response::Fd, Some(fd)) => fd,
+            (other, _) => return Err(unexpected(&other)),
+        };
+        set_nonblocking(&fd)?;
+        let copy = fd.try_clone()?;
+        *slot = Some(fd);
+        Ok(copy)
     }
 }
 
@@ -130,6 +156,10 @@ impl VmHandle for HvHandle {
 
     fn balloon(&self) -> Option<&dyn Balloon> {
         self.inner.booted.balloon.then_some(self as &dyn Balloon)
+    }
+
+    fn console(&self) -> Option<&dyn Console> {
+        self.inner.booted.console.then_some(self as &dyn Console)
     }
 
     fn take_port_forward(&self) -> Option<Box<dyn PortForward>> {
@@ -234,6 +264,37 @@ impl Balloon for HvHandle {
             }),
             (other, _) => Err(unexpected(&other)),
         }
+    }
+}
+
+#[async_trait]
+impl Console for HvHandle {
+    /// What the console pipe holds now, up to `max_bytes`; empty when the
+    /// guest wrote nothing since, and after the VM exited.
+    async fn read_output(&self, max_bytes: usize) -> Result<Vec<u8>> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            let mut pipe = std::fs::File::from(inner.console_fd()?);
+            let mut out = vec![0u8; max_bytes];
+            let mut got = 0;
+            while got < max_bytes {
+                match pipe.read(&mut out[got..]) {
+                    Ok(0) => break,
+                    Ok(n) => got += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            out.truncate(got);
+            Ok(out)
+        })
+        .await
+        .map_err(|e| driver_error("console task", e))?
+    }
+
+    fn dup_reader(&self) -> Result<OwnedFd> {
+        self.inner.console_fd()
     }
 }
 

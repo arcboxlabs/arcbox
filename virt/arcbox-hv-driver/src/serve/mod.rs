@@ -14,19 +14,21 @@
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use arcbox_vm_driver::{
-    AfterCheckpoint, CheckpointKind, CheckpointOptions, Error, PortForward, Result, VmDriver,
-    VmEvent, VmHandle, VmId, VmSpec,
+    AfterCheckpoint, CheckpointKind, CheckpointOptions, ConsoleSpec, Error, PortForward, Result,
+    VmDriver, VmEvent, VmHandle, VmId, VmSpec,
 };
 use arcbox_vmm::hv_driver::HvMachineDriver;
 use tokio::runtime::Handle;
 
 use crate::proto::{Booted, Event, Request, Response, WireError};
 use crate::wire;
+
+pub mod console;
 
 /// What the process was started with.
 pub struct Args {
@@ -46,6 +48,8 @@ struct Server {
     runtime: Handle,
     /// Set by the first `Boot` or `Restore`, cleared if it fails.
     claimed: AtomicBool,
+    /// The VM's console, which its checkpoints record.
+    console: Mutex<ConsoleSpec>,
     vm: Mutex<Option<Vm>>,
     watchers: Mutex<Vec<UnixStream>>,
 }
@@ -72,6 +76,7 @@ pub fn run(args: Args, runtime: &tokio::runtime::Runtime) -> std::io::Result<()>
         driver: HvMachineDriver::new(None, proxy),
         runtime: runtime.handle().clone(),
         claimed: AtomicBool::new(false),
+        console: Mutex::new(ConsoleSpec::Off),
         vm: Mutex::new(None),
         watchers: Mutex::new(Vec::new()),
     });
@@ -128,10 +133,12 @@ impl Server {
             Request::Boot(spec) => plain(Response::Booted(self.boot(*spec)?)),
             Request::Restore { image, spec } => {
                 self.claim(&spec.id)?;
-                let handle = self
-                    .runtime
-                    .block_on(self.driver.restore(&image, spec, &self.dir));
-                plain(Response::Booted(self.install(handle)?))
+                let console = read_console(&image.dir);
+                let handle = self.open_console(&console).and_then(|()| {
+                    self.runtime
+                        .block_on(self.driver.restore(&image, spec, &self.dir))
+                });
+                plain(Response::Booted(self.install(handle, console)?))
             }
             Request::Watch => unreachable!("served by `serve`"),
             Request::Dial(port) => {
@@ -152,6 +159,7 @@ impl Server {
                     kind: CheckpointKind::Full,
                 };
                 let image = self.runtime.block_on(checkpoint.checkpoint(&dir, opts))?;
+                write_console(&dir, &lock(&self.console))?;
                 plain(Response::Image(image))
             }
             Request::BalloonTarget(bytes) => {
@@ -174,7 +182,10 @@ impl Server {
                 let debug = handle.debug().ok_or_else(|| absent("debug"))?;
                 plain(Response::Debug(debug.snapshot()))
             }
-            Request::Console => Err(absent("console")),
+            Request::Console => {
+                let reader = console::reader().ok_or_else(|| absent("console"))?;
+                Ok((Response::Fd, Some(reader.try_clone_to_owned()?)))
+            }
             Request::ForwardAdd(rule) => {
                 let forward = self.forward()?;
                 let port = self
@@ -197,11 +208,28 @@ impl Server {
         }
     }
 
-    /// Boots `spec`.
-    fn boot(self: &Arc<Self>, spec: VmSpec) -> Result<Booted> {
+    /// Boots `spec`. Its console is this process's: the machine itself
+    /// boots without one.
+    fn boot(self: &Arc<Self>, mut spec: VmSpec) -> Result<Booted> {
         self.claim(&spec.id)?;
-        let handle = self.runtime.block_on(self.driver.boot(spec, &self.dir));
-        self.install(handle)
+        let console = std::mem::take(&mut spec.console);
+        let handle = self
+            .open_console(&console)
+            .and_then(|()| self.runtime.block_on(self.driver.boot(spec, &self.dir)));
+        self.install(handle, console)
+    }
+
+    fn open_console(&self, console: &ConsoleSpec) -> Result<()> {
+        let opened = match console {
+            ConsoleSpec::Off => Ok(()),
+            ConsoleSpec::File(path) => console::to_file(path),
+            ConsoleSpec::Pipe => console::to_pipe(),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "only Off, File and Pipe consoles are available",
+            )),
+        };
+        opened.map_err(|e| Error::InvalidSpec(format!("hv: console: {e}")))
     }
 
     /// Refuses a spec for another VM, and a second VM in this process.
@@ -218,7 +246,11 @@ impl Server {
     }
 
     /// Keeps a booted VM, or releases the claim of a boot that failed.
-    fn install(self: &Arc<Self>, handle: Result<Box<dyn VmHandle>>) -> Result<Booted> {
+    fn install(
+        self: &Arc<Self>,
+        handle: Result<Box<dyn VmHandle>>,
+        console: ConsoleSpec,
+    ) -> Result<Booted> {
         let handle: Arc<dyn VmHandle> = match handle {
             Ok(handle) => Arc::from(handle),
             Err(e) => {
@@ -233,9 +265,10 @@ impl Server {
             state: handle.state(),
             vsock: handle.vsock().is_some(),
             balloon: handle.balloon().is_some(),
-            console: false,
+            console: console == ConsoleSpec::Pipe,
             port_forward: forward.is_some(),
         };
+        *lock(&self.console) = console;
         let events = handle.events();
         *lock(&self.vm) = Some(Vm {
             handle,
@@ -279,6 +312,24 @@ impl Server {
             .and_then(|vm| vm.forward.clone())
             .ok_or_else(|| absent("port forwarding"))
     }
+}
+
+/// The console a checkpoint's VM had, which the machine's own image does
+/// not hold: the machine boots without one.
+const CONSOLE_FILE: &str = "console.json";
+
+fn write_console(dir: &Path, console: &ConsoleSpec) -> Result<()> {
+    let json = serde_json::to_vec(console).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join(CONSOLE_FILE), json)?;
+    Ok(())
+}
+
+/// An image without the record restores without a console.
+fn read_console(dir: &Path) -> ConsoleSpec {
+    std::fs::read(dir.join(CONSOLE_FILE))
+        .ok()
+        .and_then(|json| serde_json::from_slice(&json).ok())
+        .unwrap_or_default()
 }
 
 /// A capability the VM was not built with; the driver's accessors do not

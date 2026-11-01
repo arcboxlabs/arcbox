@@ -13,11 +13,14 @@
 fn main() -> std::process::ExitCode {
     use std::process::ExitCode;
 
-    use arcbox_hv_driver::serve;
-    use tracing_subscriber::filter::EnvFilter;
+    use arcbox_hv_driver::serve::{self, console};
+    use tracing_subscriber::filter::{EnvFilter, Targets};
     use tracing_subscriber::prelude::*;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let console_targets = console::TARGETS.iter().fold(Targets::new(), |t, target| {
+        t.with_target(*target, tracing::Level::INFO)
+    });
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -25,6 +28,7 @@ fn main() -> std::process::ExitCode {
                 .with_ansi(false)
                 .with_filter(filter),
         )
+        .with(console::ConsoleLayer.with_filter(console_targets))
         .init();
 
     let args = match parse(std::env::args().skip(1)) {

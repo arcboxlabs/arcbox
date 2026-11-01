@@ -15,11 +15,12 @@
 //!     VmmProcess ◀─ Watch ┴── vmm.sock ──▶       restore, vsock, ...)
 //! ```
 //!
-//! - [`driver`] — [`HvDriver`]: `VmDriver` and `Prepare` (spawn without a
-//!   VM).
+//! - [`driver`] — [`HvDriver`]: `VmDriver`, `Prepare` (spawn without a
+//!   VM) and `Adopt` (find a process again after a daemon restart).
 //! - `process` — the process as the driver sees it: exit, kill, events.
 //! - `prepared`, `handle` — the port's `PreparedVm` and `VmHandle`, each a
-//!   request on the control socket.
+//!   request on the control socket. vsock connections and the console pipe
+//!   arrive as descriptors passed over it.
 //! - `proto`, `wire`, `control` — the control protocol, its framing with
 //!   `SCM_RIGHTS`, and one request with a deadline.
 //! - [`serve`] — the process side, run by the `arcbox-hv-vmm` binary.
@@ -41,6 +42,8 @@ mod proto;
 #[doc(hidden)]
 pub mod serve;
 mod wire;
+
+use std::os::fd::{AsRawFd, OwnedFd};
 
 use arcbox_vm_driver::{CheckpointImage, CheckpointKind, Error, Result};
 pub use driver::HvDriver;
@@ -68,4 +71,16 @@ fn driver_error(
         message: message.into(),
         source: Some(Box::new(source)),
     }
+}
+
+fn set_nonblocking(fd: &OwnedFd) -> std::io::Result<()> {
+    // SAFETY: fcntl on a descriptor we own, with integer arguments only.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    // SAFETY: as above.
+    if flags < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
