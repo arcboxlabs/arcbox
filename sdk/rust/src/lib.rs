@@ -44,6 +44,7 @@ pub use sandbox::{
     ListSnapshotsOptions, RestoreOptions, Sandbox,
 };
 pub use types::{
-    Capabilities, IdlePolicy, LifecycleUpdate, NestedVirtCapability, SandboxEvent,
-    SandboxEventKind, SandboxInfo, SandboxState, SandboxSummary, Snapshot, Update,
+    Capabilities, IdlePolicy, LifecycleUpdate, LocationCapability, NestedVirtCapability,
+    RunLocation, SandboxEvent, SandboxEventKind, SandboxInfo, SandboxState, SandboxSummary,
+    Snapshot, Update,
 };

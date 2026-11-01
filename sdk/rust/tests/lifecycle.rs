@@ -3,7 +3,8 @@
 //! The contracts under test: create arms the readiness watch before
 //! Create and cleans up its minted id on failure; connect routes PAUSED
 //! through Resume; set_lifecycle's knobs are tri-state on the wire;
-//! capabilities are cached per client; errors carry the registry's
+//! capabilities are cached per client, refresh on request and drop
+//! unknown locations; create sends its run location; errors carry the registry's
 //! ErrorInfo detail over the coarse Connect code; list auto-paginates.
 
 use std::path::PathBuf;
@@ -12,8 +13,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use arcbox::{
-    ArcBox, ConnectOptions, Connection, CreateOptions, ErrorKind, LifecycleUpdate, SandboxState,
-    Update,
+    ArcBox, ConnectOptions, Connection, CreateOptions, ErrorKind, LifecycleUpdate, RunLocation,
+    SandboxState, Update,
 };
 use arcbox_connect::sandbox_v1 as pb;
 use arcbox_connect::sandbox_v1::watch_events_response;
@@ -139,7 +140,13 @@ impl pb::SandboxService for MockDaemon {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::GetCapabilitiesRequest>,
     ) -> ServiceResult<pb::GetCapabilitiesResponse> {
-        *self.capability_calls.lock().unwrap() += 1;
+        let calls = {
+            let mut calls = self.capability_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        // The session locks between the first fetch and any later one.
+        let locked = calls > 1;
         Response::ok(pb::GetCapabilitiesResponse {
             daemon_version: "0.0.0-mock".into(),
             protocol: 2,
@@ -149,6 +156,34 @@ impl pb::SandboxService for MockDaemon {
                 ..Default::default()
             }
             .into(),
+            locations: vec![
+                pb::LocationCapability {
+                    location: pb::RunLocation::RUN_LOCATION_HOST.into(),
+                    backend: "vz".into(),
+                    available: true,
+                    pause_resume: true,
+                    pause_available: !locked,
+                    pause_unavailable_reason: if locked {
+                        "the console session is locked".into()
+                    } else {
+                        String::new()
+                    },
+                    port_publishing: true,
+                    ..Default::default()
+                },
+                pb::LocationCapability {
+                    location: pb::RunLocation::RUN_LOCATION_NESTED.into(),
+                    unavailable_reason: "requires M3 or newer".into(),
+                    pause_resume: true,
+                    ..Default::default()
+                },
+                // A location from a newer daemon is not offered.
+                pb::LocationCapability {
+                    location: buffa::EnumValue::Unknown(7),
+                    available: true,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         })
     }
@@ -416,6 +451,87 @@ async fn capabilities_are_cached_per_client() {
     assert_eq!(second.protocol, 2);
     assert!(first.nested_virt.supported);
     assert_eq!(*mock.capability_calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn capabilities_map_each_known_location_and_drop_the_rest() {
+    let mock = Arc::new(MockDaemon::default());
+    let (_dir, path) = serve(mock.clone()).await;
+    let capabilities = client_for(&path).await.capabilities().await.unwrap();
+
+    let [host, nested] = capabilities.locations.as_slice() else {
+        panic!("expected host and nested, got {:?}", capabilities.locations);
+    };
+    assert_eq!(host.location, RunLocation::Host);
+    assert_eq!(host.backend.as_deref(), Some("vz"));
+    assert!(host.available && host.pause_resume && host.pause_available);
+    assert_eq!(host.pause_unavailable_reason, None);
+    assert!(host.port_publishing && !host.bind_mounts && !host.warm_prespawn);
+
+    assert_eq!(nested.location, RunLocation::Nested);
+    // Empty wire strings are absent, not `Some("")`.
+    assert_eq!(nested.backend, None);
+    assert!(!nested.available);
+    assert_eq!(
+        nested.unavailable_reason.as_deref(),
+        Some("requires M3 or newer")
+    );
+}
+
+#[tokio::test]
+async fn refresh_asks_again_so_a_pause_that_became_unavailable_shows() {
+    let mock = Arc::new(MockDaemon::default());
+    let (_dir, path) = serve(mock.clone()).await;
+    let client = client_for(&path).await;
+
+    assert!(client.capabilities().await.unwrap().locations[0].pause_available);
+    let refreshed = client.refresh_capabilities().await.unwrap();
+    let host = &refreshed.locations[0];
+    assert!(!host.pause_available);
+    assert_eq!(
+        host.pause_unavailable_reason.as_deref(),
+        Some("the console session is locked")
+    );
+    // The refreshed answer replaces the cached one.
+    assert!(!client.capabilities().await.unwrap().locations[0].pause_available);
+    assert_eq!(*mock.capability_calls.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn create_sends_its_run_location() {
+    let mock = Arc::new(MockDaemon::default());
+    let (_dir, path) = serve(mock.clone()).await;
+    let client = client_for(&path).await;
+
+    for run_location in [None, Some(RunLocation::Nested), Some(RunLocation::Host)] {
+        client
+            .create(
+                "",
+                CreateOptions {
+                    run_location,
+                    wait_until_ready: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let sent: Vec<_> = mock
+        .creates
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.run_location.as_known())
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            Some(pb::RunLocation::RUN_LOCATION_UNSPECIFIED),
+            Some(pb::RunLocation::RUN_LOCATION_NESTED),
+            Some(pb::RunLocation::RUN_LOCATION_HOST),
+        ]
+    );
 }
 
 #[tokio::test]

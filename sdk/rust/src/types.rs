@@ -93,6 +93,44 @@ pub struct NestedVirtCapability {
     pub reason: Option<String>,
 }
 
+/// Where a sandbox runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLocation {
+    /// A VM of its own on the macOS host, under VZ or HV.
+    Host,
+    /// A Firecracker microVM nested inside the System VM.
+    Nested,
+}
+
+/// What one run location can do, and whether it can right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LocationCapability {
+    pub location: RunLocation,
+    /// The driver its sandboxes run under (`"fc"`, `"vz"`, `"hv"`); unset
+    /// when unavailable.
+    pub backend: Option<String>,
+    /// Whether `create` can place a sandbox here.
+    pub available: bool,
+    /// Why not, when unavailable.
+    pub unavailable_reason: Option<String>,
+    /// Whether sandboxes here can pause and resume at all.
+    pub pause_resume: bool,
+    /// Whether a pause could run at the moment of the fetch. A VZ host
+    /// refuses while the macOS session is locked, so this changes without
+    /// the daemon restarting: re-fetch with `ArcBox::refresh_capabilities`.
+    pub pause_available: bool,
+    /// Why a pause would be refused now; the same text the refusal carries.
+    pub pause_unavailable_reason: Option<String>,
+    /// Whether restores claim VMMs started ahead of time.
+    pub warm_prespawn: bool,
+    /// Whether sandbox ports can be exposed on the host.
+    pub port_publishing: bool,
+    /// Whether `create` accepts bind mounts here (a sandbox with them can
+    /// never pause).
+    pub bind_mounts: bool,
+}
+
 /// What the daemon can do — the `ArcBox::capabilities` handshake.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -103,8 +141,11 @@ pub struct Capabilities {
     pub protocol: u32,
     /// Append-only named feature flags (e.g. `"pause_resume"`).
     pub features: Vec<String>,
-    /// Whether this host can run sandboxes at all.
+    /// Whether the nested location can run sandboxes on this host.
     pub nested_virt: NestedVirtCapability,
+    /// One entry per run location the daemon knows of, available or not.
+    /// Empty from a daemon that predates run locations.
+    pub locations: Vec<LocationCapability>,
 }
 
 /// One checkpointed sandbox image in the snapshot catalog.
@@ -303,6 +344,37 @@ pub fn summary_from_wire(summary: pb::SandboxSummary) -> SandboxSummary {
     }
 }
 
+pub fn run_location_to_wire(location: Option<RunLocation>) -> pb::RunLocation {
+    match location {
+        Some(RunLocation::Host) => pb::RunLocation::RUN_LOCATION_HOST,
+        Some(RunLocation::Nested) => pb::RunLocation::RUN_LOCATION_NESTED,
+        None => pb::RunLocation::RUN_LOCATION_UNSPECIFIED,
+    }
+}
+
+/// One location entry; `None` for a location this SDK does not know,
+/// which nothing could ask `create` for.
+fn location_from_wire(entry: pb::LocationCapability) -> Option<LocationCapability> {
+    let location = match entry.location.as_known()? {
+        pb::RunLocation::RUN_LOCATION_HOST => RunLocation::Host,
+        pb::RunLocation::RUN_LOCATION_NESTED => RunLocation::Nested,
+        pb::RunLocation::RUN_LOCATION_UNSPECIFIED => return None,
+    };
+    let non_empty = |text: String| (!text.is_empty()).then_some(text);
+    Some(LocationCapability {
+        location,
+        backend: non_empty(entry.backend),
+        available: entry.available,
+        unavailable_reason: non_empty(entry.unavailable_reason),
+        pause_resume: entry.pause_resume,
+        pause_available: entry.pause_available,
+        pause_unavailable_reason: non_empty(entry.pause_unavailable_reason),
+        warm_prespawn: entry.warm_prespawn,
+        port_publishing: entry.port_publishing,
+        bind_mounts: entry.bind_mounts,
+    })
+}
+
 pub fn capabilities_from_wire(response: pb::GetCapabilitiesResponse) -> Capabilities {
     let nested = response.nested_virt.as_option();
     Capabilities {
@@ -315,6 +387,11 @@ pub fn capabilities_from_wire(response: pb::GetCapabilitiesResponse) -> Capabili
                 .map(|nested| nested.reason.clone())
                 .filter(|reason| !reason.is_empty()),
         },
+        locations: response
+            .locations
+            .into_iter()
+            .filter_map(location_from_wire)
+            .collect(),
     }
 }
 

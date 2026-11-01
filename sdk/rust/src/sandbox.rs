@@ -11,15 +11,16 @@ use arcbox_connect::sandbox_v1::{
     SandboxServiceClient, SandboxSnapshotServiceClient, watch_events_response,
 };
 use connectrpc::client::{ClientTransport, ServerStream, SharedHttp2Connection};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use crate::client::ClientContext;
 use crate::connection::Connection;
 use crate::error::{Error, ErrorKind, Result};
 use crate::types::{
-    Capabilities, IdlePolicy, LifecycleUpdate, SandboxEvent, SandboxInfo, SandboxState,
-    SandboxSummary, Snapshot, Update, capabilities_from_wire, idle_action_to_wire, info_from_wire,
-    seconds_to_wire, state_to_wire, summary_from_wire, time_from_wire,
+    Capabilities, IdlePolicy, LifecycleUpdate, RunLocation, SandboxEvent, SandboxInfo,
+    SandboxState, SandboxSummary, Snapshot, Update, capabilities_from_wire, idle_action_to_wire,
+    info_from_wire, run_location_to_wire, seconds_to_wire, state_to_wire, summary_from_wire,
+    time_from_wire,
 };
 
 /// The one concrete client this SDK drives: the generated Connect
@@ -73,6 +74,11 @@ pub struct CreateOptions {
     pub labels: BTreeMap<String, String>,
     /// `Some(false)` disables networking entirely (no network device).
     pub network: Option<bool>,
+    /// Where the sandbox runs. Unset = the daemon's default: the host when
+    /// it runs host sandboxes, else nested. A location the daemon cannot
+    /// run is refused rather than replaced; [`ArcBox::capabilities`] lists
+    /// which locations are available.
+    pub run_location: Option<RunLocation>,
     /// Resolve only once the sandbox is READY (default `true`).
     pub wait_until_ready: bool,
 }
@@ -89,6 +95,7 @@ impl Default for CreateOptions {
             env: BTreeMap::new(),
             labels: BTreeMap::new(),
             network: None,
+            run_location: None,
             wait_until_ready: true,
         }
     }
@@ -161,7 +168,9 @@ pub struct ListSnapshotsOptions {
 #[derive(Clone)]
 pub struct ArcBox {
     ctx: ClientContext,
-    capabilities: std::sync::Arc<OnceCell<Capabilities>>,
+    /// The cached handshake. An async mutex, so concurrent first callers
+    /// share one fetch and a refresh replaces the entry in place.
+    capabilities: std::sync::Arc<Mutex<Option<Capabilities>>>,
 }
 
 impl ArcBox {
@@ -185,7 +194,7 @@ impl ArcBox {
     pub fn with_connection(connection: &Connection) -> Result<Self> {
         Ok(Self {
             ctx: ClientContext::new(connection)?,
-            capabilities: std::sync::Arc::new(OnceCell::new()),
+            capabilities: std::sync::Arc::new(Mutex::new(None)),
         })
     }
 
@@ -198,28 +207,48 @@ impl ArcBox {
     }
 
     /// What the daemon can do: version, protocol level, feature flags,
-    /// and whether nested virtualization is available. Answered
+    /// and per run location what it can run and pause. Answered
     /// host-side (works before any sandbox exists) and cached for the
     /// life of this client — a failed fetch is not cached, so the next
-    /// call retries.
+    /// call retries. Whether a pause can run right now
+    /// ([`LocationCapability::pause_available`](crate::LocationCapability::pause_available))
+    /// changes while the daemon runs; [`Self::refresh_capabilities`] asks
+    /// again.
     ///
     /// # Errors
     ///
     /// Any RPC failure, mapped onto [`Error`].
     pub async fn capabilities(&self) -> Result<Capabilities> {
-        let fetched = self
-            .capabilities
-            .get_or_try_init(|| async {
-                let response = self
-                    .client()
-                    .get_capabilities(pb::GetCapabilitiesRequest::default())
-                    .await
-                    .map_err(|error| Error::from_connect(error, "arcbox.capabilities"))?
-                    .into_owned();
-                Ok::<_, Error>(capabilities_from_wire(response))
-            })
-            .await?;
-        Ok(fetched.clone())
+        let mut cached = self.capabilities.lock().await;
+        if let Some(capabilities) = &*cached {
+            return Ok(capabilities.clone());
+        }
+        let fetched = self.fetch_capabilities().await?;
+        *cached = Some(fetched.clone());
+        Ok(fetched)
+    }
+
+    /// Fetch the handshake again and replace the cached one. On failure
+    /// the previous answer stays cached.
+    ///
+    /// # Errors
+    ///
+    /// Any RPC failure, mapped onto [`Error`].
+    pub async fn refresh_capabilities(&self) -> Result<Capabilities> {
+        let mut cached = self.capabilities.lock().await;
+        let fetched = self.fetch_capabilities().await?;
+        *cached = Some(fetched.clone());
+        Ok(fetched)
+    }
+
+    async fn fetch_capabilities(&self) -> Result<Capabilities> {
+        let response = self
+            .client()
+            .get_capabilities(pb::GetCapabilitiesRequest::default())
+            .await
+            .map_err(|error| Error::from_connect(error, "arcbox.capabilities"))?
+            .into_owned();
+        Ok(capabilities_from_wire(response))
     }
 
     /// Create a sandbox and (by default) wait until it is READY.
@@ -287,6 +316,7 @@ impl ArcBox {
             ttl_seconds: seconds_to_wire(options.ttl),
             idle_timeout_seconds: seconds_to_wire(options.idle_timeout),
             on_idle: idle_action_to_wire(options.on_idle).into(),
+            run_location: run_location_to_wire(options.run_location).into(),
             ..Default::default()
         };
         if options.vcpus.is_some() || options.memory_mib.is_some() {

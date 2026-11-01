@@ -74,8 +74,11 @@ the old crate does need rewriting rather than merely re-resolving.
 ## Status
 
 Shipped: connection resolution, the registry-derived error type, the
-sandbox lifecycle core — `capabilities`, `create` (readiness watch
-armed before Create; failed creates remove their client-minted id),
+sandbox lifecycle core — `capabilities` (cached per client, with one
+`LocationCapability` per run location; `refresh_capabilities` asks
+again, since whether a pause can run right now changes), `create`
+(readiness watch armed before Create; failed creates remove their
+client-minted id; `run_location` picks host or nested),
 `connect` (PAUSING settle poll, PAUSED resume, STARTING readiness wait,
 one overall deadline), `list` (auto-paginating), `info`, `kill`,
 `pause`, tri-state `set_lifecycle` — and the commands surface:
