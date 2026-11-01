@@ -196,6 +196,7 @@ impl ComputerManager {
                     .into(),
             ));
         }
+        super::capabilities::check_os_build(&self.services.placement, &snap_meta)?;
         let geometry = snap_meta.geometry.ok_or_else(|| {
             ComputerError::FailedPrecondition(format!(
                 "snapshot {} predates geometry recording; re-checkpoint the source sandbox with this agent",

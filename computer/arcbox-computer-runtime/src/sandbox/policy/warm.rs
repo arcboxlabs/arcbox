@@ -116,6 +116,12 @@ pub(in crate::sandbox) fn reject_reserved_labels(labels: &HashMap<String, String
             "snapshot label {WARM_KEY_LABEL} is reserved for the warm-create cache"
         )));
     }
+    if labels.contains_key(crate::sandbox::capabilities::OS_BUILD_LABEL) {
+        return Err(ComputerError::Config(format!(
+            "snapshot label {} is reserved for the checkpoint's macOS build",
+            crate::sandbox::capabilities::OS_BUILD_LABEL
+        )));
+    }
     if labels.contains_key(crate::template_catalog::TEMPLATE_LABEL) {
         return Err(ComputerError::Config(format!(
             "snapshot label {} is reserved for the template catalog",

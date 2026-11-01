@@ -40,7 +40,7 @@ impl ComputerFlows {
             bind_mounts,
         )
         .map_err(TaskFailure::recoverable)?;
-        let request = match spec {
+        let mut request = match spec {
             Some(spec) => CheckpointRequest {
                 name: spec.name,
                 labels: spec.labels,
@@ -54,6 +54,14 @@ impl ComputerFlows {
                 resume_after: !hold,
             },
         };
+        // The macOS build the image is bound to (D6), for the restore that
+        // must refuse it on any other.
+        if let Some(build) = &self.services.placement.os_build {
+            request.labels.insert(
+                crate::sandbox::capabilities::OS_BUILD_LABEL.to_owned(),
+                build.clone(),
+            );
+        }
         checkpoint_impl(&self.computer, &self.services.snapshots, &self.id, request)
             .await
             .map_err(|failure| match failure {

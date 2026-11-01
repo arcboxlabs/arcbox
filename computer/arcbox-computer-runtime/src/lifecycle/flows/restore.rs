@@ -202,6 +202,11 @@ impl ComputerFlows {
             .snapshots
             .find_by_id(&snapshot_id)
             .map_err(|error| recoverable(error.into()))?;
+        // A checkpoint from another macOS build is refused before anything
+        // is re-created: the computer parks back at `Paused` with its disk
+        // and checkpoint untouched, and the caller reads why (D6).
+        sandbox::capabilities::check_os_build(&services.placement, &snap_meta)
+            .map_err(recoverable)?;
 
         let started = std::time::Instant::now();
         let resumed = restore_paused(

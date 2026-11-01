@@ -82,3 +82,24 @@ pub fn capture_precondition(placement: &Placement, pausing: bool, bind_mounts: b
         .checkpoint_available()
         .map_err(ComputerError::FailedPrecondition)
 }
+
+/// The label a checkpoint records its macOS build under (D6).
+pub const OS_BUILD_LABEL: &str = "arcbox.os_build";
+
+/// Refuse to restore a checkpoint another macOS build wrote (D6). A
+/// checkpoint without the label predates the binding — or comes from the
+/// nested location, which records none — and is let through.
+pub fn check_os_build(placement: &Placement, meta: &SnapshotMeta) -> Result<()> {
+    let (Some(here), Some(there)) = (&placement.os_build, meta.labels.get(OS_BUILD_LABEL)) else {
+        return Ok(());
+    };
+    if here == there {
+        return Ok(());
+    }
+    Err(ComputerError::FailedPrecondition(format!(
+        "checkpoint {} was written on macOS build {there} and this Mac runs {here}; a \
+         checkpoint restores only on the build that wrote it, and nothing it retained was \
+         touched",
+        meta.id
+    )))
+}

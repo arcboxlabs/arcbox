@@ -279,6 +279,57 @@ async fn a_sandbox_with_bind_mounts_cannot_pause() {
     );
 }
 
+/// D6: a pause from another macOS build does not resume. The sandbox stays
+/// paused with its disk, the reason names both builds, and back on the
+/// build that wrote it the same resume succeeds.
+#[tokio::test]
+async fn a_resume_after_a_macos_update_keeps_the_disk_and_says_why() {
+    let mut fixture = Setup::host(vz_driver(), Placement::host(BUILD))
+        .build()
+        .await;
+    fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
+    let id = fixture.ready("updated").await;
+    fixture.manager.pause_computer(&id).await.unwrap();
+    fixture.await_state(&id, ComputerState::Paused).await;
+    let parked = fixture.vm_dir(&id).join("paused-rootfs.ext4");
+    assert!(parked.exists());
+
+    fixture = fixture.restart_at(Placement::host("25F71")).await;
+    fixture.settle_network_cleanups().await;
+    match fixture
+        .manager
+        .resume_computer(&id, pause_reason::RESUME)
+        .await
+    {
+        Err(ComputerError::FailedPrecondition(reason)) => {
+            assert!(
+                reason.contains(BUILD) && reason.contains("25F71"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected FAILED_PRECONDITION, got {other:?}"),
+    }
+    assert_eq!(
+        fixture.manager.inspect_computer(&id).unwrap().state,
+        ComputerState::Paused
+    );
+    assert!(parked.exists(), "the disk is kept");
+    assert!(
+        fixture.driver().restored_vms().is_empty(),
+        "nothing was attempted"
+    );
+
+    fixture = fixture.restart_at(Placement::host(BUILD)).await;
+    fixture.settle_network_cleanups().await;
+    fixture
+        .manager
+        .resume_computer(&id, pause_reason::RESUME)
+        .await
+        .unwrap();
+    fixture.await_state(&id, ComputerState::Ready).await;
+    assert_eq!(fixture.run(&id, &["/bin/hello"]).await, b"hi");
+}
+
 /// The nested location keeps its contract: the driver it is given is
 /// Firecracker's shape, and without the jailer nothing pauses.
 #[tokio::test]
