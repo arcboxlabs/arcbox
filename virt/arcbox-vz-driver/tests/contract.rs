@@ -3,8 +3,10 @@
 //! Every check the port's `driver_contract!` runs against the fake runs here
 //! against `VzDriver`, one `#[ignore]`d test each. The list below mirrors
 //! `driver_contract!`; a check added to the port is added here. Checks for
-//! capabilities VZ does not claim (checkpoint, adopt, prepare, staging) skip
-//! themselves.
+//! capabilities VZ does not claim (adopt, prepare, staging) skip
+//! themselves. The checks that save a checkpoint need the console session
+//! unlocked (`VzDriver::checkpoint_blocker`); while it is locked they print
+//! why and pass without running.
 //!
 //! ## Prerequisites
 //!
@@ -16,8 +18,12 @@
 //! | `VZ_DIAL_PORT`  | Optional guest vsock port that accepts once booted       |
 //!
 //! Tests without `VZ_KERNEL` return early. The guest only has to print on
-//! `hvc0` and keep running until the test stops it. The test binary needs
-//! the `com.apple.security.virtualization` entitlement.
+//! `hvc0` and keep running until the test stops it; every VM gets one
+//! 64 MiB scratch disk as `/dev/vda`. The VZ checkpoint spike's initramfs
+//! (`arcbox-vmm/examples/checkpoint_linux_spike/guest/build.sh`) with
+//! `VZ_CMDLINE="console=hvc0 rdinit=/init loglevel=4 panic=-1"` is such a
+//! guest. The test binary needs the `com.apple.security.virtualization`
+//! entitlement.
 //!
 //! ## Running
 //!
@@ -36,14 +42,16 @@ use std::time::Duration;
 
 use arcbox_vm_driver::testkit::ContractHarness;
 use arcbox_vm_driver::{
-    BootSpec, ConsoleSpec, IsolationSpec, MacAddr, NicAttachment, NicSpec, VmDriver, VmHandle,
-    VmId, VmSpec, VsockSpec,
+    BootSpec, CacheMode, ConsoleSpec, DiskSpec, IsolationSpec, MacAddr, NicAttachment, NicSpec,
+    VmDriver, VmHandle, VmId, VmSpec, VsockSpec,
 };
 use arcbox_vz_driver::VzDriver;
 use async_trait::async_trait;
 
 /// How long `ready` waits for the guest's first console output.
 const READY_DEADLINE: Duration = Duration::from_secs(60);
+/// The scratch disk every VM gets.
+const DISK_BYTES: u64 = 64 << 20;
 
 /// `VzDriver` over temporary directories.
 struct VzHarness {
@@ -79,6 +87,12 @@ impl ContractHarness for VzHarness {
     }
 
     fn spec(&self, id: &VmId) -> VmSpec {
+        let disk = self.root.path().join(format!("{id}.img"));
+        if !disk.exists() {
+            std::fs::File::create(&disk)
+                .and_then(|file| file.set_len(DISK_BYTES))
+                .expect("scratch disk");
+        }
         VmSpec {
             id: id.clone(),
             cpus: 2,
@@ -88,7 +102,13 @@ impl ContractHarness for VzHarness {
                 cmdline: self.cmdline.clone(),
                 initrd: self.initrd.clone(),
             },
-            disks: vec![],
+            disks: vec![DiskSpec {
+                id: "scratch".into(),
+                path: disk,
+                read_only: false,
+                root: false,
+                cache: CacheMode::Unsafe,
+            }],
             nics: vec![NicSpec {
                 id: "eth0".into(),
                 mac: MacAddr::new([0x02, 0xab, 0x00, 0x00, 0x00, 0x01]),
@@ -153,13 +173,38 @@ macro_rules! contract {
     };
 }
 
+/// Checks that save a checkpoint: skipped, with the reason printed, while
+/// the console session cannot take one.
+macro_rules! checkpoint_contract {
+    ($($check:ident),* $(,)?) => {
+        $(
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "needs VZ_KERNEL, the virtualization entitlement and an unlocked session"]
+            async fn $check() {
+                let Some(harness) = VzHarness::from_env() else {
+                    return;
+                };
+                if let Some(session) = harness.driver.checkpoint_blocker() {
+                    eprintln!("SKIPPED {}: {session}", stringify!($check));
+                    return;
+                }
+                arcbox_vm_driver::testkit::contract::$check(&harness).await;
+            }
+        )*
+    };
+}
+
+checkpoint_contract! {
+    checkpoint_resume_keeps_running,
+    checkpoint_hold_quiesces,
+    restore_yields_a_live_vm,
+    restore_reattaches_disks,
+}
+
 contract! {
     boot_reports_running_then_exits_on_kill,
     events_deliver_exit_exactly_once,
     capabilities_agree_with_accessors,
-    checkpoint_resume_keeps_running,
-    checkpoint_hold_quiesces,
-    restore_yields_a_live_vm,
     detach_then_adopt_round_trip,
     vsock_dial_reaches_the_guest,
     foreign_checkpoint_is_refused,
@@ -167,7 +212,6 @@ contract! {
     prepare_then_boot_matches_boot,
     prepared_listener_is_live_before_boot,
     discard_kills_a_prepared_vm,
-    restore_reattaches_disks,
     a_staged_spec_boots,
     a_staged_disk_can_be_taken_back_out,
     a_staged_checkpoint_restores,
