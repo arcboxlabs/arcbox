@@ -44,7 +44,7 @@ once, here.
 
 These cancellation guarantees require the Tokio runtime to keep running. Runtime shutdown or process termination can leave temporary images, mount directories, or loop devices behind. The default busybox rootfs builder uses a separate pipeline.
 
-Enable `remote-image` to resolve registry references with the re-exported `oci2rootfs::RemoteRef`. Keep the resolved source's config and manifest digest before passing `RootfsSource::Image(source)` to `build_rootfs`. Use fully qualified references: the current dependency misparses bare numeric tags such as `debian:12`. The opt-in registry integration test defaults to `docker.io/library/debian:12`, builds a 32 GiB sparse image, and reads the result through the Linux ext4 driver:
+Enable `remote-image` to resolve registry references with the re-exported `oci2rootfs::RemoteRef`. Keep the resolved source's config and manifest digest before passing `RootfsSource::Image(source)` to `build_rootfs`. Qualify references first: `oci2rootfs` misparses bare numeric tags such as `debian:12`. `workload::ImageRef` qualifies a `docker:<ref>` template the way `docker pull` does, and `workload::pull` fetches it for the guest platform and keeps the image config for `workload::bundle_spec`. The opt-in registry integration test defaults to `docker.io/library/debian:12`, builds a 32 GiB sparse image, and reads the result through the Linux ext4 driver:
 
 ```bash
 sudo -E env ARCBOX_REQUIRE_BLOCK_TOOLS=1 cargo test -p arcbox-computer-runtime --features remote-image --test integration \

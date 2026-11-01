@@ -13,13 +13,21 @@
 //! here. OCI's `Status` has no paused state; pause belongs to
 //! `ComputerManager`, and nothing here models lifecycle.
 //!
+//! `docker:<ref>` templates name the image; [`ImageRef`] qualifies the
+//! reference and, with the `remote-image` feature, `pull` fetches it for
+//! [`guest_platform`] through `oci2rootfs`.
+//!
 //! [`StartCommand`]: crate::StartCommand
 
 mod check;
+mod image;
 mod spec;
 mod start;
 
 pub use check::Rejected;
+pub use image::{DOCKER_TEMPLATE_PREFIX, ImageRef, guest_platform};
+#[cfg(feature = "remote-image")]
+pub use image::{PulledImage, pull};
 pub use spec::{ImageAccounts, WorkloadRequest, bundle_spec};
 pub use start::Workload;
 
@@ -37,6 +45,9 @@ pub enum WorkloadError {
     /// The spec sets a field the guest agent cannot carry out.
     #[error("OCI field {0} is not supported in a computer")]
     Unsupported(String),
+    /// The image reference is malformed or its pull failed.
+    #[error("{0}")]
+    Image(String),
     /// The user or group does not resolve against the image.
     #[error("{0}")]
     User(String),
