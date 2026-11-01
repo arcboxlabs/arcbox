@@ -27,6 +27,7 @@ from arcbox._types import (
     Snapshot,
     Unchanged,
     capabilities_from_proto,
+    run_location_to_proto,
     sandbox_event_from_proto,
     sandbox_info_from_proto,
     sandbox_state_from_proto,
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from arcbox._connection import Connection
-    from arcbox._types import IdlePolicy, SandboxState
+    from arcbox._types import IdlePolicy, RunLocation, SandboxState
 
     from ._client import AsyncServerStream
 
@@ -129,15 +130,17 @@ class AsyncArcBox:
         """Close the SDK-owned HTTP client (no-op for an injected one)."""
         await self._client.aclose()
 
-    async def capabilities(self) -> Capabilities:
+    async def capabilities(self, *, refresh: bool = False) -> Capabilities:
         """What the daemon can do: version, sandbox protocol level,
-        feature flags, and whether nested virtualization is available.
+        feature flags, and per run location what it can run and pause.
         Answered host-side (works before any sandbox exists) and cached
         for the life of this client — a failed fetch is not cached, so
-        the next call retries. The SDK does not gate on it: the daemon
-        fails fast on its own (a ``CapabilityError`` from ``create``);
-        this is the inspectable version of the same answer."""
-        if self._capabilities is None:
+        the next call retries. ``refresh=True`` asks again: whether a
+        pause can run right now (``LocationCapability.pause_available``)
+        changes while the daemon runs. The SDK does not gate on it: the
+        daemon fails fast on its own (a ``CapabilityError`` from
+        ``create``); this is the inspectable version of the same answer."""
+        if self._capabilities is None or refresh:
             with wrap_errors("arcbox.capabilities"):
                 self._capabilities = capabilities_from_proto(
                     await self._client.unary(
@@ -174,6 +177,7 @@ class AsyncArcBox:
         no_default_env: bool = False,
         labels: Mapping[str, str] | None = None,
         network: bool | None = None,
+        run_location: RunLocation | None = None,
         wait_until_ready: bool = True,
     ) -> AsyncSandbox:
         """Create a sandbox and (by default) wait until it is READY.
@@ -189,6 +193,13 @@ class AsyncArcBox:
         ``ttl`` is the hard maximum lifetime — on expiry the daemon
         always destroys the sandbox. ``idle_timeout`` + ``on_idle`` is
         the independent idle-reaping knob; never conflate the two.
+
+        ``run_location`` picks where the sandbox runs: ``"host"`` (its own
+        VM on the Mac) or ``"nested"`` (Firecracker inside the System VM).
+        None leaves it to the daemon: the host when it runs host
+        sandboxes, else nested. A location the daemon cannot run is
+        refused rather than replaced; ``capabilities()`` lists which are
+        available.
 
         The sandbox id is minted client-side so the readiness
         subscription can be armed BEFORE the create call —
@@ -219,6 +230,7 @@ class AsyncArcBox:
                             no_default_env=no_default_env,
                             labels=labels,
                             network=network,
+                            run_location=run_location,
                         )
                         await self._wait_ready(sandbox_id, events)
                 else:
@@ -236,6 +248,7 @@ class AsyncArcBox:
                         no_default_env=no_default_env,
                         labels=labels,
                         network=network,
+                        run_location=run_location,
                     )
                 return AsyncSandbox(self._client, sandbox_id)
             except BaseException:
@@ -481,6 +494,7 @@ class AsyncArcBox:
         no_default_env: bool,
         labels: Mapping[str, str] | None,
         network: bool | None,
+        run_location: RunLocation | None,
     ) -> None:
         request = sandbox_pb2.CreateSandboxRequest(
             id=sandbox_id,
@@ -490,6 +504,7 @@ class AsyncArcBox:
             no_default_cmd=no_default_cmd,
             env=dict(env) if env else {},
             no_default_env=no_default_env,
+            run_location=run_location_to_proto(run_location),
             ttl_seconds=_seconds_to_wire(ttl),
             idle_timeout_seconds=_seconds_to_wire(idle_timeout),
             on_idle=(
@@ -638,6 +653,7 @@ class AsyncSandbox:
         no_default_env: bool = False,
         labels: Mapping[str, str] | None = None,
         network: bool | None = None,
+        run_location: RunLocation | None = None,
         wait_until_ready: bool = True,
         connection: Connection | None = None,
     ) -> AsyncSandbox:
@@ -661,6 +677,7 @@ class AsyncSandbox:
                 no_default_env=no_default_env,
                 labels=labels,
                 network=network,
+                run_location=run_location,
                 wait_until_ready=wait_until_ready,
             )
         except BaseException:

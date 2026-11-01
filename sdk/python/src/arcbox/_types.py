@@ -39,6 +39,10 @@ IdlePolicy = Literal["kill", "pause"]
 #: Transport protocol of an exposed port.
 PortProtocol = Literal["tcp", "udp"]
 
+#: Where a sandbox runs: "host" is a VM of its own on the macOS host (VZ
+#: or HV), "nested" a Firecracker microVM inside the System VM.
+RunLocation = Literal["host", "nested"]
+
 #: Kind of a sandbox lifecycle event. "idle" fires when an execution
 #: exits and the sandbox returns to ready; "pausing"/"resumed" carry a
 #: "reason" attribute distinguishing client calls from automation
@@ -283,6 +287,35 @@ class NestedVirtCapability:
 
 
 @dataclass(frozen=True)
+class LocationCapability:
+    """What one run location can do, and whether it can right now."""
+
+    location: RunLocation
+    #: Whether ``create`` can place a sandbox here.
+    available: bool
+    #: Whether sandboxes here can pause and resume at all.
+    pause_resume: bool
+    #: Whether a pause could run at the moment of the fetch. A VZ host
+    #: refuses while the macOS session is locked, so this changes without
+    #: the daemon restarting: re-fetch with ``capabilities(refresh=True)``.
+    pause_available: bool
+    #: Whether restores claim VMMs started ahead of time.
+    warm_prespawn: bool
+    #: Whether sandbox ports can be exposed on the host.
+    port_publishing: bool
+    #: Whether ``create`` accepts bind mounts here (a sandbox with them
+    #: can never pause).
+    bind_mounts: bool
+    #: The driver its sandboxes run under ("fc", "vz", "hv"); None when
+    #: unavailable.
+    backend: str | None = None
+    #: Why not, when unavailable.
+    unavailable_reason: str | None = None
+    #: Why a pause would be refused now; the same text the refusal carries.
+    pause_unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class Capabilities:
     """What the daemon can do — the ``arcbox.capabilities()`` handshake."""
 
@@ -292,8 +325,11 @@ class Capabilities:
     protocol: int
     #: Append-only named feature flags (e.g. "pause_resume").
     features: list[str]
-    #: Whether this host can run sandboxes at all.
+    #: Whether the nested location can run sandboxes on this host.
     nested_virt: NestedVirtCapability
+    #: One entry per run location the daemon knows of, available or not.
+    #: Empty from a daemon that predates run locations.
+    locations: list[LocationCapability] = field(default_factory=list[LocationCapability])
 
 
 @dataclass(frozen=True)
@@ -558,14 +594,49 @@ def sandbox_event_from_proto(event: sandbox_pb2.SandboxEvent) -> SandboxEvent:
     )
 
 
+_RUN_LOCATION_VALUES: dict[RunLocation, sandbox_pb2.RunLocation] = {
+    "host": sandbox_pb2.RUN_LOCATION_HOST,
+    "nested": sandbox_pb2.RUN_LOCATION_NESTED,
+}
+
+_RUN_LOCATION_NAMES: dict[int, RunLocation] = {
+    value: name for name, value in _RUN_LOCATION_VALUES.items()
+}
+
+
+def run_location_to_proto(location: RunLocation | None) -> sandbox_pb2.RunLocation:
+    """Public run location -> wire enum (None leaves it to the daemon)."""
+    if location is None:
+        return sandbox_pb2.RUN_LOCATION_UNSPECIFIED
+    return _RUN_LOCATION_VALUES[location]
+
+
 def capabilities_from_proto(response: sandbox_pb2.GetCapabilitiesResponse) -> Capabilities:
-    """Map the GetCapabilities response to the public DTO."""
+    """Map the GetCapabilities response to the public DTO. A location this
+    SDK predates is dropped: nothing could ask ``create`` for it."""
     nested = response.nested_virt
+    locations = [
+        LocationCapability(
+            location=_RUN_LOCATION_NAMES[entry.location],
+            available=entry.available,
+            pause_resume=entry.pause_resume,
+            pause_available=entry.pause_available,
+            warm_prespawn=entry.warm_prespawn,
+            port_publishing=entry.port_publishing,
+            bind_mounts=entry.bind_mounts,
+            backend=entry.backend or None,
+            unavailable_reason=entry.unavailable_reason or None,
+            pause_unavailable_reason=entry.pause_unavailable_reason or None,
+        )
+        for entry in response.locations
+        if entry.location in _RUN_LOCATION_NAMES
+    ]
     return Capabilities(
         daemon_version=response.daemon_version,
         protocol=response.protocol,
         features=list(response.features),
         nested_virt=NestedVirtCapability(supported=nested.supported, reason=nested.reason or None),
+        locations=locations,
     )
 
 

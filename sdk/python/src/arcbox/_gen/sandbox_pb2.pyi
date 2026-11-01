@@ -55,6 +55,12 @@ class PortProtocol(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     PORT_PROTOCOL_UNSPECIFIED: _ClassVar[PortProtocol]
     PORT_PROTOCOL_TCP: _ClassVar[PortProtocol]
     PORT_PROTOCOL_UDP: _ClassVar[PortProtocol]
+
+class RunLocation(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    RUN_LOCATION_UNSPECIFIED: _ClassVar[RunLocation]
+    RUN_LOCATION_HOST: _ClassVar[RunLocation]
+    RUN_LOCATION_NESTED: _ClassVar[RunLocation]
 SANDBOX_STATE_UNSPECIFIED: SandboxState
 SANDBOX_STATE_STARTING: SandboxState
 SANDBOX_STATE_READY: SandboxState
@@ -85,6 +91,9 @@ NETWORK_MODE_NONE: NetworkMode
 PORT_PROTOCOL_UNSPECIFIED: PortProtocol
 PORT_PROTOCOL_TCP: PortProtocol
 PORT_PROTOCOL_UDP: PortProtocol
+RUN_LOCATION_UNSPECIFIED: RunLocation
+RUN_LOCATION_HOST: RunLocation
+RUN_LOCATION_NESTED: RunLocation
 
 class NetworkSpec(_message.Message):
     __slots__ = ("mode",)
@@ -123,7 +132,7 @@ class KeepAlive(_message.Message):
     def __init__(self) -> None: ...
 
 class CreateSandboxRequest(_message.Message):
-    __slots__ = ("id", "labels", "limits", "cmd", "no_default_cmd", "env", "no_default_env", "working_dir", "user", "mounts", "network", "ttl_seconds", "ssh_public_key", "template", "idle_timeout_seconds", "on_idle")
+    __slots__ = ("id", "labels", "limits", "cmd", "no_default_cmd", "env", "no_default_env", "working_dir", "user", "mounts", "network", "ttl_seconds", "ssh_public_key", "template", "idle_timeout_seconds", "on_idle", "run_location")
     class LabelsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -154,6 +163,7 @@ class CreateSandboxRequest(_message.Message):
     TEMPLATE_FIELD_NUMBER: _ClassVar[int]
     IDLE_TIMEOUT_SECONDS_FIELD_NUMBER: _ClassVar[int]
     ON_IDLE_FIELD_NUMBER: _ClassVar[int]
+    RUN_LOCATION_FIELD_NUMBER: _ClassVar[int]
     id: str
     labels: _containers.ScalarMap[str, str]
     limits: ResourceLimits
@@ -170,7 +180,8 @@ class CreateSandboxRequest(_message.Message):
     template: str
     idle_timeout_seconds: int
     on_idle: IdleAction
-    def __init__(self, id: _Optional[str] = ..., labels: _Optional[_Mapping[str, str]] = ..., limits: _Optional[_Union[ResourceLimits, _Mapping]] = ..., cmd: _Optional[_Iterable[str]] = ..., no_default_cmd: _Optional[bool] = ..., env: _Optional[_Mapping[str, str]] = ..., no_default_env: _Optional[bool] = ..., working_dir: _Optional[str] = ..., user: _Optional[str] = ..., mounts: _Optional[_Iterable[_Union[Mount, _Mapping]]] = ..., network: _Optional[_Union[NetworkSpec, _Mapping]] = ..., ttl_seconds: _Optional[int] = ..., ssh_public_key: _Optional[str] = ..., template: _Optional[str] = ..., idle_timeout_seconds: _Optional[int] = ..., on_idle: _Optional[_Union[IdleAction, str]] = ...) -> None: ...
+    run_location: RunLocation
+    def __init__(self, id: _Optional[str] = ..., labels: _Optional[_Mapping[str, str]] = ..., limits: _Optional[_Union[ResourceLimits, _Mapping]] = ..., cmd: _Optional[_Iterable[str]] = ..., no_default_cmd: _Optional[bool] = ..., env: _Optional[_Mapping[str, str]] = ..., no_default_env: _Optional[bool] = ..., working_dir: _Optional[str] = ..., user: _Optional[str] = ..., mounts: _Optional[_Iterable[_Union[Mount, _Mapping]]] = ..., network: _Optional[_Union[NetworkSpec, _Mapping]] = ..., ttl_seconds: _Optional[int] = ..., ssh_public_key: _Optional[str] = ..., template: _Optional[str] = ..., idle_timeout_seconds: _Optional[int] = ..., on_idle: _Optional[_Union[IdleAction, str]] = ..., run_location: _Optional[_Union[RunLocation, str]] = ...) -> None: ...
 
 class CreateSandboxResponse(_message.Message):
     __slots__ = ("id", "ip_address", "state")
@@ -227,16 +238,42 @@ class GetCapabilitiesRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class GetCapabilitiesResponse(_message.Message):
-    __slots__ = ("daemon_version", "protocol", "features", "nested_virt")
+    __slots__ = ("daemon_version", "protocol", "features", "nested_virt", "locations")
     DAEMON_VERSION_FIELD_NUMBER: _ClassVar[int]
     PROTOCOL_FIELD_NUMBER: _ClassVar[int]
     FEATURES_FIELD_NUMBER: _ClassVar[int]
     NESTED_VIRT_FIELD_NUMBER: _ClassVar[int]
+    LOCATIONS_FIELD_NUMBER: _ClassVar[int]
     daemon_version: str
     protocol: int
     features: _containers.RepeatedScalarFieldContainer[str]
     nested_virt: NestedVirtCapability
-    def __init__(self, daemon_version: _Optional[str] = ..., protocol: _Optional[int] = ..., features: _Optional[_Iterable[str]] = ..., nested_virt: _Optional[_Union[NestedVirtCapability, _Mapping]] = ...) -> None: ...
+    locations: _containers.RepeatedCompositeFieldContainer[LocationCapability]
+    def __init__(self, daemon_version: _Optional[str] = ..., protocol: _Optional[int] = ..., features: _Optional[_Iterable[str]] = ..., nested_virt: _Optional[_Union[NestedVirtCapability, _Mapping]] = ..., locations: _Optional[_Iterable[_Union[LocationCapability, _Mapping]]] = ...) -> None: ...
+
+class LocationCapability(_message.Message):
+    __slots__ = ("location", "backend", "available", "unavailable_reason", "pause_resume", "pause_available", "pause_unavailable_reason", "warm_prespawn", "port_publishing", "bind_mounts")
+    LOCATION_FIELD_NUMBER: _ClassVar[int]
+    BACKEND_FIELD_NUMBER: _ClassVar[int]
+    AVAILABLE_FIELD_NUMBER: _ClassVar[int]
+    UNAVAILABLE_REASON_FIELD_NUMBER: _ClassVar[int]
+    PAUSE_RESUME_FIELD_NUMBER: _ClassVar[int]
+    PAUSE_AVAILABLE_FIELD_NUMBER: _ClassVar[int]
+    PAUSE_UNAVAILABLE_REASON_FIELD_NUMBER: _ClassVar[int]
+    WARM_PRESPAWN_FIELD_NUMBER: _ClassVar[int]
+    PORT_PUBLISHING_FIELD_NUMBER: _ClassVar[int]
+    BIND_MOUNTS_FIELD_NUMBER: _ClassVar[int]
+    location: RunLocation
+    backend: str
+    available: bool
+    unavailable_reason: str
+    pause_resume: bool
+    pause_available: bool
+    pause_unavailable_reason: str
+    warm_prespawn: bool
+    port_publishing: bool
+    bind_mounts: bool
+    def __init__(self, location: _Optional[_Union[RunLocation, str]] = ..., backend: _Optional[str] = ..., available: _Optional[bool] = ..., unavailable_reason: _Optional[str] = ..., pause_resume: _Optional[bool] = ..., pause_available: _Optional[bool] = ..., pause_unavailable_reason: _Optional[str] = ..., warm_prespawn: _Optional[bool] = ..., port_publishing: _Optional[bool] = ..., bind_mounts: _Optional[bool] = ...) -> None: ...
 
 class NestedVirtCapability(_message.Message):
     __slots__ = ("supported", "reason")

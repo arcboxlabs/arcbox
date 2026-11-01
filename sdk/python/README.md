@@ -277,7 +277,8 @@ Shipped:
 | `commands.get(id)` / `commands.list()` | re-attach a handle by execution id (stdin cursor seeded from the daemon); list running and exited executions as `CommandInfo` summaries |
 | `sandbox.events()` | typed lifecycle events, keepalives filtered; sync reads genuinely block; a mid-stream drop is `ConnectionLostError` |
 | `sandbox.set_lifecycle()` | tri-state: omitted (`UNCHANGED`) = unchanged, `None` = restore default (as on `create`), value = replace |
-| `arcbox.capabilities()` | daemon handshake (version/protocol/features/nested virt), cached per client |
+| `arcbox.capabilities()` | daemon handshake (version/protocol/features/nested virt, and per run location: backend, availability, pause/resume, whether a pause can run right now and why not), cached per client; `refresh=True` asks again |
+| `create(..., run_location=)` | `"host"` (its own VM on the Mac) or `"nested"` (Firecracker in the System VM); None = the daemon's default, the host when it runs host sandboxes |
 | `files` | whole-file read/write; path verbs `stat`/`list`/`mkdir`/`remove`/`move` (frozen `FileStat` dataclass, `mkdir -p` semantics, `FileNotFoundError` with the path in context); every path accepts `str` or `PurePosixPath` |
 | `files.watch(path)` | typed `FsEvent` stream via `AsyncFileWatch`/`FileWatch` context managers (renames paired, keepalives filtered); ends cleanly on sandbox stop; a mid-stream drop is `ConnectionLostError` — never auto-reconnected (events cannot be replayed) |
 | `ports.wait_for_port(port)` | guest-side listen-table wait (no client polling); expiry → `TimeoutError` naming the `timeout` knob (daemon default 30 s, cap 600 s) |

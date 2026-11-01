@@ -1,5 +1,5 @@
-"""events(), set_lifecycle(), and the capabilities handshake against a
-mock daemon.
+"""events(), set_lifecycle(), the capabilities handshake and create's run
+location against a mock daemon.
 
 set_lifecycle's tri-state is the contract that matters: an omitted knob
 must be ABSENT on the wire (unchanged), None must be an explicit
@@ -19,7 +19,15 @@ from google.protobuf import empty_pb2
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from arcbox import UNCHANGED, ArcBox, AsyncArcBox, AsyncSandbox, Connection, Sandbox
+from arcbox import (
+    UNCHANGED,
+    ArcBox,
+    AsyncArcBox,
+    AsyncSandbox,
+    Connection,
+    LocationCapability,
+    Sandbox,
+)
 from arcbox._async._client import AsyncConnectClient
 from arcbox._envelope import FLAG_END_STREAM, encode_envelope
 from arcbox._gen import sandbox_pb2
@@ -213,6 +221,25 @@ class CapsDaemon:
         )
         response.nested_virt.supported = False
         response.nested_virt.reason = "requires M3 or newer"
+        locked = self.calls > 1
+        response.locations.add(
+            location=sandbox_pb2.RUN_LOCATION_HOST,
+            backend="vz",
+            available=True,
+            pause_resume=True,
+            pause_available=not locked,
+            pause_unavailable_reason="the console session is locked" if locked else "",
+            port_publishing=True,
+        )
+        response.locations.add(
+            location=sandbox_pb2.RUN_LOCATION_NESTED,
+            unavailable_reason="requires M3 or newer",
+            pause_resume=True,
+            pause_unavailable_reason="requires M3 or newer",
+            port_publishing=True,
+        )
+        # A location from a newer daemon is not offered.
+        response.locations.add(location=7, available=True)
         return proto_response(response)
 
 
@@ -227,8 +254,41 @@ class TestCapabilities:
         assert caps.features == ["pause_resume", "auto_resume"]
         assert caps.nested_virt.supported is False
         assert caps.nested_virt.reason == "requires M3 or newer"
+        assert caps.locations == [
+            LocationCapability(
+                location="host",
+                available=True,
+                pause_resume=True,
+                pause_available=True,
+                warm_prespawn=False,
+                port_publishing=True,
+                bind_mounts=False,
+                backend="vz",
+            ),
+            LocationCapability(
+                location="nested",
+                available=False,
+                pause_resume=True,
+                pause_available=False,
+                warm_prespawn=False,
+                port_publishing=True,
+                bind_mounts=False,
+                unavailable_reason="requires M3 or newer",
+                pause_unavailable_reason="requires M3 or newer",
+            ),
+        ]
         assert box.capabilities() is caps
         assert daemon.calls == 1
+
+    def test_refresh_asks_again_so_a_pause_that_became_unavailable_shows(self) -> None:
+        daemon = CapsDaemon()
+        http = httpx.Client(transport=httpx.MockTransport(daemon), base_url="http://arcbox")
+        box = ArcBox(Connection(http_client=http))
+        assert box.capabilities().locations[0].pause_available is True
+        host = box.capabilities(refresh=True).locations[0]
+        assert host.pause_available is False
+        assert host.pause_unavailable_reason == "the console session is locked"
+        assert daemon.calls == 2
 
     def test_a_failed_fetch_is_not_cached(self) -> None:
         daemon = CapsDaemon(fail_first=True)
@@ -238,6 +298,36 @@ class TestCapabilities:
             box.capabilities()
         assert box.capabilities().protocol == 1
         assert daemon.calls == 2
+
+
+class CreateProbe:
+    def __init__(self) -> None:
+        self.requests: list[sandbox_pb2.CreateSandboxRequest] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/Create")
+        create = sandbox_pb2.CreateSandboxRequest.FromString(request.content)
+        self.requests.append(create)
+        return proto_response(sandbox_pb2.CreateSandboxResponse(id=create.id))
+
+
+class TestCreateRunLocation:
+    def test_unset_leaves_the_location_to_the_daemon(self) -> None:
+        probe = CreateProbe()
+        http = httpx.Client(transport=httpx.MockTransport(probe), base_url="http://arcbox")
+        ArcBox(Connection(http_client=http)).create(wait_until_ready=False)
+        assert probe.requests[0].run_location == sandbox_pb2.RUN_LOCATION_UNSPECIFIED
+
+    def test_each_location_maps_onto_the_wire(self) -> None:
+        probe = CreateProbe()
+        http = httpx.Client(transport=httpx.MockTransport(probe), base_url="http://arcbox")
+        box = ArcBox(Connection(http_client=http))
+        box.create(wait_until_ready=False, run_location="nested")
+        box.create(wait_until_ready=False, run_location="host")
+        assert [r.run_location for r in probe.requests] == [
+            sandbox_pb2.RUN_LOCATION_NESTED,
+            sandbox_pb2.RUN_LOCATION_HOST,
+        ]
 
 
 @pytest.mark.anyio
