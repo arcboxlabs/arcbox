@@ -23,6 +23,8 @@
  * offline CPU online through sysfs, i.e. PSCI CPU_ON, and prints
  * "online <cpus>"; boot with maxcpus=<k> to leave CPUs offline until then.
  *
+ * A console thread reads lines from hvc0 and prints each as "rx <line>".
+ *
  * With spike_net=<echo>,<idle>,<stream> (spikes 4 and 5, host TCP ports),
  * eth0 comes up as 10.0.2.2/24 and four more threads run, each
  * reconnecting when its connection ends:
@@ -205,6 +207,11 @@ static int eth0_up(void) {
         return -1;
     ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
     int r = ioctl(fd, SIOCSIFFLAGS, &ifr);
+    if (!r && !ioctl(fd, SIOCGIFHWADDR, &ifr)) {
+        unsigned char *m = (unsigned char *)ifr.ifr_hwaddr.sa_data;
+        printf("spike-init: eth0 mac %02x:%02x:%02x:%02x:%02x:%02x\n", m[0], m[1], m[2], m[3],
+               m[4], m[5]);
+    }
     close(fd);
     return r;
 }
@@ -318,6 +325,14 @@ static void *tcp_client(void *arg) {
     }
 }
 
+static void *console_reader(void *arg) {
+    (void)arg;
+    char line[256];
+    while (fgets(line, sizeof line, stdin))
+        printf("rx %s", line);
+    return NULL;
+}
+
 static void *vsock_server(void *arg) {
     (void)arg;
     int lfd = socket(AF_VSOCK, SOCK_STREAM, 0);
@@ -383,6 +398,8 @@ int main(void) {
         pthread_create(&t, NULL, download_client, NULL);
         pthread_create(&t, NULL, vsock_server, NULL);
     }
+    pthread_t console;
+    pthread_create(&console, NULL, console_reader, NULL);
 
     const char *online_at = getenv("spike_online_at");
     uint64_t online_tick = online_at ? strtoull(online_at, NULL, 10) : 0;

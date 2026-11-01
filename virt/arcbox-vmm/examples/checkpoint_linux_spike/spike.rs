@@ -21,6 +21,9 @@ const DISK_BYTES: u64 = 256 << 20;
 const CMDLINE: &str = "console=hvc0 rdinit=/init loglevel=4 panic=-1";
 /// The guest's vsock echo port (`guest/init.c`).
 const VSOCK_PORT: u32 = 5000;
+/// Balloon inflation held across the first checkpoint; each restore flips
+/// between it and none.
+const BALLOON_BYTES: u64 = 64 << 20;
 
 /// What the probe needs to rebuild the same machine in another process.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -38,6 +41,9 @@ struct Spec {
     /// virtio-vsock.
     #[serde(default)]
     net_ports: Option<[u16; 3]>,
+    /// The balloon inflation at the checkpoint.
+    #[serde(default)]
+    balloon_bytes: u64,
 }
 
 pub fn main() -> Result<()> {
@@ -73,7 +79,8 @@ fn config(spec: &Spec, disk: &Path) -> VmmConfig {
         networking: spec.net_ports.is_some(),
         vsock: spec.net_ports.is_some(),
         guest_cid: spec.net_ports.map(|_| 3),
-        balloon: false,
+        balloon: true,
+        debug_console_socket: Some(ConsoleInput::path()),
         block_devices: vec![BlockDeviceConfig {
             path: disk.to_path_buf(),
             read_only: false,
@@ -94,6 +101,7 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         append: std::env::var("SPIKE_APPEND").unwrap_or_default(),
         last_tick: String::new(),
         net_ports: None,
+        balloon_bytes: BALLOON_BYTES,
     };
     let echo = if std::env::var("SPIKE_NET").as_deref() == Ok("1") {
         let servers = Servers::serve([0; 3])?;
@@ -113,6 +121,15 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         "[save] booted, first tick {:.0} ms after start",
         ms(t.elapsed())
     );
+    // Console input and a balloon inflation before the checkpoint, so the
+    // restore continues on rings the guest has used.
+    let input = ConsoleInput::connect()?;
+    input.send(console, "save")?;
+    vmm.lock().unwrap().set_balloon_target(BALLOON_BYTES)?;
+    wait_until(Duration::from_secs(10), || {
+        vmm.lock().unwrap().get_balloon_stats().current_bytes == BALLOON_BYTES
+    })
+    .map_err(|()| "the guest did not inflate the balloon")?;
     let driver = echo.as_ref().map(|_| VsockDriver::start(&vmm));
     if driver.is_some() {
         // Checkpoint with every connection open and carrying traffic.
@@ -153,6 +170,9 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         .count();
     println!("[save] {report}");
     println!("[save] last tick before checkpoint: {}", spec.last_tick);
+    if echo.is_some() {
+        check_saved_mac(dir, console)?;
+    }
     if fails > 0 {
         return Err(format!("guest reported {fails} FAIL lines before the checkpoint").into());
     }
@@ -178,15 +198,70 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
     let t = Instant::now();
     vmm.lock().unwrap().hv_restore(dir)?;
     println!("[restore] hv_restore returned in {:.1} ms", ms(t.elapsed()));
+    let balloon = vmm.lock().unwrap().get_balloon_stats();
     let driver = echo.as_ref().map(|_| VsockDriver::start(&vmm));
     let first = console.wait_for(|l| l.starts_with("tick "), Duration::from_secs(5));
     let first_ms = ms(t.elapsed());
-    std::thread::sleep(Duration::from_secs(run_s));
+    let mut problems = Vec::new();
+    // The restored balloon holds the saved inflation, and its queues still
+    // work in the direction the guest has not used since.
+    if (balloon.target_bytes, balloon.current_bytes) != (spec.balloon_bytes, spec.balloon_bytes) {
+        problems.push(format!(
+            "balloon restored at target {} / current {} bytes, saved {}",
+            balloon.target_bytes, balloon.current_bytes, spec.balloon_bytes
+        ));
+    }
+    let balloon_next = if spec.balloon_bytes == 0 {
+        BALLOON_BYTES
+    } else {
+        0
+    };
+    vmm.lock().unwrap().set_balloon_target(balloon_next)?;
+    let moved = wait_until(Duration::from_secs(5), || {
+        vmm.lock().unwrap().get_balloon_stats().current_bytes == balloon_next
+    });
+    let balloon_ms = ms(t.elapsed());
+    if moved.is_err() {
+        problems.push(format!(
+            "the restored guest did not move the balloon to {balloon_next} bytes"
+        ));
+    }
+    // The restored console RX ring takes new input.
+    if let Err(e) = ConsoleInput::connect().and_then(|i| i.send(console, "restore")) {
+        problems.push(format!("console input after restore: {e}"));
+    }
+    println!(
+        "[restore] balloon restored at {} MiB, at {} MiB {balloon_ms:.0} ms after hv_restore \
+         was called; console input echoed",
+        balloon.current_bytes >> 20,
+        balloon_next >> 20,
+    );
+    let elapsed = t.elapsed();
+    std::thread::sleep(Duration::from_secs(run_s).saturating_sub(elapsed));
+    // A second-generation checkpoint of the restored machine, whose RAM is
+    // mapped from the first one's image.
+    let resave = env_path("SPIKE_RESAVE");
+    let resaved = match &resave {
+        Some(next) => Some(vmm.lock().unwrap().hv_checkpoint(next)?),
+        None => None,
+    };
     if let Some(d) = &driver {
         d.stop.store(true, Ordering::Release);
     }
     vmm.lock().unwrap().stop()?;
     let _ = fs::remove_dir_all(&run);
+    if let (Some(next), Some(report)) = (&resave, &resaved) {
+        let mut next_spec: Spec = serde_json::from_slice(&fs::read(dir.join("spike.json"))?)?;
+        next_spec.balloon_bytes = balloon_next;
+        next_spec.last_tick = console
+            .last(|l| l.starts_with("tick "))
+            .ok_or("no tick before the checkpoint")?;
+        fs::write(
+            next.join("spike.json"),
+            serde_json::to_vec_pretty(&next_spec)?,
+        )?;
+        println!("[restore] resaved: {report}");
+    }
     let first = first?;
 
     let lines = console.lines();
@@ -200,7 +275,6 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         lines.iter().rev().find(|l| l.starts_with("tick ")).unwrap()
     );
 
-    let mut problems = Vec::new();
     for l in lines.iter().filter(|l| l.starts_with("FAIL")).take(5) {
         problems.push(format!("guest: {l}"));
     }
@@ -252,6 +326,39 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
     } else {
         Err(problems.join("; ").into())
     }
+}
+
+/// The checkpoint carries the MAC the guest read at boot, which a restored
+/// NIC advertises (`VirtioDevice::load_config`).
+fn check_saved_mac(dir: &Path, console: &Console) -> Result<()> {
+    let guest = console
+        .last(|l| l.starts_with("spike-init: eth0 mac "))
+        .ok_or("the guest printed no MAC")?;
+    let guest = guest.trim_start_matches("spike-init: eth0 mac ");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("state.json"))?)?;
+    let saved: Vec<String> = state["devices"]
+        .as_array()
+        .ok_or("state.json has no devices")?
+        .iter()
+        .filter_map(|d| {
+            let c: Vec<u64> = d["config"]
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_u64)
+                .collect();
+            (c.len() == 6).then(|| {
+                c.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+        })
+        .collect();
+    println!("[save] guest eth0 MAC {guest}, saved NIC MACs {saved:?}");
+    if saved != [guest] {
+        return Err("the checkpoint does not carry the guest's MAC".into());
+    }
+    Ok(())
 }
 
 /// Spike 4: the stale connections of the checkpointed process end in the
@@ -406,6 +513,61 @@ impl Servers {
     fn ports(&self) -> [u16; 3] {
         [self.echo.port, self.idle.port, self.stream.port]
     }
+}
+
+/// Writes lines into the guest's console through the debug-console socket
+/// and waits for the guest to echo them back as `rx <line>`.
+struct ConsoleInput(UnixStream);
+
+impl ConsoleInput {
+    fn path() -> PathBuf {
+        PathBuf::from(format!(
+            "/tmp/arcbox-ckpt-console-{}.sock",
+            std::process::id()
+        ))
+    }
+
+    fn connect() -> Result<Self> {
+        let stream = UnixStream::connect(Self::path())?;
+        // The console mirrors guest output to the socket; drain it so the
+        // device never sees a full socket and drops the client.
+        let mut drain = stream.try_clone()?;
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(1..) = drain.read(&mut buf) {}
+        });
+        Ok(Self(stream))
+    }
+
+    fn send(&self, console: &Console, what: &str) -> Result<()> {
+        let line = format!("{what}-{}", std::process::id());
+        let expect = format!("rx {line}");
+        // The worker accepts a client only on its next poll, up to 250 ms
+        // later; keep sending until the guest has echoed one.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            (&self.0).write_all(format!("{line}\n").as_bytes())?;
+            if console
+                .wait_for(|l| l == expect, Duration::from_millis(300))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err(format!("the guest did not echo {line:?}").into())
+    }
+}
+
+/// Polls `done` every 10 ms until it holds or `timeout` passes.
+fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> std::result::Result<(), ()> {
+    let deadline = Instant::now() + timeout;
+    while !done() {
+        if Instant::now() > deadline {
+            return Err(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

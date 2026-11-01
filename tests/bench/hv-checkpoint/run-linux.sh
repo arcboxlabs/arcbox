@@ -2,9 +2,10 @@
 # HV checkpoint spike 3 matrix: a Linux guest checkpointed by the production
 # HV VMM in the middle of block I/O. Builds the initramfs and the probe,
 # signs it, then runs the baseline, the negative controls, two clones of one
-# checkpoint, repeated save/restore cycles, a vCPU-count sweep and a
-# checkpoint with CPUs powered off. See README.md and
-# docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md.
+# checkpoint, repeated save/restore cycles, a second-generation checkpoint of
+# a restored machine, a vCPU-count sweep and a checkpoint with CPUs powered
+# off. See README.md, docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md
+# and docs/experiments/2026-11-01-hv-checkpoint-gaps.md.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -41,6 +42,7 @@ for v in filter(None, s["vcpus"]):
     if what == "timer": v["vtimer_offset"] = 0
     if what == "icc": v["icc"] = [0] * len(v["icc"])
 if what == "devices": s["devices"] = []
+if what == "build": s["os_build"] = "0A000"
 json.dump(s, open(path, "w"))' "$@"
 }
 
@@ -51,7 +53,7 @@ section "baseline: 4 vCPUs, 5 s of I/O, save, restore"
 section "negative controls (each is expected to fail)"
 "$bin" save "$work/other" 3 >/dev/null
 SPIKE_APPEND="maxcpus=2" "$bin" save "$work/off2" 3 >/dev/null
-for part in devices timer icc gic-empty gic-swap gic-other mem disk; do
+for part in devices timer icc build gic-empty gic-swap gic-other mem disk; do
   printf -- '-- %s: ' "$part"
   rm -rf "$work/neg"
   cp -c -R "$work/base" "$work/neg"
@@ -83,20 +85,29 @@ after=$(shasum -a 256 "$work/base/mem.bin" "$work/base/disk0.img" | cut -d' ' -f
 section "20 save/restore cycles at random points"
 fail=0
 : >"$work/lat"
+: >"$work/ram"
 for i in $(seq 20); do
   rm -rf "$work/cycle"
   "$bin" save "$work/cycle" 2 >"$work/save.out" 2>&1
   sed -n 's/.*\(pause [0-9.]* ms\).*total \([0-9]*\) ms/\1 total \2 ms/p' "$work/save.out" >>"$work/pauses"
+  sed -n 's/.*RAM \([0-9]*\) pages written (\([0-9]*\) MiB).* \([0-9]*\) ms, total.*/\1 \2 \3/p' "$work/save.out" >>"$work/ram"
   if "$bin" restore "$work/cycle" 3 >"$work/restore.out" 2>&1; then
     sed -n 's/.*hv_restore returned in \([0-9.]*\) ms.*/\1/p' "$work/restore.out" >>"$work/lat"
   else
     fail=$((fail + 1))
-    grep -E '^error' "$work/restore.out"
+    grep -E '^error|panicked' "$work/restore.out" || tail -n 3 "$work/restore.out"
   fi
 done
 echo "failed restores: $fail of 20"
 sort -n "$work/lat" | awk '{a[NR]=$1} END {printf "hv_restore, ms: min %s p50 %s max %s\n", a[1], a[int((NR+1)/2)], a[NR]}'
 awk '{print $2}' "$work/pauses" | sort -n | awk '{a[NR]=$1} END {printf "vCPU pause, ms: min %s p50 %s max %s\n", a[1], a[int((NR+1)/2)], a[NR]}'
+awk '{print $2}' "$work/ram" | sort -n | awk '{a[NR]=$1} END {printf "RAM written, MiB: min %s p50 %s max %s\n", a[1], a[int((NR+1)/2)], a[NR]}'
+awk '{print $3}' "$work/ram" | sort -n | awk '{a[NR]=$1} END {printf "RAM write, ms: min %s p50 %s max %s\n", a[1], a[int((NR+1)/2)], a[NR]}'
+
+section "second generation: checkpoint the restored machine, restore that"
+rm -rf "$work/gen2"
+SPIKE_RESAVE="$work/gen2" "$bin" restore "$work/base" 4 | grep -E '^\[restore\] (resaved|OK)'
+"$bin" restore "$work/gen2" 4 | grep -E '^\[restore\] (balloon|OK)'
 
 section "vCPU count sweep"
 for n in 1 2 8; do
