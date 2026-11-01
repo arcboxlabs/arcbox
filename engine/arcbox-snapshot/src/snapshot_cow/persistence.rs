@@ -53,6 +53,9 @@ impl CowManager {
             // The probe stands in for every device this method inspects.
             return Ok(());
         }
+        if let Some(clones) = &self.clones {
+            return clones.adopt(handle);
+        }
         // The device the guest is running on. Without it there is no
         // snapshot to re-register, whatever the journal claims.
         if !Path::new(&handle.dm_device).exists() {
@@ -174,6 +177,9 @@ impl CowManager {
         keep_cow_files: &HashSet<String>,
         live_devices: &HashSet<String>,
     ) -> Result<()> {
+        if let Some(clones) = &self.clones {
+            return clones.reconcile_stale(keep_cow_files, live_devices);
+        }
         let dmsetup = self.dmsetup_bin.as_deref();
 
         // 1. Remove stale dm devices first — they pin the loop devices
@@ -470,6 +476,9 @@ impl CowManager {
     }
 
     pub async fn cleanup_setup_orphan(&self, sandbox_id: &str) -> Result<()> {
+        if let Some(clones) = &self.clones {
+            return clones.cleanup_setup_orphan(sandbox_id);
+        }
         let Some(orphan) = self.setup_orphans.lock().unwrap().get(sandbox_id).cloned() else {
             return Ok(());
         };

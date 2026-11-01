@@ -13,15 +13,24 @@
 //! empty, and `dm_name` is still `arcbox-snap-{owner}`, so a composer reads
 //! the owner back out of either name exactly as it does on the dm path.
 //!
+//! A clone is made under a temporary name, made private and durable, and
+//! only then renamed into place without replacing anything. A crash at any
+//! point before that rename leaves only a `.clone-*` temporary, which
+//! [`CloneStore::reconcile_stale`] deletes at startup; a crash after it
+//! leaves a disk no journal names yet, which the same sweep deletes as an
+//! unowned overlay.
+//!
 //! `clonefile` needs the template and the data directory on the same APFS
 //! volume. Anywhere else, and off macOS, setup fails with an ordinary I/O
 //! error, which the runtime reads as "no CoW here" and answers with a full
 //! copy of the rootfs.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::persistence::remove_file_durable;
 use super::{
@@ -36,11 +45,18 @@ const CLONE_TEMP_PREFIX: &str = ".clone-";
 /// Per-sandbox clones of template images under one directory.
 pub(super) struct CloneStore {
     cow_dir: PathBuf,
+    /// The file a failed setup could not delete, by owner. The owner cannot set
+    /// up again until [`Self::cleanup_setup_orphan`] has removed them, the
+    /// same rule the dm path applies to its half-built devices.
+    orphans: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl CloneStore {
     pub(super) fn new(cow_dir: PathBuf) -> Self {
-        Self { cow_dir }
+        Self {
+            cow_dir,
+            orphans: Mutex::new(HashMap::new()),
+        }
     }
 
     fn disk_path(&self, owner: &str) -> PathBuf {
@@ -64,6 +80,7 @@ impl CloneStore {
     /// Refuses to replace an existing disk: that file is some sandbox's
     /// state, a paused one's perhaps, and only Remove may delete it.
     pub(super) async fn setup(&self, owner: &str, template: &Path) -> Result<CowHandle> {
+        self.refuse_orphaned(owner)?;
         let disk = self.disk_path(owner);
         let temporary = self.cow_dir.join(format!(
             "{CLONE_TEMP_PREFIX}{owner}-{}.tmp",
@@ -86,6 +103,7 @@ impl CloneStore {
     /// The clone is self-contained, so the template is only recorded, never
     /// consulted: a template rebuilt since the pause does not invalidate it.
     pub(super) fn reattach(&self, owner: &str, template: &Path) -> Result<CowHandle> {
+        self.refuse_orphaned(owner)?;
         let disk = self.disk_path(owner);
         require_disk(&disk, "preserved sandbox disk")?;
         Ok(self.handle(owner, template))
@@ -119,6 +137,70 @@ impl CloneStore {
         remove_file_durable(&self.disk_path(owner))
     }
 
+    /// Confirm a running sandbox's disk is still there. Nothing else to
+    /// re-register: a clone holds no shared resource.
+    pub(super) fn adopt(&self, handle: &CowHandle) -> Result<()> {
+        let disk = self.owned_disk(handle)?;
+        require_disk(disk, "sandbox disk")?;
+        info!(disk = %disk.display(), "adopted a live sandbox's disk");
+        Ok(())
+    }
+
+    /// Delete every half-made clone and every disk whose owner is in
+    /// neither set. Same contract as the dm path's sweep, and like it, runs
+    /// at startup before any setup: a `.clone-*` file is only ever a setup in
+    /// flight or one a crash interrupted.
+    pub(super) fn reconcile_stale(
+        &self,
+        keep_cow_files: &HashSet<String>,
+        live_devices: &HashSet<String>,
+    ) -> Result<()> {
+        let mut removed = false;
+        for entry in std::fs::read_dir(&self.cow_dir)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with(CLONE_TEMP_PREFIX) {
+                debug!(file = %path.display(), "removing half-made clone");
+            } else if let Some(rest) = name.strip_prefix(COW_FILE_PREFIX) {
+                let owner = rest.strip_suffix(COW_FILE_SUFFIX).unwrap_or(rest);
+                if keep_cow_files.contains(owner) || live_devices.contains(owner) {
+                    debug!(file = %path.display(), "keeping retained sandbox disk");
+                    continue;
+                }
+                debug!(file = %path.display(), "removing stale sandbox disk");
+            } else {
+                continue;
+            }
+            std::fs::remove_file(&path)?;
+            removed = true;
+        }
+        if removed {
+            std::fs::File::open(&self.cow_dir)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Retry the deletes a failed setup left undone.
+    pub(super) fn cleanup_setup_orphan(&self, owner: &str) -> Result<()> {
+        let Some(path) = self.orphans.lock().unwrap().get(owner).cloned() else {
+            return Ok(());
+        };
+        remove_file_durable(&path)?;
+        self.orphans.lock().unwrap().remove(owner);
+        Ok(())
+    }
+
+    fn refuse_orphaned(&self, owner: &str) -> Result<()> {
+        if self.orphans.lock().unwrap().contains_key(owner) {
+            return Err(SnapshotError::Unavailable(format!(
+                "sandbox {owner} still owns files from an incomplete clone"
+            )));
+        }
+        Ok(())
+    }
+
     /// The handle's disk, if it is one this store would have made. A handle
     /// comes back from a journal, and this store deletes what it names.
     fn owned_disk<'h>(&self, handle: &'h CowHandle) -> Result<&'h Path> {
@@ -139,7 +221,8 @@ impl CloneStore {
         }
     }
 
-    /// Delete what a failed setup made.
+    /// Delete what a failed setup made, and turn what it could not delete
+    /// into an orphan that blocks the owner until it is cleaned up.
     fn rollback(&self, owner: &str, failure: SetupFailure) -> SnapshotError {
         let Some(made) = failure.made else {
             return failure.error.into();
@@ -148,11 +231,13 @@ impl CloneStore {
             return failure.error.into();
         };
         warn!(owner, file = %made.display(), "clone rollback incomplete");
-        SnapshotError::Unavailable(format!(
+        let message = format!(
             "{}; resource rollback is incomplete: remove {}: {cleanup}",
             failure.error,
             made.display()
-        ))
+        );
+        self.orphans.lock().unwrap().insert(owner.to_owned(), made);
+        SnapshotError::Unavailable(message)
     }
 }
 
@@ -279,6 +364,7 @@ fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
@@ -465,11 +551,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reattach_and_adopt_refuse_a_missing_disk() {
+        let (root, manager, template) = fixture();
+
+        let reattach = manager
+            .reattach("box", template_str(&template))
+            .await
+            .unwrap_err();
+        let adopt = manager
+            .adopt(&CowHandle {
+                dm_name: "arcbox-snap-box".into(),
+                dm_device: String::new(),
+                cow_loop: String::new(),
+                cow_file: cow_dir(&root).join("arcbox-cow-box.img"),
+                template_path: template,
+            })
+            .unwrap_err();
+
+        for error in [reattach, adopt] {
+            assert!(
+                matches!(&error, SnapshotError::FailedPrecondition(m) if m.contains("arcbox-cow-box.img")),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn remove_preserved_refuses_an_owner_that_is_a_path() {
         let (root, manager, _) = fixture();
         let outside = cow_dir(&root).join("arcbox-cow-..").join("victim.img");
 
         assert!(manager.remove_preserved_cow("../victim").await.is_err());
         assert!(!outside.exists());
+    }
+
+    /// Crash recovery: a crash during setup leaves a `.clone-*` temporary
+    /// (before the rename) or a disk no journal names (after it). Both go;
+    /// retained and live disks, and files that are not this store's, stay.
+    #[test]
+    fn the_startup_sweep_removes_half_made_clones_and_unowned_disks() {
+        let (root, manager, _) = fixture();
+        let dir = cow_dir(&root);
+        for name in [
+            ".clone-crashed-0123456789abcdef.tmp",
+            "arcbox-cow-unjournaled.img",
+            "arcbox-cow-paused.img",
+            "arcbox-cow-running.img",
+            "unrelated.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        manager
+            .reconcile_stale(
+                &HashSet::from(["paused".to_owned()]),
+                &HashSet::from(["running".to_owned()]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            entries(&dir),
+            [
+                "arcbox-cow-paused.img",
+                "arcbox-cow-running.img",
+                "unrelated.txt"
+            ]
+        );
+    }
+
+    /// A setup whose rollback could not delete what it made holds its owner
+    /// until the cleanup retry succeeds, as on the dm path.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_incomplete_rollback_blocks_the_owner_until_cleanup() {
+        let (root, manager, template) = fixture();
+        let stranded = cow_dir(&root).join(".clone-box-stranded.tmp");
+        std::fs::write(&stranded, b"x").unwrap();
+        let clones = manager.clones.as_ref().unwrap();
+        clones
+            .orphans
+            .lock()
+            .unwrap()
+            .insert("box".into(), stranded.clone());
+
+        let refused = manager
+            .setup("box", template_str(&template))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, SnapshotError::Unavailable(_)),
+            "{refused}"
+        );
+
+        manager.cleanup_setup_orphan("box").await.unwrap();
+        assert!(!stranded.exists());
+        manager.setup("box", template_str(&template)).await.unwrap();
+    }
+
+    /// The rollback itself: a publish that fails leaves nothing behind, and
+    /// a delete that fails is recorded rather than forgotten.
+    #[test]
+    fn rollback_records_only_what_it_could_not_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CloneStore::new(root.path().to_path_buf());
+        let removable = root.path().join(".clone-box-a.tmp");
+        std::fs::write(&removable, b"x").unwrap();
+        // A non-empty directory: `remove_file` refuses it on every platform.
+        let stuck = root.path().join(".clone-box-b.tmp");
+        std::fs::create_dir(&stuck).unwrap();
+        std::fs::write(stuck.join("inner"), b"x").unwrap();
+
+        let clean = store.rollback(
+            "clean",
+            SetupFailure {
+                error: io::Error::other("publish failed"),
+                made: Some(removable.clone()),
+            },
+        );
+        let dirty = store.rollback(
+            "box",
+            SetupFailure {
+                error: io::Error::other("publish failed"),
+                made: Some(stuck.clone()),
+            },
+        );
+
+        assert!(!matches!(clean, SnapshotError::Unavailable(_)), "{clean}");
+        assert!(!removable.exists());
+        assert!(matches!(dirty, SnapshotError::Unavailable(_)), "{dirty}");
+        assert_eq!(store.orphans.lock().unwrap().get("box"), Some(&stuck));
+        assert!(!store.orphans.lock().unwrap().contains_key("clean"));
     }
 }
