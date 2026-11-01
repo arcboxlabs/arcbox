@@ -3,8 +3,8 @@
 //! The contracts under test: create arms the readiness watch before
 //! Create and cleans up its minted id on failure; connect routes PAUSED
 //! through Resume; set_lifecycle's knobs are tri-state on the wire;
-//! capabilities are cached per client, refresh on request and drop
-//! unknown locations; create sends its run location; errors carry the registry's
+//! capabilities are cached per client, refresh on request (a failed
+//! refresh clears the cache) and drop unknown locations; create sends its run location; errors carry the registry's
 //! ErrorInfo detail over the coarse Connect code; list auto-paginates.
 
 use std::path::PathBuf;
@@ -36,6 +36,8 @@ struct MockDaemon {
     resumes: Mutex<Vec<String>>,
     lifecycles: Mutex<Vec<pb::SetLifecycleRequest>>,
     capability_calls: Mutex<u32>,
+    /// Fail the next GetCapabilities with this error.
+    fail_capabilities: Mutex<Option<ConnectError>>,
     list_pages: Mutex<Vec<String>>,
 }
 
@@ -145,6 +147,10 @@ impl pb::SandboxService for MockDaemon {
             *calls += 1;
             *calls
         };
+        let failure = self.fail_capabilities.lock().unwrap().take();
+        if let Some(error) = failure {
+            return Err(error);
+        }
         // The session locks between the first fetch and any later one.
         let locked = calls > 1;
         Response::ok(pb::GetCapabilitiesResponse {
@@ -495,6 +501,21 @@ async fn refresh_asks_again_so_a_pause_that_became_unavailable_shows() {
     // The refreshed answer replaces the cached one.
     assert!(!client.capabilities().await.unwrap().locations[0].pause_available);
     assert_eq!(*mock.capability_calls.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_failed_refresh_drops_the_cached_handshake() {
+    let mock = Arc::new(MockDaemon::default());
+    let (_dir, path) = serve(mock.clone()).await;
+    let client = client_for(&path).await;
+
+    assert!(client.capabilities().await.unwrap().locations[0].pause_available);
+    *mock.fail_capabilities.lock().unwrap() = Some(ConnectError::unavailable("daemon restarting"));
+    assert!(client.refresh_capabilities().await.is_err());
+    // The stale handshake is gone: the next call fetches again and sees
+    // the session that locked meanwhile.
+    assert!(!client.capabilities().await.unwrap().locations[0].pause_available);
+    assert_eq!(*mock.capability_calls.lock().unwrap(), 3);
 }
 
 #[tokio::test]

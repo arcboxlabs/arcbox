@@ -229,13 +229,15 @@ impl ArcBox {
     }
 
     /// Fetch the handshake again and replace the cached one. On failure
-    /// the previous answer stays cached.
+    /// the cache is cleared, so the next [`Self::capabilities`] fetches
+    /// again instead of answering with the stale handshake.
     ///
     /// # Errors
     ///
     /// Any RPC failure, mapped onto [`Error`].
     pub async fn refresh_capabilities(&self) -> Result<Capabilities> {
         let mut cached = self.capabilities.lock().await;
+        *cached = None;
         let fetched = self.fetch_capabilities().await?;
         *cached = Some(fetched.clone());
         Ok(fetched)
