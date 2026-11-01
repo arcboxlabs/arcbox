@@ -165,6 +165,30 @@ fn sync_dir(path: &Path) -> Result<()> {
         .map_err(SnapshotError::from)
 }
 
+/// Every regular file of the checkpoint image in snapshot directory `dir`,
+/// recursively, without the catalog's own `meta.json`: what a checkpoint
+/// occupies on disk, whichever driver wrote it.
+///
+/// # Errors
+/// Fails when the directory cannot be read.
+pub fn image_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() && !(next == dir && entry.file_name() == "meta.json") {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// True when `path` is a published snapshot directory.
 ///
 /// Staging directories are named `.{snapshot_id}.partial` and are not catalog
@@ -259,9 +283,24 @@ impl PendingSnapshot<'_> {
             format: draft.format,
         };
 
-        sync_private_file(&staging.join(VMSTATE_FILE))?;
-        if has_mem {
-            sync_private_file(&staging.join(MEM_FILE))?;
+        // The image is whatever the driver wrote: Firecracker's `vmstate`
+        // and `mem`, a VZ save, HV's state files. All of it becomes durable
+        // and private before the snapshot is visible.
+        let files = image_files(&staging).map_err(SnapshotError::from)?;
+        if files.is_empty() {
+            return Err(SnapshotError::Snapshot(format!(
+                "checkpoint {} wrote no image files",
+                self.id
+            )));
+        }
+        for file in &files {
+            sync_private_file(file)?;
+            if let Some(parent) = file.parent()
+                && parent != staging
+            {
+                secure_dir(parent)?;
+                sync_dir(parent)?;
+            }
         }
         let json = serde_json::to_vec_pretty(&meta)?;
         write_private_file(&SnapshotCatalog::meta_path(&staging), &json)?;
@@ -588,6 +627,46 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// A host driver's image is neither `vmstate` nor `mem`: it commits all
+    /// the same, every file private, and `image_files` names exactly it.
+    #[test]
+    fn commit_publishes_an_image_in_any_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = SnapshotCatalog::new(dir.path().to_str().unwrap());
+        let pending = catalog.begin("vm-1").unwrap();
+        let staging = pending.dir();
+        let id = pending.id().to_owned();
+        std::fs::write(staging.join("vm.json"), b"{}").unwrap();
+        std::fs::create_dir(staging.join("disks")).unwrap();
+        std::fs::write(staging.join("disks/rootfs.img"), b"disk").unwrap();
+
+        let meta = pending.commit(draft()).unwrap();
+
+        let published = catalog.snapshot_dir("vm-1", &id);
+        assert_eq!(meta.mem_path, None);
+        let files = image_files(&published).unwrap();
+        assert_eq!(
+            files,
+            [
+                published.join("disks/rootfs.img"),
+                published.join("vm.json")
+            ]
+        );
+        for file in files {
+            let mode = std::fs::metadata(file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn commit_refuses_an_empty_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = SnapshotCatalog::new(dir.path().to_str().unwrap());
+        let pending = catalog.begin("vm-1").unwrap();
+        assert!(pending.commit(draft()).is_err());
+        assert!(catalog.list("vm-1").unwrap().is_empty());
     }
 
     #[test]

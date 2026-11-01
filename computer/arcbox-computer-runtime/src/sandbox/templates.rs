@@ -119,9 +119,19 @@ impl ComputerManager {
 
         let pending = self.snapshots.begin(&format!("template-{template_name}"))?;
         let staging = pending.dir();
-        let mut artifact_bytes = clone_or_copy(&source.vmstate_path, &staging.join("vmstate"))?;
-        if let Some(mem) = &source.mem_path {
-            artifact_bytes += clone_or_copy(mem, &staging.join("mem"))?;
+        let source_dir = source.vmstate_path.parent().ok_or_else(|| {
+            ComputerError::Snapshot(format!("snapshot {source_snapshot_id} is in no directory"))
+        })?;
+        let mut artifact_bytes = 0;
+        for file in arcbox_snapshot::snapshot::image_files(source_dir).map_err(ComputerError::Io)? {
+            let relative = file
+                .strip_prefix(source_dir)
+                .expect("image files are under the image");
+            let target = staging.join(relative);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(ComputerError::Io)?;
+            }
+            artifact_bytes += clone_or_copy(&file, &target)?;
         }
         let meta = pending.commit(SnapshotDraft {
             name: None,
@@ -268,10 +278,15 @@ impl ComputerManager {
         // kills and releases it.
         ?;
         let meta = self.snapshots.find_by_id(&info.snapshot_id)?;
-        let mut artifact_bytes = std::fs::metadata(&meta.vmstate_path).map_or(0, |m| m.len());
-        if let Some(mem) = &meta.mem_path {
-            artifact_bytes += std::fs::metadata(mem).map_or(0, |m| m.len());
-        }
+        let artifact_bytes = meta
+            .vmstate_path
+            .parent()
+            .and_then(|dir| arcbox_snapshot::snapshot::image_files(dir).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|file| std::fs::metadata(file).ok())
+            .map(|m| m.len())
+            .sum();
         Ok((info.snapshot_id, artifact_bytes))
     }
 

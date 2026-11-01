@@ -719,11 +719,7 @@ impl ComputerManager {
     fn checkpoint_paths(&self, snapshot_id: &str) -> Vec<PathBuf> {
         self.snapshots
             .find_by_id(snapshot_id)
-            .map(|meta| {
-                std::iter::once(meta.vmstate_path)
-                    .chain(meta.mem_path)
-                    .collect()
-            })
+            .map(|meta| image_files_beside(&meta.vmstate_path))
             .unwrap_or_default()
     }
 
@@ -924,9 +920,16 @@ fn snapshot_to_info(id: &ComputerId, snapshot: &ComputerSnapshot) -> ComputerInf
 /// an already-loaded [`SnapshotInfo`] so a multi-sandbox response pays one
 /// catalog scan rather than one per paused sandbox.
 fn snapshot_files(info: &crate::snapshot::SnapshotInfo) -> Vec<PathBuf> {
-    std::iter::once(info.vmstate_path.clone())
-        .chain(info.mem_path.clone())
-        .collect()
+    image_files_beside(&info.vmstate_path)
+}
+
+/// The image files of the checkpoint directory `vmstate_path` names — the
+/// catalog's anchor, which a host driver's image need not contain.
+fn image_files_beside(vmstate_path: &Path) -> Vec<PathBuf> {
+    vmstate_path
+        .parent()
+        .and_then(|dir| arcbox_snapshot::snapshot::image_files(dir).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
