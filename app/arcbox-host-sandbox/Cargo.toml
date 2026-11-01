@@ -1,0 +1,34 @@
+[package]
+name              = "arcbox-host-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description       = "The host sandbox location (ADR 0010): the Sandbox API over a ComputerManager of HV or VZ VMs on the Mac, composed for the daemon."
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arcbox-computer-runtime = { workspace = true, features = ["remote-image"] }
+arcbox-connect.workspace = true
+arcbox-constants.workspace = true
+arcbox-engine.workspace = true
+arcbox-host-net.workspace = true
+arcbox-hv-driver.workspace = true
+arcbox-sandbox-service.workspace = true
+arcbox-snapshot.workspace = true
+arcbox-vm-driver.workspace = true
+arcbox-vz-driver.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

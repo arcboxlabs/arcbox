@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-host-net"
-version = "0.10.5"
+version = "0.11.3"
 dependencies = [
  "arcbox-net",
  "arcbox-vm-driver",
@@ -890,6 +890,28 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "arcbox-host-sandbox"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "arcbox-computer-runtime",
+ "arcbox-connect",
+ "arcbox-constants",
+ "arcbox-engine",
+ "arcbox-host-net",
+ "arcbox-hv-driver",
+ "arcbox-sandbox-service",
+ "arcbox-snapshot",
+ "arcbox-vm-driver",
+ "arcbox-vz-driver",
+ "async-trait",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -904,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-hv-driver"
-version = "0.10.5"
+version = "0.11.3"
 dependencies = [
  "arcbox-fakeip",
  "arcbox-vm-driver",
@@ -1186,7 +1208,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-sandbox-service"
-version = "0.10.5"
+version = "0.11.3"
 dependencies = [
  "anyhow",
  "arcbox-computer-runtime",
