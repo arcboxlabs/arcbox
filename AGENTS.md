@@ -47,9 +47,9 @@ Linux remains a guest and validation target. Preserve guest agents, nested virtu
 - `common/` — L0 pure utilities (error, constants, logging, atomic file, local CA, storage, route) and the pure network datapath (packet, datapath, conntrack, fakeip, proxy, splicetcp, xnu-net); no VM or device dependency
 - `virt/` — hypervisor backends and the VM port (`arcbox-vm-driver`) with its adapters, VMM, VirtIO devices, VirtioFS, host networking (NAT/DHCP/DNS, vmnet)
 - `rpc/` — protobuf definitions, Connect and gRPC surfaces, vsock/unix transport
-- `runtime/` — parked OCI runtime-spec and container model crates; see the activation condition in `docs/architecture/charter.md`
+- `runtime/` — the parked container model crate (`arcbox-container`); see the activation condition in `docs/architecture/charter.md`
 - `engine/` — embeddable, daemon-free engine library (boot assets, machine images, VM/machine lifecycle, agent client, snapshots), per `docs/architecture/charter.md`
-- `computer/` — agent-computer domain layer: transport-free sandbox protocols behind the `SandboxHost` seam
+- `computer/` — agent-computer domain layer: transport-free sandbox protocols behind the `SandboxHost` seam, the computer runtime, and the OCI runtime-spec model (`arcbox-oci`) behind its workload contract
 - `app/` — core orchestration, API server, Docker Engine API compat, thin CLI (`abctl`, not `arcbox`), daemon binary (`arcbox-daemon`), privileged helper
 - `guest/` — in-VM agent (cross-compiled for Linux)
 - `runner/` — ArcBox Runners agent (`arcbox-runner-agent`) and its gateway and local control protocols
@@ -73,6 +73,7 @@ govern, and are imported here:
 @virt/arcbox-virtio-blk/AGENTS.md
 @engine/AGENTS.md
 @computer/AGENTS.md
+@computer/arcbox-oci/AGENTS.md
 @app/AGENTS.md
 @guest/AGENTS.md
 @rpc/AGENTS.md
