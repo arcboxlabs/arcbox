@@ -277,3 +277,199 @@ fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+    use crate::snapshot_cow::{CowBackend, CowManager, CowOptions};
+
+    const ROOTFS: &[u8] = b"template rootfs blocks";
+
+    /// A clonefile manager under `{root}/data` and a template under
+    /// `{root}/templates`, on the same volume as `clonefile` requires.
+    fn fixture() -> (tempfile::TempDir, CowManager, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let templates = root.path().join("templates");
+        std::fs::create_dir(&templates).unwrap();
+        let template = templates.join("rootfs.ext4");
+        std::fs::write(&template, ROOTFS).unwrap();
+        // World-readable, so the private mode of the clone is the clone's
+        // own doing and not inherited.
+        std::fs::set_permissions(&template, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let manager = CowManager::new(CowOptions {
+            backend: CowBackend::Clonefile,
+            ..CowOptions::new(root.path().join("data"))
+        })
+        .unwrap();
+        (root, manager, template)
+    }
+
+    fn cow_dir(root: &tempfile::TempDir) -> PathBuf {
+        root.path().join("data").join("cow")
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn template_str(template: &Path) -> &str {
+        template.to_str().unwrap()
+    }
+
+    #[test]
+    fn the_host_backend_needs_no_device_mapper_state() {
+        let (root, _manager, _) = fixture();
+        assert!(
+            entries(&cow_dir(&root)).is_empty(),
+            "the clonefile backend created dm bookkeeping"
+        );
+    }
+
+    /// Writes stay on the side that made them, which is the whole point:
+    /// two sandboxes from one template, and the template itself, never see
+    /// each other's blocks.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn setup_gives_each_sandbox_a_private_copy_on_write_disk() {
+        let (root, manager, template) = fixture();
+
+        let first = manager.setup("one", template_str(&template)).await.unwrap();
+        let second = manager.setup("two", template_str(&template)).await.unwrap();
+
+        let disk = cow_dir(&root).join("arcbox-cow-one.img");
+        assert_eq!(first.cow_file, disk);
+        assert_eq!(first.dm_device, disk.to_str().unwrap());
+        assert_eq!(first.dm_name, "arcbox-snap-one");
+        assert!(first.cow_loop.is_empty());
+        assert_eq!(first.template_path, template);
+        assert_eq!(std::fs::read(&first.cow_file).unwrap(), ROOTFS);
+        let mode = std::fs::metadata(&first.cow_file)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        std::fs::write(&first.cow_file, b"written by sandbox one").unwrap();
+        assert_eq!(std::fs::read(&template).unwrap(), ROOTFS);
+        assert_eq!(std::fs::read(&second.cow_file).unwrap(), ROOTFS);
+        assert_eq!(
+            entries(&cow_dir(&root)),
+            ["arcbox-cow-one.img", "arcbox-cow-two.img"],
+            "setup left a temporary behind"
+        );
+    }
+
+    /// An existing disk is some sandbox's state, and setup is not Remove.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn setup_never_replaces_an_existing_disk() {
+        let (root, manager, template) = fixture();
+        let disk = cow_dir(&root).join("arcbox-cow-box.img");
+        std::fs::write(&disk, b"a paused sandbox's disk").unwrap();
+
+        let error = manager
+            .setup("box", template_str(&template))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, SnapshotError::Common(arcbox_error::CommonError::Io(io)) if io.kind() == io::ErrorKind::AlreadyExists),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&disk).unwrap(), b"a paused sandbox's disk");
+        assert_eq!(entries(&cow_dir(&root)), ["arcbox-cow-box.img"]);
+    }
+
+    /// Not `Unavailable`: the runtime reads any other setup error as "no
+    /// CoW here" and stages a full copy instead, which is the right answer
+    /// for a template on another volume.
+    #[tokio::test]
+    async fn a_template_that_cannot_be_cloned_fails_in_a_way_the_caller_falls_back_from() {
+        let (root, manager, _) = fixture();
+        let missing = root.path().join("templates").join("absent.ext4");
+
+        let error = manager
+            .setup("box", template_str(&missing))
+            .await
+            .unwrap_err();
+
+        assert!(!matches!(error, SnapshotError::Unavailable(_)), "{error}");
+        assert!(entries(&cow_dir(&root)).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn teardown_deletes_only_the_disk_and_is_idempotent() {
+        let (_root, manager, template) = fixture();
+        let handle = manager.setup("box", template_str(&template)).await.unwrap();
+
+        manager.teardown_checked(&handle).await.unwrap();
+        manager.teardown_checked(&handle).await.unwrap();
+
+        assert!(!handle.cow_file.exists());
+        assert_eq!(std::fs::read(&template).unwrap(), ROOTFS);
+    }
+
+    /// A journal hands the handle back, and teardown deletes what it names;
+    /// a path outside this store's directory is refused, not unlinked.
+    #[tokio::test]
+    async fn teardown_refuses_a_handle_naming_a_foreign_file() {
+        let (root, manager, template) = fixture();
+        let foreign = root.path().join("arcbox-cow-box.img");
+        std::fs::write(&foreign, b"not ours").unwrap();
+        let handle = CowHandle {
+            dm_name: "arcbox-snap-box".into(),
+            dm_device: foreign.to_string_lossy().into_owned(),
+            cow_loop: String::new(),
+            cow_file: foreign.clone(),
+            template_path: template,
+        };
+
+        let error = manager.teardown_checked(&handle).await.unwrap_err();
+
+        assert!(
+            matches!(error, SnapshotError::FailedPrecondition(_)),
+            "{error}"
+        );
+        assert!(foreign.exists());
+    }
+
+    /// Pause keeps the disk with every write; resume hands back the same
+    /// file, even after the template it was cloned from has gone.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_paused_disk_reattaches_with_its_writes_and_without_its_template() {
+        let (_root, manager, template) = fixture();
+        let handle = manager.setup("box", template_str(&template)).await.unwrap();
+        std::fs::write(&handle.cow_file, b"guest writes").unwrap();
+
+        manager.detach_keep_cow(&handle).await.unwrap();
+        std::fs::remove_file(&template).unwrap();
+        let resumed = manager
+            .reattach("box", template_str(&template))
+            .await
+            .unwrap();
+
+        assert_eq!(resumed.cow_file, handle.cow_file);
+        assert_eq!(std::fs::read(&resumed.cow_file).unwrap(), b"guest writes");
+
+        manager.remove_preserved_cow("box").await.unwrap();
+        manager.remove_preserved_cow("box").await.unwrap();
+        assert!(!resumed.cow_file.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_preserved_refuses_an_owner_that_is_a_path() {
+        let (root, manager, _) = fixture();
+        let outside = cow_dir(&root).join("arcbox-cow-..").join("victim.img");
+
+        assert!(manager.remove_preserved_cow("../victim").await.is_err());
+        assert!(!outside.exists());
+    }
+}
