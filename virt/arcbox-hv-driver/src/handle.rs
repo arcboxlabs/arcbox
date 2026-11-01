@@ -32,7 +32,7 @@ struct Inner {
 }
 
 impl HvHandle {
-    pub fn new(record: VmRecord, process: Arc<VmmProcess>, booted: Booted) -> Self {
+    pub(crate) fn new(record: VmRecord, process: Arc<VmmProcess>, booted: Booted) -> Self {
         let control = Control::new(process.socket().to_path_buf());
         let state = match booted.state {
             VmState::Quiesced => VmState::Quiesced,

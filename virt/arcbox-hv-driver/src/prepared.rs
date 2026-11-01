@@ -25,7 +25,7 @@ pub struct HvPrepared {
 }
 
 impl HvPrepared {
-    pub fn new(record: VmRecord, process: Arc<VmmProcess>) -> Self {
+    pub(crate) fn new(record: VmRecord, process: Arc<VmmProcess>) -> Self {
         let control = Control::new(process.socket().to_path_buf());
         Self {
             record,

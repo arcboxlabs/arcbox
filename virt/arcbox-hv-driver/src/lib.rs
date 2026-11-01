@@ -3,30 +3,47 @@
 //!
 //! Hypervisor.framework allows one VM per process, and the daemon already
 //! holds the System VM, so every VM this driver runs lives in its own
-//! `arcbox-hv-vmm` process (ADR 0010, "Process model").
+//! `arcbox-hv-vmm` process (ADR 0010, "Process model"). The process runs
+//! `arcbox_vmm::hv_driver::HvMachineDriver` on itself and serves the port
+//! to this driver over a Unix socket in the VM's runtime dir.
 //!
+//! ```text
+//! daemon                                   arcbox-hv-vmm (one per VM)
+//! HvDriver ── spawn ──────────────────────▶ serve::run
+//!   HvPrepared / HvHandle                     HvMachineDriver ─▶ Vmm
+//!     Control ── request ─┐                     (render, checkpoint,
+//!     VmmProcess ◀─ Watch ┴── vmm.sock ──▶       restore, vsock, ...)
+//! ```
+//!
+//! - [`driver`] — [`HvDriver`]: `VmDriver` and `Prepare` (spawn without a
+//!   VM).
+//! - `process` — the process as the driver sees it: exit, kill, events.
+//! - `prepared`, `handle` — the port's `PreparedVm` and `VmHandle`, each a
+//!   request on the control socket.
+//! - `proto`, `wire`, `control` — the control protocol, its framing with
+//!   `SCM_RIGHTS`, and one request with a deadline.
 //! - [`serve`] — the process side, run by the `arcbox-hv-vmm` binary.
-//! - [`proto`] — the control protocol's requests, responses and events.
-//! - [`wire`] — framing on the control socket, with `SCM_RIGHTS`.
-//! - [`process`] — a VMM process as the driver sees it: exit, kill, events.
-//! - [`control`] — one request on the control socket, with a deadline.
-//! - [`prepared`], [`handle`] — the port's `PreparedVm` and `VmHandle`,
-//!   each a request on the control socket.
+//!
+//! The VM's life is the process's: a guest power-off ends the process with
+//! the guest's code, and a kill is `SIGKILL` to it. A process outlives the
+//! daemon that spawned it until its handle is dropped without a detach.
 //!
 //! The crate is empty on other platforms.
 
 #![cfg(target_os = "macos")]
 
-pub mod control;
-pub mod handle;
-pub mod prepared;
-pub mod process;
-pub mod proto;
+mod control;
+pub mod driver;
+mod handle;
+mod prepared;
+mod process;
+mod proto;
 #[doc(hidden)]
 pub mod serve;
-pub mod wire;
+mod wire;
 
 use arcbox_vm_driver::{CheckpointImage, CheckpointKind, Error, Result};
+pub use driver::HvDriver;
 
 /// The driver's name, as `VmDriver::name` and `VmRecord::driver` report it.
 pub const NAME: &str = arcbox_vmm::hv_driver::NAME;
