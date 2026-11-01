@@ -505,6 +505,12 @@ impl ComputerActor {
         snapshot_tx: watch::Sender<ComputerSnapshot>,
     ) -> Self {
         let (completions_tx, completions) = mpsc::unbounded_channel();
+        // A computer the restart sweep reinstated as `Paused` carries its
+        // checkpoint on the runtime, never through a capture this actor saw.
+        // Seeded here, or a resume that fails and parks it back at `Paused`
+        // records the pause with no checkpoint, and the next process has
+        // nothing to resume it from.
+        let pause_snapshot_id = seed.runtime.lock().unwrap().pause_snapshot_id.clone();
         Self {
             id: seed.id,
             runtime: seed.runtime,
@@ -530,7 +536,7 @@ impl ComputerActor {
             stalled_on: StalledStep::Handoff,
             retry_backoff: RETRY_INITIAL,
             error: None,
-            pause_snapshot_id: None,
+            pause_snapshot_id,
             capture: None,
             outcome: ComputerProvisionOutcome::default(),
             pause_reason: PauseReason::Requested,
