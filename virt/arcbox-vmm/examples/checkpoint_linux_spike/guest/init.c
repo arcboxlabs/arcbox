@@ -36,6 +36,8 @@
  * - download: reads the host's endless little-endian u64 counter stream
  *   from 10.0.2.1:<stream> and checks every word;
  * - a vsock echo server on port 5000, one host connection at a time;
+ * - a vsock server on port 5001 that greets each connection with one byte
+ *   and holds it open without reading;
  * - dhcp: renews 10.0.2.2's lease every 300 ms the way a renewing client
  *   does, from a UDP socket bound to 10.0.2.2:68 with ciaddr set, and
  *   checks the ACK keeps the address; a NAK or another address is a FAIL;
@@ -435,6 +437,26 @@ static void *vsock_server(void *arg) {
     }
 }
 
+/* Accepts on vsock port 5001, writes one byte to each connection and then
+ * holds it open without reading, as a busy agent handler would: a
+ * connection the restore reset stays in the guest's table until closed. */
+static void *vsock_hold(void *arg) {
+    (void)arg;
+    int lfd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    struct sockaddr_vm at = {.svm_family = AF_VSOCK, .svm_cid = VMADDR_CID_ANY, .svm_port = 5001};
+    if (lfd < 0 || bind(lfd, (struct sockaddr *)&at, sizeof at) || listen(lfd, 4)) {
+        printf("FAIL vsock hold listen errno %d\n", errno);
+        fails++;
+        return NULL;
+    }
+    printf("vsock-hold listening\n");
+    for (;;) {
+        int fd = accept(lfd, NULL, NULL);
+        if (fd >= 0 && write(fd, "h", 1) != 1)
+            close(fd);
+    }
+}
+
 int main(void) {
     mkdir("/dev", 0755);
     mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
@@ -476,6 +498,7 @@ int main(void) {
         pthread_create(&t, NULL, idle_client, NULL);
         pthread_create(&t, NULL, download_client, NULL);
         pthread_create(&t, NULL, vsock_server, NULL);
+        pthread_create(&t, NULL, vsock_hold, NULL);
         pthread_create(&t, NULL, dhcp_client, NULL);
         pthread_create(&t, NULL, pend_client, NULL);
     }

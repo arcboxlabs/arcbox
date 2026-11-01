@@ -21,6 +21,8 @@ const DISK_BYTES: u64 = 256 << 20;
 const CMDLINE: &str = "console=hvc0 rdinit=/init loglevel=4 panic=-1";
 /// The guest's vsock echo port (`guest/init.c`).
 const VSOCK_PORT: u32 = 5000;
+/// The guest's vsock port that holds every connection open (`guest/init.c`).
+const VSOCK_HOLD_PORT: u32 = 5001;
 /// Balloon inflation held across the first checkpoint; each restore flips
 /// between it and none.
 const BALLOON_BYTES: u64 = 64 << 20;
@@ -130,6 +132,15 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         vmm.lock().unwrap().get_balloon_stats().current_bytes == BALLOON_BYTES
     })
     .map_err(|()| "the guest did not inflate the balloon")?;
+    // The first host vsock connection of the process, held by the guest
+    // across the checkpoint.
+    let held = match &echo {
+        Some(_) => {
+            console.wait_for(|l| l == "vsock-hold listening", Duration::from_secs(10))?;
+            Some(hold_vsock(&vmm)?)
+        }
+        None => None,
+    };
     let driver = echo.as_ref().map(|_| VsockDriver::start(&vmm));
     if driver.is_some() {
         // Checkpoint with every connection open and carrying traffic.
@@ -160,6 +171,7 @@ fn save(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         d.stop.store(true, Ordering::Release);
     }
     vmm.lock().unwrap().stop()?;
+    drop(held);
     fs::write(dir.join("spike.json"), serde_json::to_vec_pretty(&spec)?)?;
     fs::remove_file(&disk)?;
 
@@ -199,6 +211,10 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
     vmm.lock().unwrap().hv_restore(dir)?;
     println!("[restore] hv_restore returned in {:.1} ms", ms(t.elapsed()));
     let balloon = vmm.lock().unwrap().get_balloon_stats();
+    // The restored process's first host vsock connection, to the port where
+    // the guest still holds the reset one from before the checkpoint. The
+    // new connection must not reuse its address.
+    let held = echo.as_ref().map(|_| hold_vsock(&vmm));
     let driver = echo.as_ref().map(|_| VsockDriver::start(&vmm));
     let first = console.wait_for(|l| l.starts_with("tick "), Duration::from_secs(5));
     let first_ms = ms(t.elapsed());
@@ -236,6 +252,11 @@ fn restore(dir: &Path, run_s: u64, console: &Console) -> Result<()> {
         balloon.current_bytes >> 20,
         balloon_next >> 20,
     );
+    match &held {
+        Some(Ok(_)) => println!("[restore] vsock: the first connect after restore was accepted"),
+        Some(Err(e)) => problems.push(format!("the first vsock connect after restore: {e}")),
+        None => {}
+    }
     let elapsed = t.elapsed();
     std::thread::sleep(Duration::from_secs(run_s).saturating_sub(elapsed));
     // A second-generation checkpoint of the restored machine, whose RAM is
@@ -694,6 +715,22 @@ impl ConsoleInput {
             }
         }
         Err(format!("the guest did not echo {line:?}").into())
+    }
+}
+
+/// Connects to the guest's holding vsock server and reads its greeting. A
+/// connection the guest refuses reads EOF.
+fn hold_vsock(vmm: &Arc<Mutex<Vmm>>) -> Result<UnixStream> {
+    let fd = vmm.lock().unwrap().connect_vsock(VSOCK_HOLD_PORT)?;
+    // SAFETY: `connect_vsock` hands over a fresh socket fd.
+    let mut s = unsafe { UnixStream::from_raw_fd(fd) };
+    s.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut greeting = [0u8; 1];
+    match s.read(&mut greeting) {
+        Ok(1) if greeting == *b"h" => Ok(s),
+        Ok(0) => Err("refused (EOF)".into()),
+        Ok(_) => Err("bad greeting".into()),
+        Err(e) => Err(e.into()),
     }
 }
 
