@@ -16,9 +16,9 @@ struct QueueState {
     device: u64,
 }
 
-/// One virtio-mmio device's transport state. Everything else a device
-/// keeps between requests lives in guest RAM: the queue workers derive
-/// their avail cursor from the used ring.
+/// One virtio-mmio device's transport state and host-owned configuration.
+/// Everything else a device keeps between requests lives in guest RAM: the
+/// queue workers derive their avail cursor from the used ring.
 #[derive(Serialize, Deserialize)]
 pub(super) struct DeviceState {
     pub(super) mmio_base: u64,
@@ -33,10 +33,13 @@ pub(super) struct DeviceState {
     config_generation: u32,
     shm_sel: u32,
     queues: Vec<QueueState>,
+    /// `VirtioDevice::save_config`: the configuration-space fields the
+    /// host owns, such as a NIC's MAC.
+    pub(super) config: Vec<u8>,
 }
 
 impl DeviceState {
-    pub(super) fn capture(mmio_base: u64, s: &VirtioMmioState) -> Self {
+    pub(super) fn capture(mmio_base: u64, s: &VirtioMmioState, config: Vec<u8>) -> Self {
         Self {
             mmio_base,
             device_id: s.device_id,
@@ -60,6 +63,7 @@ impl DeviceState {
                     device: s.queue_device[q],
                 })
                 .collect(),
+            config,
         }
     }
 

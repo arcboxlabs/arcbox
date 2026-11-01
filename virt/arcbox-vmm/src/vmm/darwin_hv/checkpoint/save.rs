@@ -15,7 +15,7 @@ use crate::error::{Result, VmmError};
 
 use super::super::HvMachine;
 use super::device_state::DeviceState;
-use super::{MachineState, PAUSE_TIMEOUT};
+use super::{MachineState, PAUSE_TIMEOUT, os_build};
 
 /// Granularity of the sparse RAM image.
 const PAGE: usize = 16 << 10;
@@ -109,9 +109,21 @@ impl HvMachine {
             .collect::<Result<Vec<_>>>()?;
         let devices = dm
             .iter()
-            .filter_map(|d| Some((d.mmio_base?, dm.get_mmio_state(d.id)?)))
-            .map(|(base, s)| {
-                DeviceState::capture(base, &s.read().unwrap_or_else(PoisonError::into_inner))
+            .filter_map(|d| Some((d, d.mmio_base?, dm.get_mmio_state(d.id)?)))
+            .map(|(info, base, s)| {
+                let config = dm
+                    .get_virtio_device(info.id)
+                    .map(|d| {
+                        d.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .save_config()
+                    })
+                    .unwrap_or_default();
+                DeviceState::capture(
+                    base,
+                    &s.read().unwrap_or_else(PoisonError::into_inner),
+                    config,
+                )
             })
             .collect();
         let pl031 = self
@@ -139,12 +151,21 @@ impl HvMachine {
         let ram = unsafe { std::slice::from_raw_parts(mem.as_ptr(), mem.len() as usize) };
         let (pages, bytes) = write_sparse(&dir.join("mem.bin"), ram)?;
         fs::write(dir.join("gic.bin"), &gic)?;
+        #[cfg(feature = "vmnet")]
+        let bridge_mac = self
+            .vmnet_bridge
+            .as_ref()
+            .and_then(|v| v.interface_info().map(|i| i.mac));
+        #[cfg(not(feature = "vmnet"))]
+        let bridge_mac = None;
         let state = MachineState {
             vcpus,
             cpu_on,
             pl031,
             devices,
             tcp_resets,
+            os_build: os_build()?,
+            bridge_mac,
         };
         fs::write(
             dir.join("state.json"),

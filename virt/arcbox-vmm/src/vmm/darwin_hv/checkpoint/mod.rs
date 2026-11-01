@@ -4,20 +4,25 @@
 //! of its run loop, captures its own registers and stays parked with its
 //! `HvVcpu` alive (the GIC state can only be read while every vCPU exists
 //! and none is inside `hv_vcpu_run`). Then the I/O workers stop, and the
-//! GIC, the virtio transport state, PSCI power states, the PL031, guest RAM
-//! and an APFS clone of every disk are written to the checkpoint directory.
-//! The machine is left stopped in place; the caller stops it.
+//! GIC, the virtio transport state and each device's host-owned
+//! configuration (a NIC's MAC, the balloon's target), PSCI power states, the
+//! PL031, guest RAM and an APFS clone of every disk are written to the
+//! checkpoint directory, with the macOS build that wrote it. The machine is
+//! left stopped in place; the caller stops it.
 //!
 //! A restore builds the same machine in a fresh process (Hypervisor.framework
 //! allows one VM per process), maps the RAM image copy-on-write, writes the
 //! device state back, creates every vCPU in id order and resumes them where
-//! they stopped. The caller provides the disks, cloned from the checkpoint.
-//! Host-side connections do not survive: the guest gets a vsock
-//! TRANSPORT_RESET and an RST for every TCP flow the checkpoint aborted, and
-//! later segments of flows the new datapath never saw are answered with RST.
+//! they stopped. A checkpoint from another macOS build is refused with
+//! [`VmmError::CheckpointBuildMismatch`] before anything is built. The caller
+//! provides the disks, cloned from the checkpoint. Host-side connections do
+//! not survive: the guest gets a vsock TRANSPORT_RESET and an RST for every
+//! TCP flow the checkpoint aborted, and later segments of flows the new
+//! datapath never saw are answered with RST.
 //!
-//! Method and results: `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`
-//! and `docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md`.
+//! Method and results: `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`,
+//! `docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md` and
+//! `docs/experiments/2026-11-01-hv-checkpoint-gaps.md`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,6 +31,8 @@ use std::time::Duration;
 use arcbox_hv::HvVcpu;
 use arcbox_hv::snapshot::VcpuState;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{Result, VmmError};
 
 use super::Pl031;
 
@@ -83,9 +90,42 @@ struct MachineState {
     cpu_on: Vec<bool>,
     pl031: Pl031,
     devices: Vec<DeviceState>,
+    /// The macOS build (`kern.osversion`) that wrote the checkpoint. The
+    /// GIC blob is versioned by Hypervisor.framework, so only the same
+    /// build restores it.
+    os_build: String,
+    /// The vmnet bridge NIC's MAC. vmnet takes the MAC when the interface
+    /// is created, before the device's saved configuration is applied.
+    #[serde(default)]
+    bridge_mac: Option<[u8; 6]>,
     /// Guest-bound Ethernet RSTs for every TCP flow the datapath carried,
     /// sent to the guest once it resumes: the flows' host sockets end with
     /// the checkpointed process.
     #[serde(default)]
     tcp_resets: Vec<Vec<u8>>,
+}
+
+/// This host's macOS build, e.g. `25F71`.
+fn os_build() -> Result<String> {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    // SAFETY: the name is NUL-terminated, `buf` is writable for `len` bytes
+    // and sysctl writes at most `len` of them, updating `len`.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.osversion".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return Err(VmmError::Device(format!(
+            "sysctl kern.osversion: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let build = buf[..len].split(|&b| b == 0).next().unwrap_or_default();
+    Ok(String::from_utf8_lossy(build).into_owned())
 }

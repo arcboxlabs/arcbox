@@ -53,6 +53,16 @@ pub enum VmmError {
     /// cannot clear it.
     #[error("{0}")]
     PlatformUnsupported(&'static str),
+
+    /// A checkpoint written on another macOS build. Its memory cannot be
+    /// resumed here; the disks it saved are still the guest's data.
+    #[error("checkpoint was written on macOS build {checkpoint}, this host runs {host}")]
+    CheckpointBuildMismatch {
+        /// The build recorded in the checkpoint.
+        checkpoint: String,
+        /// This host's build.
+        host: String,
+    },
 }
 
 impl VmmError {

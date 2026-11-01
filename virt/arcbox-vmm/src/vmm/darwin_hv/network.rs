@@ -207,13 +207,30 @@ impl HvMachine {
     ) -> Result<()> {
         use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetRelay};
 
-        // Parse MAC from config (stable per VM for bridge FDB lookup).
-        let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
-            let mac = arcbox_net::darwin::parse_mac(mac_str)
-                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
-            VmnetConfig::shared().with_mac(mac)
-        } else {
-            VmnetConfig::shared()
+        // Parse MAC from config (stable per VM for bridge FDB lookup). A
+        // restored guest keeps using the MAC it booted with, so a checkpoint's
+        // MAC stands in when none is configured, and must not contradict one.
+        let configured = self
+            .config
+            .bridge_nic_mac
+            .as_deref()
+            .map(arcbox_net::darwin::parse_mac)
+            .transpose()
+            .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
+        #[cfg(feature = "gic")]
+        let saved = self.hv_restore.as_ref().and_then(|r| r.bridge_mac());
+        #[cfg(not(feature = "gic"))]
+        let saved = None;
+        let config = match (configured, saved) {
+            (Some(c), Some(s)) if c != s => {
+                return Err(VmmError::invalid_state(format!(
+                    "bridge NIC MAC {} differs from the checkpoint's {}",
+                    arcbox_net::darwin::format_mac(&c),
+                    arcbox_net::darwin::format_mac(&s)
+                )));
+            }
+            (Some(mac), _) | (None, Some(mac)) => VmnetConfig::shared().with_mac(mac),
+            (None, None) => VmnetConfig::shared(),
         };
 
         let vmnet = std::sync::Arc::new(

@@ -14,7 +14,7 @@ use crate::device::DeviceManager;
 use crate::error::{Result, VmmError};
 
 use super::super::{HvGuestMem, HvMachine, Pl031, RAM_BASE_IPA};
-use super::{DRIVER_OK, MachineState, PAUSE_TIMEOUT};
+use super::{DRIVER_OK, MachineState, PAUSE_TIMEOUT, os_build};
 
 /// A checkpoint being resumed: built by [`HvMachine::prepare_restore`],
 /// consumed by `initialize` (RAM) and `start` (devices, vCPUs).
@@ -61,9 +61,16 @@ impl Restore {
         self.state.pl031.clone()
     }
 
-    /// Writes the saved transport state into the fresh devices and replays
-    /// what the guest's status writes did to the device objects: feature
-    /// acknowledgement and activation. Before any vCPU runs.
+    /// The vmnet bridge NIC's MAC, if the checkpointed machine had one.
+    #[cfg(feature = "vmnet")]
+    pub(in crate::vmm) const fn bridge_mac(&self) -> Option<[u8; 6]> {
+        self.state.bridge_mac
+    }
+
+    /// Writes the saved transport state and configuration into the fresh
+    /// devices and replays what the guest's status writes did to the device
+    /// objects: feature acknowledgement and activation. Before any vCPU
+    /// runs.
     pub(in crate::vmm) fn apply_devices(&self, dm: &DeviceManager) -> Result<()> {
         for saved in &self.state.devices {
             let info = dm
@@ -78,6 +85,9 @@ impl Restore {
             saved.apply(&mut mmio.write().unwrap_or_else(PoisonError::into_inner))?;
             if let Some(dev) = dm.get_virtio_device(info.id) {
                 let mut dev = dev.lock().unwrap_or_else(PoisonError::into_inner);
+                dev.load_config(&saved.config).map_err(|e| {
+                    VmmError::Device(format!("device at {:#x}: {e}", saved.mmio_base))
+                })?;
                 dev.ack_features(saved.driver_features);
                 if saved.status & DRIVER_OK != 0 {
                     dev.activate()
@@ -181,6 +191,13 @@ impl HvMachine {
     pub(in crate::vmm) fn prepare_restore(&mut self, dir: &Path) -> Result<()> {
         let state: MachineState = serde_json::from_slice(&fs::read(dir.join("state.json"))?)
             .map_err(|e| VmmError::invalid_state(format!("state.json: {e}")))?;
+        let host = os_build()?;
+        if state.os_build != host {
+            return Err(VmmError::CheckpointBuildMismatch {
+                checkpoint: state.os_build,
+                host,
+            });
+        }
         let n = self.config.vcpu_count as usize;
         if state.vcpus.len() != n || state.cpu_on.len() != n {
             return Err(VmmError::invalid_state(format!(
