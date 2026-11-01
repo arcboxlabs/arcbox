@@ -46,6 +46,17 @@ impl DhcpLease {
     }
 }
 
+/// A reply for the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DhcpReply {
+    /// The DHCP message.
+    pub payload: Vec<u8>,
+    /// IPv4 destination (RFC 2131 section 4.1): the client's `ciaddr` when
+    /// it has an address, which a renewing client listens on and nowhere
+    /// else; otherwise, and for every NAK, the limited broadcast address.
+    pub destination: Ipv4Addr,
+}
+
 /// How long a declined IP stays quarantined before being returned to the pool.
 /// ArcBox pools are typically small, so 5 minutes is enough to avoid handing
 /// out the same conflicting address immediately while not permanently losing it.
@@ -126,12 +137,12 @@ impl DhcpServer {
 
     /// Handles an incoming DHCP packet.
     ///
-    /// Returns the response packet if one should be sent.
+    /// Returns the reply if one should be sent.
     ///
     /// # Errors
     ///
     /// Returns an error if packet processing fails.
-    pub fn handle_packet(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn handle_packet(&mut self, data: &[u8]) -> Result<Option<DhcpReply>> {
         let packet = DhcpPacket::parse(data)?;
 
         // Only handle BOOTREQUEST (client -> server)
@@ -140,24 +151,33 @@ impl DhcpServer {
         }
 
         let response = match packet.message_type {
-            Some(DhcpMessageType::Discover) => Some(self.handle_discover(&packet)?),
-            Some(DhcpMessageType::Request) => Some(self.handle_request(&packet)?),
+            Some(DhcpMessageType::Discover) => self.handle_discover(&packet)?,
+            Some(DhcpMessageType::Request) => self.handle_request(&packet)?,
             Some(DhcpMessageType::Release) => {
                 self.handle_release(&packet);
-                None
+                return Ok(None);
             }
             Some(DhcpMessageType::Decline) => {
                 self.handle_decline(&packet);
-                None
+                return Ok(None);
             }
-            _ => None,
+            _ => return Ok(None),
         };
-
-        Ok(response)
+        let destination = if response.message_type == Some(DhcpMessageType::Nak)
+            || packet.ciaddr.is_unspecified()
+        {
+            Ipv4Addr::BROADCAST
+        } else {
+            packet.ciaddr
+        };
+        Ok(Some(DhcpReply {
+            payload: response.serialize(&self.config),
+            destination,
+        }))
     }
 
     /// Handles DHCPDISCOVER.
-    fn handle_discover(&mut self, packet: &DhcpPacket) -> Result<Vec<u8>> {
+    fn handle_discover(&mut self, packet: &DhcpPacket) -> Result<DhcpPacket> {
         let mac = packet.client_mac();
 
         // Clean up expired leases
@@ -213,11 +233,16 @@ impl DhcpServer {
             mac[5]
         );
 
-        Ok(response.serialize(&self.config))
+        Ok(response)
     }
 
     /// Handles DHCPREQUEST.
-    fn handle_request(&mut self, packet: &DhcpPacket) -> Result<Vec<u8>> {
+    ///
+    /// A client that renews or rebinds a lease this server has no record
+    /// of, granted by a server instance that is gone (a VM restored from a
+    /// checkpoint into a new datapath), gets its address back while the
+    /// pool has it free.
+    fn handle_request(&mut self, packet: &DhcpPacket) -> Result<DhcpPacket> {
         let mac = packet.client_mac();
         let requested_ip = packet
             .requested_ip
@@ -261,7 +286,7 @@ impl DhcpServer {
                 mac[5]
             );
 
-            return Ok(response.serialize(&self.config));
+            return Ok(response);
         }
 
         // Create or update lease
@@ -295,7 +320,7 @@ impl DhcpServer {
             mac[5]
         );
 
-        Ok(response.serialize(&self.config))
+        Ok(response)
     }
 
     /// Handles DHCPRELEASE.
@@ -456,6 +481,57 @@ mod tests {
 
         assert!(!lease.is_expired());
         assert!(lease.time_remaining() > Duration::ZERO);
+    }
+
+    fn client(mac: [u8; 6], message_type: DhcpMessageType, ciaddr: Ipv4Addr) -> Vec<u8> {
+        let mut pkt = DhcpPacket::new();
+        pkt.op = 1;
+        pkt.xid = 0x5eed;
+        pkt.ciaddr = ciaddr;
+        pkt.chaddr[..6].copy_from_slice(&mac);
+        pkt.message_type = Some(message_type);
+        pkt.serialize(&DhcpConfig::new(Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST))
+    }
+
+    /// A guest restored from a checkpoint renews its lease with a server
+    /// instance that never granted it. It keeps its address, and the ACK
+    /// goes to that address: a renewing client listens on its own address
+    /// only, so a broadcast ACK would never reach it.
+    #[test]
+    fn renewal_of_an_unknown_lease_is_acked_unicast_with_the_same_address() {
+        let config = DhcpConfig::new(Ipv4Addr::new(10, 0, 2, 1), Ipv4Addr::new(255, 255, 255, 0));
+        let mut server = DhcpServer::new(config);
+        let mac = [0x52, 0x54, 0xAB, 0, 0, 7];
+        let held = Ipv4Addr::new(10, 0, 2, 7);
+
+        let reply = server
+            .handle_packet(&client(mac, DhcpMessageType::Request, held))
+            .unwrap()
+            .unwrap();
+        let ack = DhcpPacket::parse(&reply.payload).unwrap();
+        assert_eq!(ack.message_type, Some(DhcpMessageType::Ack));
+        assert_eq!(ack.yiaddr, held);
+        assert_eq!(reply.destination, held);
+
+        // Another client renewing the same address is refused, by broadcast.
+        let reply = server
+            .handle_packet(&client([2, 0, 0, 0, 0, 8], DhcpMessageType::Request, held))
+            .unwrap()
+            .unwrap();
+        let nak = DhcpPacket::parse(&reply.payload).unwrap();
+        assert_eq!(nak.message_type, Some(DhcpMessageType::Nak));
+        assert_eq!(reply.destination, Ipv4Addr::BROADCAST);
+
+        // A client without an address is answered by broadcast.
+        let reply = server
+            .handle_packet(&client(
+                [2, 0, 0, 0, 0, 9],
+                DhcpMessageType::Discover,
+                Ipv4Addr::UNSPECIFIED,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.destination, Ipv4Addr::BROADCAST);
     }
 
     #[test]

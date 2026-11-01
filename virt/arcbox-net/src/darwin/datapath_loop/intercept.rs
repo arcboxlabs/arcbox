@@ -118,13 +118,13 @@ fn handle_dhcp(
     tracing::info!("DHCP packet from guest ({} bytes)", dhcp_data.len());
 
     match dhcp_server.handle_packet(dhcp_data) {
-        Ok(Some(response)) => {
+        Ok(Some(reply)) => {
             let reply_frames = build_udp_ip_ethernet(
                 gateway_ip,
-                Ipv4Addr::BROADCAST,
+                reply.destination,
                 67,
                 68,
-                &response,
+                &reply.payload,
                 gateway_mac,
                 guest_mac,
                 mtu,

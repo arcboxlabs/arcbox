@@ -31,4 +31,4 @@ pub use allocator::IpAllocator;
 pub use config::{DEFAULT_LEASE_DURATION, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DhcpConfig};
 pub use error::{DhcpError, Result};
 pub use packet::{DhcpMessageType, DhcpPacket};
-pub use server::{DhcpLease, DhcpServer};
+pub use server::{DhcpLease, DhcpReply, DhcpServer};
