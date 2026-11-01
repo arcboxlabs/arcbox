@@ -15,7 +15,8 @@
 //!
 //! `docker:<ref>` templates name the image; [`ImageRef`] qualifies the
 //! reference and, with the `remote-image` feature, `pull` fetches it for
-//! [`guest_platform`] through `oci2rootfs`.
+//! [`guest_platform`] through `oci2rootfs`. [`vm_agent_path`] and
+//! [`check_vm_agent`] find and check the init every rootfs carries.
 //!
 //! [`StartCommand`]: crate::StartCommand
 
@@ -23,6 +24,7 @@ mod check;
 mod image;
 mod spec;
 mod start;
+mod vm_agent;
 
 pub use check::Rejected;
 pub use image::{DOCKER_TEMPLATE_PREFIX, ImageRef, guest_platform};
@@ -30,6 +32,7 @@ pub use image::{DOCKER_TEMPLATE_PREFIX, ImageRef, guest_platform};
 pub use image::{PulledImage, pull};
 pub use spec::{ImageAccounts, WorkloadRequest, bundle_spec};
 pub use start::Workload;
+pub use vm_agent::{check_vm_agent, vm_agent_path};
 
 use crate::error::ComputerError;
 
@@ -48,6 +51,9 @@ pub enum WorkloadError {
     /// The image reference is malformed or its pull failed.
     #[error("{0}")]
     Image(String),
+    /// The `vm-agent` binary cannot boot a computer.
+    #[error("{0}")]
+    Agent(String),
     /// The user or group does not resolve against the image.
     #[error("{0}")]
     User(String),
