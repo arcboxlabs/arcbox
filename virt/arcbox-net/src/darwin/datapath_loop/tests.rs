@@ -295,12 +295,24 @@ const GUEST_MAC: [u8; 6] = [2, 0, 0, 0, 0, 2];
 
 /// A datapath on 192.168.64.0/24 and the guest end of its socketpair.
 fn fixture(cancel: &CancellationToken) -> (NetworkDatapath, tokio::net::UnixDatagram) {
+    let (datapath, guest, _inbound) = fixture_with_inbound(cancel);
+    (datapath, guest)
+}
+
+/// [`fixture`] and the sender host listeners hand accepted connections to.
+fn fixture_with_inbound(
+    cancel: &CancellationToken,
+) -> (
+    NetworkDatapath,
+    tokio::net::UnixDatagram,
+    mpsc::Sender<InboundCommand>,
+) {
     let (host_fd, guest_fd) = socketpair();
     let guest = std::os::unix::net::UnixDatagram::from(guest_fd);
     guest.set_nonblocking(true).unwrap();
     let guest = tokio::net::UnixDatagram::from_std(guest).unwrap();
     let (reply_tx, reply_rx) = mpsc::channel(16);
-    let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+    let (cmd_tx, cmd_rx) = mpsc::channel(1);
     let datapath = NetworkDatapath::new(
         host_fd,
         HostEgress::new(
@@ -324,7 +336,7 @@ fn fixture(cancel: &CancellationToken) -> (NetworkDatapath, tokio::net::UnixData
         cancel.clone(),
         1500,
     );
-    (datapath, guest)
+    (datapath, guest, cmd_tx)
 }
 
 #[tokio::test(flavor = "current_thread")]

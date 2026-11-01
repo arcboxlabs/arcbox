@@ -2,7 +2,8 @@
 
 use super::*;
 use arcbox_packet::ethernet::{
-    SynParams, TcpFrameParams, build_tcp_ack_frame, build_tcp_syn_frame,
+    SynAckParams, SynParams, TcpFrameParams, build_tcp_ack_frame, build_tcp_syn_ack_frame,
+    build_tcp_syn_frame,
 };
 use arcbox_packet::ip::{IpPacketView, TcpPacketView};
 use tokio::io::AsyncWriteExt;
@@ -94,4 +95,77 @@ async fn abort_tcp_returns_resets_at_snd_nxt_and_send_to_guest_delivers_them() {
     cancel.cancel();
     running.await.unwrap().unwrap();
     result.expect("abort and redelivery must complete");
+}
+
+/// A port-forwarded connection the host accepted is still waiting for the
+/// guest's SYN-ACK when the checkpoint aborts it (ActiveOpen). RFC 9293
+/// sends nothing for SYN-SENT, so the checkpoint saves no reset; the host
+/// connection closes, and the SYN-ACK the restored guest sends next, into a
+/// datapath that never saw the flow, is answered with RST at its ACK.
+#[tokio::test(flavor = "current_thread")]
+async fn abort_tcp_saves_no_reset_for_an_active_open_and_its_syn_ack_draws_one() {
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let (datapath, guest, inbound) = fixture_with_inbound(&cancel);
+    let control = datapath.control();
+    let running = tokio::spawn(datapath.run());
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut user = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        inbound
+            .send(InboundCommand::TcpAccepted {
+                host_port: 8080,
+                container_port: 8080,
+                stream: accepted,
+            })
+            .await
+            .unwrap();
+        let mut frame = [0; 2048];
+        let n = guest.recv(&mut frame).await.unwrap();
+        let syn = tcp(&frame[..n]);
+        assert_eq!((syn.flags(), syn.destination_port()), (0x02, 8080));
+        let (isn, gateway_port) = (syn.sequence(), syn.source_port());
+
+        let resets = {
+            let control = control.clone();
+            tokio::task::spawn_blocking(move || control.abort_tcp(Duration::from_secs(1)))
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert!(resets.is_empty(), "SYN-SENT is deleted without a reset");
+        let mut rest = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut user, &mut rest).await;
+
+        let syn_ack = build_tcp_syn_ack_frame(&SynAckParams {
+            src_ip: GUEST_IP,
+            dst_ip: GATEWAY_IP,
+            src_port: 8080,
+            dst_port: gateway_port,
+            seq: 90_000,
+            ack: isn.wrapping_add(1),
+            src_mac: GUEST_MAC,
+            dst_mac: GATEWAY_MAC,
+            mss: 1460,
+            wscale: None,
+            sack_permitted: false,
+        });
+        fd_write(guest.as_raw_fd(), &syn_ack).unwrap();
+        let n = guest.recv(&mut frame).await.unwrap();
+        let reset = tcp(&frame[..n]);
+        assert_eq!(reset.flags(), 0x04);
+        assert_eq!(reset.sequence(), isn.wrapping_add(1));
+        assert_eq!(
+            (reset.source_port(), reset.destination_port()),
+            (gateway_port, 8080)
+        );
+    })
+    .await;
+    cancel.cancel();
+    running.await.unwrap().unwrap();
+    result.expect("the aborted active open must close and reset");
 }
