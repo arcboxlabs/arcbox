@@ -155,6 +155,9 @@ Environment variables read by the tests:
 - `ARCBOX_E2E_IMAGE=<ref>` — container image for the lifecycle tests
   (default `alpine:latest`). Point it at a mirror on networks where the
   guest cannot reach docker.io.
+- `ARCBOX_E2E_HOST_BACKENDS=hv,vz` — which host sandbox backends the
+  `host_sandbox` target runs (default both). Its VZ half skips with the
+  daemon's reason while the macOS session is locked.
 - `ARCBOX_GUEST_DOCKER_VSOCK_PORT=<port>` — pass a custom guest Docker vsock
   port to `arcbox-daemon`.
 - `ARCBOX_IDLE_TIMEOUT_SECS=<secs>` — shorten the daemon's VM idle timeout
