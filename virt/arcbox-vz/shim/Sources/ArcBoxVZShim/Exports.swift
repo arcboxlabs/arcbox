@@ -52,6 +52,11 @@ public func abxVzMaxMemorySize() -> UInt64 {
     vzMaxMemorySize()
 }
 
+@_cdecl("abx_console_session_state")
+public func abxConsoleSessionState() -> Int32 {
+    consoleSessionState()
+}
+
 // MARK: - Configuration
 
 @_cdecl("abx_config_new")

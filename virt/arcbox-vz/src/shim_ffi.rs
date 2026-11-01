@@ -46,6 +46,7 @@ unsafe extern "C" {
     pub fn abx_vz_max_cpu_count() -> u64;
     pub fn abx_vz_min_memory_size() -> u64;
     pub fn abx_vz_max_memory_size() -> u64;
+    pub fn abx_console_session_state() -> i32;
 
     // Configuration
     pub fn abx_config_new() -> *mut c_void;
@@ -244,6 +245,7 @@ mod tests {
         abx_vz_max_cpu_count as *const (),
         abx_vz_min_memory_size as *const (),
         abx_vz_max_memory_size as *const (),
+        abx_console_session_state as *const (),
         abx_config_new as *const (),
         abx_config_set_cpu_count as *const (),
         abx_config_cpu_count as *const (),
@@ -316,7 +318,7 @@ mod tests {
 
     /// Update when symbols are added; a mismatch means Exports.swift and this
     /// file have drifted.
-    const EXPECTED_SYMBOL_COUNT: usize = 76;
+    const EXPECTED_SYMBOL_COUNT: usize = 77;
 
     #[test]
     fn link_coverage() {
@@ -426,6 +428,7 @@ mod tests {
                 assert!(abx_vz_min_memory_size() > 0);
                 assert!(abx_vz_max_memory_size() >= abx_vz_min_memory_size());
             }
+            assert!((0..=2).contains(&abx_console_session_state()));
         }
     }
 }

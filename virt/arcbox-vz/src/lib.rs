@@ -55,6 +55,7 @@ mod shim_ffi;
 pub mod configuration;
 pub mod device;
 pub mod restore;
+pub mod session;
 pub mod socket;
 pub mod vm;
 
@@ -77,6 +78,8 @@ pub use device::{
 pub use socket::{VirtioSocketConnection, VirtioSocketDevice};
 
 pub use restore::{MacOSConfigurationRequirements, MacOSInstaller, MacOSRestoreImage};
+
+pub use session::SessionState;
 
 pub use vm::{VirtualMachine, VirtualMachineState};
 

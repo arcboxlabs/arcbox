@@ -31,6 +31,16 @@ pub enum VZError {
     /// File or path not found.
     NotFound(String),
 
+    /// A save or restore failed while the console session could not use
+    /// the Secure Enclave key that protects the state file
+    /// ([`crate::SessionState`]).
+    SessionLocked {
+        /// The session when the operation failed.
+        state: crate::SessionState,
+        /// The framework's own message.
+        message: String,
+    },
+
     /// Internal framework error.
     Internal {
         /// Error code from `NSError`.
@@ -52,6 +62,12 @@ impl fmt::Display for VZError {
             Self::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
             Self::Timeout(msg) => write!(f, "Timeout: {msg}"),
             Self::NotFound(path) => write!(f, "Not found: {path}"),
+            Self::SessionLocked { state, message } => {
+                write!(
+                    f,
+                    "{message} ({state}; VZ checkpoints need an unlocked session)"
+                )
+            }
             Self::Internal { code, message } => {
                 write!(f, "Internal error (code={code}): {message}")
             }

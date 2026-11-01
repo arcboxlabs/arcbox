@@ -145,6 +145,8 @@ fn main() {
     // runtime dlopen of Virtualization.framework.
     println!("cargo:rustc-link-lib=framework=Virtualization");
     println!("cargo:rustc-link-lib=framework=Foundation");
+    // The console-session query (Support.swift) reads the IOKit registry.
+    println!("cargo:rustc-link-lib=framework=IOKit");
 }
 
 /// Swift runtime libraries the shim's objects autolink (`LC_LINKER_OPTION`).

@@ -148,6 +148,15 @@ the ABI.
   is kernel-side (KASAN-instrumented build + this reproducer on bare KVM to
   pin the UAF, then a 6.18.z bump or backport); re-pinning to 0.8.6 is not
   a proven mitigation.
+- **`save_state` needs an unlocked console session.** VZ creates a Secure
+  Enclave key on every save (`SecKeyCreateRandomKey` in the helper's log)
+  and the Secure Enclave refuses it while the screen is locked, which VZ
+  reports only as "permission denied". `SessionState::current` reads
+  `IOConsoleUsers`/`IOConsoleLocked` from the IOKit registry root (the
+  shim links IOKit for it), and `state_file_op` turns a failure observed
+  while not unlocked into `VZError::SessionLocked`. Measured in
+  `docs/experiments/2026-10-31-vz-checkpoint-spike.md` (follow-up); do not schedule
+  a VZ save without asking first.
 - `VZLinuxRosettaAvailability` raw values are notSupported=0, notInstalled=1,
   installed=2 (a hand-written mapping once had 1 and 2 swapped; the shim now
   returns raw values and Rust maps them — keep them aligned with the SDK).

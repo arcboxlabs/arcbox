@@ -248,7 +248,9 @@ impl VirtualMachine {
     ///
     /// # Errors
     ///
-    /// Returns an error when the VM is not paused or the save fails.
+    /// Returns an error when the VM is not paused or the save fails;
+    /// [`VZError::SessionLocked`] when it failed while the console session
+    /// was locked ([`crate::SessionState`]).
     pub async fn save_state(&self, path: impl AsRef<Path>) -> VZResult<()> {
         if self.state() != VirtualMachineState::Paused {
             return Err(VZError::InvalidState {
@@ -269,7 +271,9 @@ impl VirtualMachine {
     ///
     /// # Errors
     ///
-    /// Returns an error when the VM is not stopped or the restore fails.
+    /// Returns an error when the VM is not stopped or the restore fails;
+    /// [`VZError::SessionLocked`] when it failed while the console session
+    /// was locked.
     pub async fn restore_state(&self, path: impl AsRef<Path>) -> VZResult<()> {
         if self.state() != VirtualMachineState::Stopped {
             return Err(VZError::InvalidState {
@@ -304,7 +308,16 @@ impl VirtualMachine {
             code: -1,
             message: format!("{what} operation cancelled"),
         })?;
-        result.map_err(|msg| VZError::OperationFailed(format!("VM {what} failed: {msg}")))
+        result.map_err(|msg| {
+            let message = format!("VM {what} failed: {msg}");
+            // VZ reports a Secure Enclave refusal only as "permission
+            // denied"; the session at the time of the failure is what says
+            // whether the lock was the cause.
+            match crate::SessionState::current() {
+                crate::SessionState::Unlocked => VZError::OperationFailed(message),
+                state => VZError::SessionLocked { state, message },
+            }
+        })
     }
 
     /// Requests a graceful stop, asking the guest to shut down cleanly.
