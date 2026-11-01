@@ -1,5 +1,5 @@
-//! [`HostNetwork`]: the port's [`GuestNetwork`] for VMs that run on the
-//! macOS host.
+//! [`HostNetwork`]: the port's [`GuestNetwork`] and [`NetworkReconcile`]
+//! for VMs that run on the macOS host.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -8,13 +8,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use arcbox_net::darwin::guest_nat;
 use arcbox_vm_driver::net::{
     AttachMode, GuestNetwork, HostIngress, NetworkIdentity, NetworkLease, NetworkMode,
-    NetworkPolicy,
+    NetworkPolicy, NetworkReconcile,
 };
 use arcbox_vm_driver::{Error, NicAttachment, NicSpec, Result, VmId};
 use async_trait::async_trait;
 
 use crate::dns::DnsPublisher;
 use crate::pool::Pool;
+
+mod reconcile;
 
 /// The device name every guest sees its one NIC under.
 pub const NIC_ID: &str = "eth0";
@@ -34,6 +36,15 @@ const GUEST_PREFIX_LEN: u8 = 24;
 /// what the sandbox API reports, and it is never routed.
 ///
 /// Cheap to clone; clones share one ledger.
+///
+/// Nothing this network installs outlives its process — the datapath is
+/// the VMM's and DNS lives in the composer — so it has no startup sweep:
+/// [`NetworkReconcile::startup_cleanup_token`] is always `None`. Quarantine
+/// still holds an address until the composer confirms its own host state
+/// for that lease (port forwards, DNS it published by other means) is
+/// gone. `reserve` waits for [`NetworkReconcile::replay_complete`], so a
+/// fresh lease cannot take the address of a guest that is still running
+/// and not yet adopted.
 #[derive(Clone)]
 pub struct HostNetwork {
     shared: Arc<Shared>,
@@ -51,6 +62,8 @@ struct State {
     used: BTreeSet<u32>,
     live: HashMap<VmId, Live>,
     quarantined: HashMap<VmId, NetworkLease>,
+    /// The owner has replayed its durable leases; `reserve` is open.
+    replayed: bool,
 }
 
 struct Live {
@@ -139,6 +152,21 @@ impl State {
     fn is_live(&self, lease: &NetworkLease) -> bool {
         self.live.get(&lease.vm).is_some_and(|l| l.lease == *lease)
     }
+
+    /// A token that does not name `vm`'s pending generation is a failed
+    /// precondition: no retry of it can succeed.
+    fn validate_cleanup(&self, vm: &VmId, token: &str) -> Result<&NetworkLease> {
+        let lease = self
+            .quarantined
+            .get(vm)
+            .ok_or_else(|| Error::PreconditionFailed(format!("vm {vm} has no pending cleanup")))?;
+        if lease.cleanup_token != token {
+            return Err(Error::PreconditionFailed(format!(
+                "vm {vm} cleanup token does not name the pending generation"
+            )));
+        }
+        Ok(lease)
+    }
 }
 
 #[async_trait]
@@ -156,6 +184,11 @@ impl GuestNetwork for HostNetwork {
         }
         let pool = self.pool();
         let mut state = self.state();
+        if !state.replayed {
+            return Err(Error::Unavailable(
+                "the network's owner has not finished replaying its durable leases".into(),
+            ));
+        }
         if state.quarantined.contains_key(vm) {
             return Err(Error::Unavailable(format!(
                 "vm {vm} cleanup is awaiting host finalization"
@@ -359,5 +392,9 @@ impl GuestNetwork for HostNetwork {
             "vm {}: host VMs take no DNAT ingress; forward ports through PortForward",
             lease.vm
         )))
+    }
+
+    fn reconcile(&self) -> Option<&dyn NetworkReconcile> {
+        Some(self)
     }
 }
