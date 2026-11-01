@@ -26,7 +26,6 @@ mod tests;
 pub use host_network::NetworkFixture;
 pub use host_network::{ContainerChange, ContainerNetwork, HostMutationLease, HostNetworkSnapshot};
 #[cfg(target_os = "macos")]
-pub use host_sandboxes::RuntimeSandboxNames;
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 pub use web_services::{CapturedMachineWeb, CapturedWebGuest};

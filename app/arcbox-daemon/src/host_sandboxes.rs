@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use arcbox_computer::cleanup;
-use arcbox_core::{HOST_SANDBOX_ROUTE, Runtime, RuntimeSandboxNames, VmBackend};
+use arcbox_core::{HOST_SANDBOX_ROUTE, Runtime, VmBackend};
 use arcbox_engine::EngineError;
 use arcbox_host_sandbox::{Backend, HostSandboxOptions, HostSandboxes};
 use tokio_util::sync::CancellationToken;
@@ -85,7 +85,6 @@ fn compose(runtime: &Arc<Runtime>) -> anyhow::Result<HostSandboxes> {
         kernel,
         hv_vmm: hv_vmm_path()?,
         domain: config.network.dns_domain.clone(),
-        names: Arc::new(RuntimeSandboxNames::new(runtime)),
         docker_socket: config.docker.socket_path.clone(),
         system_docker_ready: Arc::new(move || system_vm.borrow().is_ready()),
     };

@@ -50,7 +50,6 @@ pub use macos::{
 pub use macos::{PullPhase, PullSource};
 pub use migration::MigrationManager;
 #[cfg(target_os = "macos")]
-pub use runtime::RuntimeSandboxNames;
 pub use runtime::{HOST_SANDBOX_ROUTE, HostSandboxCapabilities};
 pub use runtime::{HostCapacity, MachineResources, SystemVmResources};
 pub use runtime::{

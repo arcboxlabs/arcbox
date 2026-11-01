@@ -55,14 +55,13 @@ impl SandboxHooks for HostHooks {
         &self.domain
     }
 
-    /// Nothing to do: the network publishes the name when the lease goes
-    /// live (`arcbox_host_net::DnsPublisher`), at the same address.
+    /// Nothing to do: host sandbox names are not published until the
+    /// lease pool is routed (see `POOL`), so they answer NODATA.
     fn register_dns(&self, _id: &str, _ip: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Nothing to do: the network withdraws the name when the lease stops
-    /// being live.
+    /// Nothing to do: nothing was published.
     fn deregister_dns(&self, _id: &str) {}
 
     /// The registry first; when it does not have the image, the System

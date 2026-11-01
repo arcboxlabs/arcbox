@@ -5,12 +5,10 @@
 //! [`HOST_SANDBOX_ROUTE`](super::HOST_SANDBOX_ROUTE), exactly as it reaches
 //! the System VM's agent for the nested location.
 
-use std::net::IpAddr;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use arcbox_engine::agent_client::AgentClient;
-use arcbox_host_sandbox::{HostSandboxes, SandboxNames};
-use async_trait::async_trait;
+use arcbox_host_sandbox::HostSandboxes;
 
 use super::{HostSandboxCapabilities, Runtime};
 
@@ -65,34 +63,5 @@ impl Runtime {
             port_publishing: capabilities.port_publishing,
             bind_mounts: capabilities.bind_mounts,
         })
-    }
-}
-
-/// The host location's [`SandboxNames`]: a live host sandbox's name goes
-/// into the same sandbox DNS records the nested location's do.
-pub struct RuntimeSandboxNames(Weak<Runtime>);
-
-impl RuntimeSandboxNames {
-    /// Names published into `runtime`; once it is gone, nothing is.
-    #[must_use]
-    pub fn new(runtime: &Arc<Runtime>) -> Self {
-        Self(Arc::downgrade(runtime))
-    }
-}
-
-#[async_trait]
-impl SandboxNames for RuntimeSandboxNames {
-    async fn register(&self, id: &str, address: IpAddr) -> anyhow::Result<()> {
-        let Some(runtime) = self.0.upgrade() else {
-            anyhow::bail!("the daemon runtime is gone");
-        };
-        runtime.register_sandbox_dns(id, address).await?;
-        Ok(())
-    }
-
-    async fn deregister(&self, id: &str) {
-        if let Some(runtime) = self.0.upgrade() {
-            runtime.deregister_sandbox_dns(id).await;
-        }
     }
 }

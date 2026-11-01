@@ -97,6 +97,8 @@ SDK suites with `ARCBOX_E2E_SANDBOX_LOCATION=host`:
   cannot be built on the host. The SDK harness stages it from the busybox
   image; the product needs a shipped busybox (boot assets) or another
   built-in template source.
-- `<id>.sandbox.arcbox.local` is published at the pool address, which
-  nothing routes to. The resolution target is an open product question
-  (W8 report).
+- `<id>.sandbox.arcbox.local` for a host sandbox: decided (c), the
+  10.200/16 pool becomes routable through a helper-installed route into a
+  daemon utun forwarded to each VM's datapath. Until then the name is not
+  published and answers NODATA (d), rather than pointing at an address
+  nothing routes to.

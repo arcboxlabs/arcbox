@@ -20,7 +20,6 @@
 #![cfg(target_os = "macos")]
 
 mod hooks;
-mod names;
 
 use std::os::fd::IntoRawFd as _;
 use std::path::{Path, PathBuf};
@@ -36,23 +35,24 @@ use arcbox_computer_runtime::{
 };
 use arcbox_constants::dns::Domain;
 use arcbox_engine::agent_client::AgentClient;
-use arcbox_host_net::{DatapathPlacement, DatapathServices, HostNetwork, Pool};
+use arcbox_host_net::{DatapathPlacement, DatapathServices, HostNetwork, NoDns, Pool};
 use arcbox_hv_driver::HvDriver;
 use arcbox_sandbox_service::{SandboxService, dispatch};
 use arcbox_snapshot::snapshot_cow::{BusyboxBlockTools, CowBackend, CowManager, CowOptions};
 use arcbox_vm_driver::VmDriver;
 use arcbox_vz_driver::VzDriver;
 
-pub use names::SandboxNames;
-
 /// The data directory's subdirectory the host location owns: computer
 /// records, checkpoints, clones and rootfs images.
 const SANDBOX_DIR: &str = "sandbox";
 
 /// The pool each lease's address comes from. The address names the VM on
-/// the host — it is what `<id>.sandbox.arcbox.local` resolves to and what
-/// the API reports — and is never routed: every guest sits on its own
-/// `10.0.2.2/24` link behind its own datapath (`arcbox-host-net`).
+/// the host and is what the API reports, but nothing routes it yet: every
+/// guest sits on its own `10.0.2.2/24` link behind its own datapath
+/// (`arcbox-host-net`). So no DNS name is published for it, and
+/// `<id>.sandbox.arcbox.local` answers NODATA like any unknown local name,
+/// until the pool is routed through a daemon utun (decision (c)) and the
+/// name can point here.
 const POOL: ([u8; 4], u8) = ([10, 200, 0, 0], 16);
 
 /// Kernel command line of a host computer. The rootfs is the first and
@@ -112,8 +112,6 @@ pub struct HostSandboxOptions {
     pub hv_vmm: PathBuf,
     /// The DNS domain sandbox names are formed under.
     pub domain: Domain,
-    /// Where the network publishes a live sandbox's name.
-    pub names: Arc<dyn SandboxNames>,
     /// The Docker Engine socket that reaches the System VM's dockerd, for
     /// `docker:<ref>` images no registry has and for Dockerfile templates
     /// (D5).
@@ -142,7 +140,6 @@ impl HostSandboxes {
         std::fs::create_dir_all(&images).with_context(|| format!("create {}", images.display()))?;
 
         let pool = Pool::new(POOL.0.into(), POOL.1)?;
-        let dns = Arc::new(names::Publisher::new(Arc::clone(&options.names)));
         let mut placement = Placement::host(os_build);
         let (driver, datapath): (Arc<dyn VmDriver>, DatapathPlacement) = match options.backend {
             Backend::Hv => (
@@ -157,7 +154,8 @@ impl HostSandboxes {
                 (vz, DatapathPlacement::Network)
             }
         };
-        let network = HostNetwork::new(pool, datapath, DatapathServices::default(), dns);
+        let network =
+            HostNetwork::new(pool, datapath, DatapathServices::default(), Arc::new(NoDns));
 
         let mut cow = CowOptions::new(&root);
         cow.backend = CowBackend::Clonefile;

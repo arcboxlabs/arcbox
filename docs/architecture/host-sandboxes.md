@@ -159,8 +159,11 @@ Each sandbox VM gets its own userspace datapath instance (`arcbox-net`
 `NetworkDatapath`), which is what the spikes ran and what makes restored
 clones independent. Port exposure goes through the driver's `PortForward`
 capability instead of guest DNAT plus a host bind. The sandbox DNS name
-(`<id>.sandbox.arcbox.local`) is registered through `Runtime::register_dns` at
-the VM's address, as for machines. A macOS `GuestNetwork` implementation with
+(`<id>.sandbox.arcbox.local`) is meant to resolve to the VM's pool address
+(10.200/16), which becomes routable through a helper-installed route into a
+daemon utun forwarded to each VM's datapath, the same model as container
+IPs. Until that route exists the name is not published and answers NODATA,
+rather than pointing at an address nothing routes to (decided 2026-11-01). A macOS `GuestNetwork` implementation with
 `reconcile` is needed; today the only one is Linux `TapNetwork`.
 
 Host sandboxes do not reach each other directly: each VM sits behind its own
@@ -212,7 +215,7 @@ Wave 1 closed the rows marked closed; the HV ones are measured in the
 | NIC MAC | HV | Closed | virtio-net saves and restores its MAC. The vmnet bridge NIC's MAC is saved and reused, but nothing exercises that path yet ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
 | macOS build | HV | Closed | `state.json` records `os_build`; a restore on another build fails with `VmmError::CheckpointBuildMismatch` before building anything ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). The runtime also labels every host checkpoint with the build and refuses a mismatch first (D6). |
 | DHCP lease after restore | HV | Closed | The datapath ACKs a renewal of a lease it never issued, now by unicast to the client's address, which is where a renewing client listens ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
-| DNS registration of a restored sandbox | HV | Open | Composition (wave 2). |
+| DNS registration of a restored sandbox | HV, VZ | Open | Names answer NODATA until the pool is routed (see Networking). |
 | Frames queued for the RX inject thread at pause | HV | Open | Lost; TCP retransmits. Not counted. |
 | Flows mid-handshake at checkpoint (`PassiveOpen`, `ActiveOpen`) | HV | Closed | A pending dial is reset like an established flow; an `ActiveOpen` saves no reset and the guest's SYN-ACK draws one ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
 | Saving only dirty pages | HV | Closed | `mincore` picks the pages to write: a 1 GiB guest with about 50–68 MiB touched writes its RAM in about 50–59 ms at p50, instead of scanning all RAM (~300 ms per GiB) ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
