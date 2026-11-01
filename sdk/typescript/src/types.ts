@@ -3,6 +3,7 @@ import { timestampDate } from "@bufbuild/protobuf/wkt";
 import type {
   ExposedPort as ExposedPortProto,
   GetCapabilitiesResponse,
+  LocationCapability as LocationCapabilityProto,
   SandboxEvent as SandboxEventProto,
   SandboxInfo as SandboxInfoProto,
   SandboxSummary as SandboxSummaryProto,
@@ -10,6 +11,7 @@ import type {
 import {
   IdleAction,
   PortProtocol as PortProtocolProto,
+  RunLocation as RunLocationProto,
   SandboxEventKind as SandboxEventKindProto,
   SandboxState as SandboxStateProto,
 } from "./gen/arcbox/sandbox/v1/sandbox_pb";
@@ -120,6 +122,39 @@ export interface NestedVirtCapability {
   reason?: string;
 }
 
+/**
+ * Where a sandbox runs: `"host"` is a VM of its own on the macOS host
+ * (VZ or HV), `"nested"` a Firecracker microVM inside the System VM.
+ */
+export type RunLocation = "host" | "nested";
+
+/** What one run location can do, and whether it can right now. */
+export interface LocationCapability {
+  location: RunLocation;
+  /** The driver its sandboxes run under (`"fc"`, `"vz"`, `"hv"`); unset when unavailable. */
+  backend?: string;
+  /** Whether `create` can place a sandbox here. */
+  available: boolean;
+  /** Why not, when unavailable. */
+  unavailableReason?: string;
+  /** Whether sandboxes here can pause and resume at all. */
+  pauseResume: boolean;
+  /**
+   * Whether a pause could run at the moment of the fetch. A VZ host
+   * refuses while the macOS session is locked, so this changes without
+   * the daemon restarting: re-fetch with `capabilities({ refresh: true })`.
+   */
+  pauseAvailable: boolean;
+  /** Why a pause would be refused now; the same text the refusal carries. */
+  pauseUnavailableReason?: string;
+  /** Whether restores claim VMMs started ahead of time. */
+  warmPrespawn: boolean;
+  /** Whether sandbox ports can be exposed on the host. */
+  portPublishing: boolean;
+  /** Whether `create` accepts bind mounts here (a sandbox with them can never pause). */
+  bindMounts: boolean;
+}
+
 /** What the daemon can do — the {@link ArcBox.capabilities} handshake. */
 export interface Capabilities {
   /** Daemon version string (informational). */
@@ -128,8 +163,13 @@ export interface Capabilities {
   protocol: number;
   /** Append-only named feature flags (e.g. "pause_resume"). */
   features: string[];
-  /** Whether this host can run sandboxes at all. */
+  /** Whether the nested location can run sandboxes on this host. */
   nestedVirt: NestedVirtCapability;
+  /**
+   * One entry per run location the daemon knows of, available or not.
+   * Empty from a daemon that predates run locations.
+   */
+  locations: LocationCapability[];
 }
 
 /** One row of a sandbox listing. */
@@ -279,6 +319,11 @@ function assignIfSet<T, K extends keyof T>(
   }
 }
 
+/** A proto3 string, absent when empty. */
+function nonEmpty(value: string): string | undefined {
+  return value === "" ? undefined : value;
+}
+
 const EVENT_KIND_NAMES: Partial<
   Record<SandboxEventKindProto, SandboxEventKind>
 > = {
@@ -401,5 +446,48 @@ export function capabilitiesFromProto(
     protocol: response.protocol,
     features: response.features,
     nestedVirt,
+    locations: response.locations.flatMap(locationCapabilityFromProto),
   };
+}
+
+const RUN_LOCATIONS: ReadonlyMap<RunLocationProto, RunLocation> = new Map([
+  [RunLocationProto.HOST, "host"],
+  [RunLocationProto.NESTED, "nested"],
+]);
+
+/** Map a run location to the wire enum. */
+export function runLocationToProto(
+  location: RunLocation | undefined,
+): RunLocationProto {
+  if (location === undefined) {
+    return RunLocationProto.UNSPECIFIED;
+  }
+  return location === "host" ? RunLocationProto.HOST : RunLocationProto.NESTED;
+}
+
+/** One location entry; a location this SDK does not know is dropped. */
+function locationCapabilityFromProto(
+  entry: LocationCapabilityProto,
+): LocationCapability[] {
+  const runLocation = RUN_LOCATIONS.get(entry.location);
+  if (runLocation === undefined) {
+    return [];
+  }
+  const out: LocationCapability = {
+    location: runLocation,
+    available: entry.available,
+    pauseResume: entry.pauseResume,
+    pauseAvailable: entry.pauseAvailable,
+    warmPrespawn: entry.warmPrespawn,
+    portPublishing: entry.portPublishing,
+    bindMounts: entry.bindMounts,
+  };
+  assignIfSet(out, "backend", nonEmpty(entry.backend));
+  assignIfSet(out, "unavailableReason", nonEmpty(entry.unavailableReason));
+  assignIfSet(
+    out,
+    "pauseUnavailableReason",
+    nonEmpty(entry.pauseUnavailableReason),
+  );
+  return [out];
 }

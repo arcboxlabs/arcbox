@@ -1,5 +1,5 @@
-// events(), setLifecycle(), and the capabilities handshake against a
-// mock daemon.
+// events(), setLifecycle(), the capabilities handshake and create's run
+// location against a mock daemon.
 //
 // setLifecycle's tri-state is the contract that matters: an omitted
 // knob must be ABSENT on the wire (unchanged), null must be an explicit
@@ -14,11 +14,16 @@ import { Code, ConnectError, createRouterTransport } from "@connectrpc/connect";
 import { describe, expect, it } from "vitest";
 
 import { ConnectionLostError, NotFoundError } from "../src/errors";
-import type { SetLifecycleRequest } from "../src/gen/arcbox/sandbox/v1/sandbox_pb";
+import type {
+  CreateSandboxRequest,
+  SetLifecycleRequest,
+} from "../src/gen/arcbox/sandbox/v1/sandbox_pb";
 import {
+  CreateSandboxResponseSchema,
   GetCapabilitiesResponseSchema,
   IdleAction,
   KeepAliveSchema,
+  RunLocation,
   SandboxEventKind,
   SandboxEventSchema,
   SandboxService,
@@ -181,6 +186,27 @@ function capsTransport(counter: { calls: number }, failFirst = false) {
           protocol: 1,
           features: ["pause_resume", "auto_resume"],
           nestedVirt: { supported: false, reason: "requires M3 or newer" },
+          locations: [
+            {
+              location: RunLocation.HOST,
+              backend: "vz",
+              available: true,
+              pauseResume: true,
+              pauseAvailable: counter.calls === 1,
+              pauseUnavailableReason:
+                counter.calls === 1 ? "" : "the console session is locked",
+              portPublishing: true,
+            },
+            {
+              location: RunLocation.NESTED,
+              unavailableReason: "requires M3 or newer",
+              pauseResume: true,
+              pauseUnavailableReason: "requires M3 or newer",
+              portPublishing: true,
+            },
+            // A location from a newer daemon is not offered.
+            { location: 7 as RunLocation, available: true },
+          ],
         });
       },
     });
@@ -197,9 +223,42 @@ describe("arcbox.capabilities", () => {
       protocol: 1,
       features: ["pause_resume", "auto_resume"],
       nestedVirt: { supported: false, reason: "requires M3 or newer" },
+      locations: [
+        {
+          location: "host",
+          backend: "vz",
+          available: true,
+          pauseResume: true,
+          pauseAvailable: true,
+          warmPrespawn: false,
+          portPublishing: true,
+          bindMounts: false,
+        },
+        {
+          location: "nested",
+          available: false,
+          unavailableReason: "requires M3 or newer",
+          pauseResume: true,
+          pauseAvailable: false,
+          pauseUnavailableReason: "requires M3 or newer",
+          warmPrespawn: false,
+          portPublishing: true,
+          bindMounts: false,
+        },
+      ],
     });
     await box.capabilities();
     expect(counter.calls).toBe(1);
+  });
+
+  it("refresh asks again, so a pause that became unavailable shows", async () => {
+    const counter = { calls: 0 };
+    const box = new ArcBox({ transport: capsTransport(counter) });
+    expect((await box.capabilities()).locations[0]?.pauseAvailable).toBe(true);
+    const host = (await box.capabilities({ refresh: true })).locations[0];
+    expect(host?.pauseAvailable).toBe(false);
+    expect(host?.pauseUnavailableReason).toBe("the console session is locked");
+    expect(counter.calls).toBe(2);
   });
 
   it("does not cache a failed fetch", async () => {
@@ -209,5 +268,36 @@ describe("arcbox.capabilities", () => {
     const caps = await box.capabilities();
     expect(caps.protocol).toBe(1);
     expect(counter.calls).toBe(2);
+  });
+});
+
+function createProbe() {
+  const requests: CreateSandboxRequest[] = [];
+  const transport = createRouterTransport(({ service }) => {
+    service(SandboxService, {
+      create(request) {
+        requests.push(request);
+        return create(CreateSandboxResponseSchema, { id: request.id });
+      },
+    });
+  });
+  return { box: new ArcBox({ transport }), requests };
+}
+
+describe("arcbox.create runLocation", () => {
+  it("leaves the location to the daemon when unset", async () => {
+    const { box, requests } = createProbe();
+    await box.create("", { waitUntilReady: false });
+    expect(requests[0]?.runLocation).toBe(RunLocation.UNSPECIFIED);
+  });
+
+  it("maps each location onto the wire", async () => {
+    const { box, requests } = createProbe();
+    await box.create("", { waitUntilReady: false, runLocation: "nested" });
+    await box.create("", { waitUntilReady: false, runLocation: "host" });
+    expect(requests.map((r) => r.runLocation)).toEqual([
+      RunLocation.NESTED,
+      RunLocation.HOST,
+    ]);
   });
 });

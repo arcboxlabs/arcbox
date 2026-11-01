@@ -32,6 +32,7 @@ import type { ClientContext } from "./transport";
 import { createClientContext, unaryOptions } from "./transport";
 import type {
   Capabilities,
+  RunLocation,
   IdlePolicy,
   SandboxEvent,
   SandboxInfo,
@@ -41,6 +42,7 @@ import type {
 } from "./types";
 import {
   capabilitiesFromProto,
+  runLocationToProto,
   sandboxEventFromProto,
   sandboxInfoFromProto,
   sandboxStateToProto,
@@ -84,6 +86,13 @@ export interface CreateSandboxOptions {
   labels?: Record<string, string>;
   /** `false` disables networking entirely (no network device). */
   network?: boolean;
+  /**
+   * Where the sandbox runs. Unset = the daemon's default: the host when it
+   * runs host sandboxes, else nested. A location the daemon cannot run is
+   * refused rather than replaced; {@link ArcBox.capabilities} lists which
+   * locations are available.
+   */
+  runLocation?: RunLocation;
   /** Resolve only once the sandbox is READY (default true). */
   waitUntilReady?: boolean;
   /** Connection override for this entry point. */
@@ -220,19 +229,30 @@ export class ArcBox {
 
   /**
    * What the daemon can do: version, sandbox protocol level, feature
-   * flags, and whether nested virtualization is available. Answered
+   * flags, and per run location what it can run and pause. Answered
    * host-side (works before any sandbox exists) and cached for the life
    * of this client — a failed fetch is not cached, so the next call
-   * retries. The SDK does not gate on it: the daemon fails fast on its
+   * retries. Pass `refresh: true` to ask again: whether a pause can run
+   * right now (`LocationCapability.pauseAvailable`) changes while the
+   * daemon runs. The SDK does not gate on it: the daemon fails fast on its
    * own (a `CapabilityError` from `create`); this is the inspectable
    * version of the same answer.
    */
-  capabilities(): Promise<Capabilities> {
-    this.#capabilities ??= this.#fetchCapabilities().catch((error: unknown) => {
-      this.#capabilities = undefined;
-      throw toArcBoxError(error, "arcbox.capabilities");
-    });
-    return this.#capabilities;
+  capabilities(options: { refresh?: boolean } = {}): Promise<Capabilities> {
+    if (this.#capabilities !== undefined && options.refresh !== true) {
+      return this.#capabilities;
+    }
+    const pending: Promise<Capabilities> = this.#fetchCapabilities().catch(
+      (error: unknown) => {
+        // A refresh may have replaced this fetch; only clear our own.
+        if (this.#capabilities === pending) {
+          this.#capabilities = undefined;
+        }
+        throw toArcBoxError(error, "arcbox.capabilities");
+      },
+    );
+    this.#capabilities = pending;
+    return pending;
   }
 
   async #fetchCapabilities(): Promise<Capabilities> {
@@ -290,6 +310,7 @@ export class ArcBox {
               mode: opts.network ? NetworkMode.ENABLED : NetworkMode.NONE,
             },
           }),
+          runLocation: runLocationToProto(opts.runLocation),
           ttlSeconds: secondsFromMs(opts.ttlMs),
           idleTimeoutSeconds: secondsFromMs(opts.idleTimeoutMs),
           onIdle:
