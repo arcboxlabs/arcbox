@@ -22,6 +22,7 @@ arcbox-vm-proto.workspace = true
 arcbox-vm-driver.workspace = true
 arcbox-error.workspace = true
 arcbox-snapshot.workspace = true
+arcbox-oci.workspace = true
 tokio.workspace        = true
 thiserror.workspace    = true
 anyhow.workspace       = true

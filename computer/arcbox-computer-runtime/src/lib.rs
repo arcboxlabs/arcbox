@@ -61,6 +61,7 @@ pub mod rootfs;
 pub mod sandbox;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+pub mod workload;
 
 /// Image sources for [`RootfsBuilder`]. Enable `remote-image` to use `RemoteRef`
 /// and retain the resolved image's config and manifest digest before conversion.

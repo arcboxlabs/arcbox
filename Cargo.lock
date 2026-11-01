@@ -376,6 +376,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-error",
  "arcbox-ext4",
+ "arcbox-oci",
  "arcbox-snapshot",
  "arcbox-vm-driver",
  "arcbox-vm-proto",
