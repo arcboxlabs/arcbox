@@ -10,8 +10,8 @@ two build their own machine and share the vCPU, GIC and RAM code in
 |---|---|---|---|
 | `run.sh` | `checkpoint_spike` | one vCPU, timer only | `docs/experiments/2026-10-31-hv-checkpoint-spike.md` |
 | `run-blk.sh` | `checkpoint_blk_spike` | 1–12 vCPUs, timer, ArcBox virtio-blk under load | `docs/experiments/2026-10-31-hv-checkpoint-blk-spike.md` |
-| `run-linux.sh` | `checkpoint_linux_spike` | Linux (boot-asset kernel, initramfs) on 1–8 vCPUs, I/O on virtio-blk and the HVC block path | `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md` |
-| `run-net.sh` | `checkpoint_linux_spike` (`SPIKE_NET=1`) | the `run-linux.sh` guest plus live TCP (echo, idle, download over virtio-net and the splicetcp datapath) and vsock connections | `docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md`, `docs/experiments/2026-10-31-hv-checkpoint-tcp-reset-spike.md` |
+| `run-linux.sh` | `checkpoint_linux_spike` | Linux (boot-asset kernel, initramfs) on 1–8 vCPUs, I/O on virtio-blk and the HVC block path, console input and the balloon | `docs/experiments/2026-10-31-hv-checkpoint-linux-spike.md`, `docs/experiments/2026-11-01-hv-checkpoint-gaps.md` |
+| `run-net.sh` | `checkpoint_linux_spike` (`SPIKE_NET=1`) | the `run-linux.sh` guest plus live TCP (echo, idle, download over virtio-net and the splicetcp datapath), a pending connect, DHCP renewals and vsock connections | `docs/experiments/2026-10-31-hv-checkpoint-net-vsock-spike.md`, `docs/experiments/2026-10-31-hv-checkpoint-tcp-reset-spike.md`, `docs/experiments/2026-11-01-hv-checkpoint-gaps.md` |
 
 ```bash
 tests/bench/hv-checkpoint/run.sh [work-dir]

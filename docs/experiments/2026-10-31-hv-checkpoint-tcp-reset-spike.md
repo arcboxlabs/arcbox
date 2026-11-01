@@ -112,6 +112,9 @@ Negative controls, each a temporary edit and rebuild:
 
 ## Not covered
 
+Follow-up 2026-11-01: pending dials and ActiveOpen are covered by
+[the gaps entry](2026-11-01-hv-checkpoint-gaps.md).
+
 - Flows still waiting on a dial (`PassiveOpen` before the SYN-ACK) or a
   guest SYN-ACK (`ActiveOpen`, inbound port forwards). `abort` covers both,
   but the probe never checkpoints in that window. An ActiveOpen gets no

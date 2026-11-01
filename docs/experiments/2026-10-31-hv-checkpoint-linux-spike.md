@@ -187,6 +187,9 @@ check tolerates it because the counts still grow.
    touched 54 MiB. Saving only pages the guest has written (first spike,
    finding 6) is the next step for checkpoint latency. Restore is
    independent of RAM size because `mem.bin` is mapped lazily.
+   Follow-up 2026-11-01: the checkpoint now writes only touched pages, 54
+   MiB in 59 ms at p50 for this guest
+   ([the gaps entry](2026-11-01-hv-checkpoint-gaps.md)).
 
 ## Decisions taken / open
 

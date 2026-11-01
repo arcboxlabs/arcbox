@@ -160,6 +160,9 @@ rebuilds the probe and restores the same checkpoint:
 
 ## Not covered
 
+Follow-up 2026-11-01: the MAC, DHCP renewals and pending dials are covered
+by [the gaps entry](2026-11-01-hv-checkpoint-gaps.md).
+
 - The bridge NIC (vmnet), DHCP leases and DNS registrations. The guest
   here uses a static address. A real guest renews its lease from a
   datapath that never issued it.
