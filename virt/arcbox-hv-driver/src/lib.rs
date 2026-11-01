@@ -5,6 +5,7 @@
 //! holds the System VM, so every VM this driver runs lives in its own
 //! `arcbox-hv-vmm` process (ADR 0010, "Process model").
 //!
+//! - [`serve`] — the process side, run by the `arcbox-hv-vmm` binary.
 //! - [`proto`] — the control protocol's requests, responses and events.
 //! - [`wire`] — framing on the control socket, with `SCM_RIGHTS`.
 //!
@@ -13,6 +14,8 @@
 #![cfg(target_os = "macos")]
 
 pub mod proto;
+#[doc(hidden)]
+pub mod serve;
 pub mod wire;
 
 /// The driver's name, as `VmDriver::name` and `VmRecord::driver` report it.
