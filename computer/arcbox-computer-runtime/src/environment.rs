@@ -134,6 +134,18 @@ impl Placement {
         self
     }
 
+    /// Whether a boot, restore or resume waits for its guest clock push
+    /// before handing the computer back: only a nested guest re-syncs its
+    /// own clock from the hypervisor (`ptp_kvm`), so only there may the
+    /// push run detached.
+    pub(crate) const fn clock_push(&self) -> crate::lifecycle::tasks::clock::ClockPush {
+        use crate::lifecycle::tasks::clock::ClockPush;
+        match self.location {
+            RunLocation::Nested => ClockPush::Detached,
+            RunLocation::Host => ClockPush::Awaited,
+        }
+    }
+
     /// `Err` with the reason when a checkpoint cannot be taken right now.
     pub(crate) fn checkpoint_available(&self) -> Result<(), String> {
         self.checkpoint_gate

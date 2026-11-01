@@ -89,12 +89,19 @@ async fn full_cycle(fixture: &Fixture) {
     fixture.manager.pause_computer(&id).await.unwrap();
     fixture.await_state(&id, ComputerState::Paused).await;
     fixture.settle_network_cleanups().await;
+    // No ptp_kvm on the host: the push is the guest's only clock source,
+    // so it lands before a resume or restore returns.
+    let syncs = fixture.agent().clock_syncs();
     fixture
         .manager
         .resume_computer(&id, pause_reason::RESUME)
         .await
         .unwrap();
     fixture.await_state(&id, ComputerState::Ready).await;
+    assert!(
+        fixture.agent().clock_syncs() > syncs,
+        "resume pushed the clock"
+    );
     assert_eq!(fixture.run(&id, &["/bin/hello"]).await, b"hi");
 
     let checkpoint = fixture
@@ -113,6 +120,10 @@ async fn full_cycle(fixture: &Fixture) {
         .await
         .unwrap();
     fixture.await_state(&clone, ComputerState::Ready).await;
+    assert!(
+        fixture.agent().clock_syncs() > syncs + 1,
+        "restore pushed the clock"
+    );
     assert!(
         fixture
             .driver()

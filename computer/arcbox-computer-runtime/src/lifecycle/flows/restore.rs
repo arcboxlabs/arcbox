@@ -75,6 +75,7 @@ impl ComputerFlows {
             driver: &services.driver,
             network: &*services.network,
             agents: &*services.agents,
+            clock: services.placement.clock_push(),
         })
         .await;
 
@@ -220,6 +221,7 @@ impl ComputerFlows {
             &services.driver,
             &*services.network,
             &*services.agents,
+            services.placement.clock_push(),
         )
         .await
         .map_err(|failure| {

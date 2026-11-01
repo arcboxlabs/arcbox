@@ -25,7 +25,8 @@ use arcbox_vm_driver::{
 };
 use tracing::warn;
 
-use crate::agent::{ClockSync, GuestAgent, GuestAgentFactory};
+use super::clock::{self, ClockPush};
+use crate::agent::{GuestAgent, GuestAgentFactory};
 use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
@@ -65,6 +66,8 @@ pub struct RestoreVm<'a> {
     pub driver: &'a Arc<dyn VmDriver>,
     pub network: &'a dyn GuestNetwork,
     pub agents: &'a dyn GuestAgentFactory,
+    /// Whether the guest clock push is awaited.
+    pub clock: ClockPush,
 }
 
 /// A restored VM, with everything the computer must now own.
@@ -126,6 +129,7 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
         driver,
         network,
         agents,
+        clock,
     } = inputs;
 
     // Track resources that need cleanup if anything between this point
@@ -377,29 +381,12 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
 
     let t_loaded = std::time::Instant::now();
 
-    // Clock sync after restore is DETACHED, mirroring the cold-boot path
-    // (boot.rs): vm-agent re-syncs itself from ptp_kvm (/dev/ptp0) on
-    // every accepted exec connection, so correct wall time no longer
-    // depends on this RPC. It stays as belt-and-braces while ptp proves
-    // itself in production, with the same 10 s cap and warn-only
-    // semantics it always had — but awaiting it cost ~57 ms (mostly the
-    // post-resume vsock connect settle), the dominant remainder of the
-    // restore RPC (CORE-80).
-    {
-        let id = new_id.to_owned();
-        let agent = Arc::clone(&agent);
-        tokio::spawn(async move {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), agent.sync_clock()).await
-            {
-                Ok(Ok(ClockSync::Synced)) => {}
-                Ok(Ok(ClockSync::AgentError(code))) => {
-                    warn!(sandbox_id = %id, code, "agent could not set the clock after restore");
-                }
-                Ok(Err(e)) => warn!(sandbox_id = %id, "clock sync after restore failed: {e}"),
-                Err(_) => warn!(sandbox_id = %id, "clock sync after restore timed out"),
-            }
-        });
-    }
+    // The restored guest's clock froze when it was saved. Nested, the push
+    // runs detached: vm-agent re-syncs itself from ptp_kvm on every
+    // accepted exec connection, and awaiting the push cost ~57 ms of the
+    // restore RPC (CORE-80). On the host the push is the only clock source
+    // and is awaited (`ClockPush`).
+    clock::push(new_id, &agent, clock, "restore").await;
 
     // Re-address the guest to the fresh allocation. The restored kernel
     // still carries the origin's `ip=` boot configuration, so without

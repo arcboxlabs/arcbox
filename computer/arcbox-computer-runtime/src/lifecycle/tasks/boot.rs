@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use arcbox_snapshot::SnapshotError;
 use arcbox_vm_driver::{IsolationSpec, PreparedVm, VmDriver, VmHandle, VmId};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::agent::{ClockSync, GuestAgent, GuestAgentFactory, ReadyGate};
+use super::clock::{self, ClockPush};
+use crate::agent::{GuestAgent, GuestAgentFactory, ReadyGate};
 use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
@@ -30,11 +31,6 @@ pub type BootOutput = (Arc<dyn VmHandle>, Box<dyn ReadyGate>);
 /// itself before the boot is declared failed. Covers guest kernel boot plus
 /// agent startup.
 const AGENT_GATE_TIMEOUT: Duration = Duration::from_secs(35);
-
-/// Cap on the non-gating cold-boot clock sync: `sync_clock`'s internal
-/// connect loop can retry for up to 30 s, pointlessly long for an agent
-/// that has already dialed out. Mirrors the restore path's cap.
-const CLOCK_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct BootFailure {
     pub error: ComputerError,
@@ -52,6 +48,7 @@ pub async fn wait_for_agent(
     net: Option<&NetworkAttachment>,
     mut ready_gate: Box<dyn ReadyGate>,
     agents: &dyn GuestAgentFactory,
+    clock: ClockPush,
 ) -> Result<Arc<dyn GuestAgent>> {
     // READY promises "accepting executions", but InstanceStart returns
     // while the guest kernel is still booting and the agent is not yet
@@ -90,34 +87,11 @@ pub async fn wait_for_agent(
     let agent = gated?;
 
     // The guest clock still needs setting on cold boot (no RTC — the
-    // guest wakes at the kernel default epoch), but it must not delay
-    // readiness either: the agent is already accepting executions, so
-    // a slow or retrying sync holding the Ready publication back
-    // would recreate the latency this gate exists to remove. Fire it
-    // detached; any failure is a warn, mirroring the restore path.
-    // Belt-and-braces alongside vm-agent's ptp_kvm self-sync;
-    // retires once ptp is proven in production.
-    {
-        let id = id.to_owned();
-        let agent = Arc::clone(&agent);
-        tokio::spawn(async move {
-            match tokio::time::timeout(CLOCK_SYNC_TIMEOUT, agent.sync_clock()).await {
-                Ok(Ok(ClockSync::Synced)) => {}
-                Ok(Ok(ClockSync::AgentError(code))) => {
-                    warn!(
-                        sandbox_id = %id, code,
-                        "agent could not set the clock; continuing with a possibly skewed clock"
-                    );
-                }
-                Ok(Err(error)) => {
-                    warn!(sandbox_id = %id, %error, "cold-boot clock sync failed; continuing");
-                }
-                Err(_) => {
-                    warn!(sandbox_id = %id, "cold-boot clock sync timed out; continuing");
-                }
-            }
-        });
-    }
+    // guest wakes at the kernel default epoch). Nested, it must not delay
+    // readiness: the agent is already accepting executions and vm-agent
+    // re-syncs from ptp_kvm, so the push runs detached. On the host it is
+    // the only clock source and is awaited (`ClockPush`).
+    clock::push(id, &agent, clock, "cold boot").await;
 
     Ok(agent)
 }

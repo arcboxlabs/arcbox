@@ -18,7 +18,8 @@ use arcbox_vm_driver::net::{GuestNetwork, NetworkLease};
 use arcbox_vm_driver::{DiskSource, IsolationSpec, NicSpec, PreparedVm, VmDriver, VmHandle, VmId};
 use tracing::warn;
 
-use crate::agent::{ClockSync, GuestAgentFactory};
+use super::clock::{self, ClockPush};
+use crate::agent::GuestAgentFactory;
 use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::sandbox::pause::{PAUSED_ROOTFS_FILE, ResumeFailure, ResumedRuntime};
@@ -49,6 +50,7 @@ pub async fn restore_paused(
     driver: &Arc<dyn VmDriver>,
     network: &dyn GuestNetwork,
     agents: &dyn GuestAgentFactory,
+    clock: ClockPush,
 ) -> std::result::Result<ResumedRuntime, ResumeFailure> {
     // Incrementally-owned resources for the unwind. The lease is held
     // apart from the NIC because it is owed to the pool from `reserve`
@@ -178,28 +180,12 @@ pub async fn restore_paused(
         let settled_on_load = snap_meta.net_invariant.then(|| identity.clone()).flatten();
         let agent = agents.connect(Arc::clone(&handle), settled_on_load.as_ref())?;
 
-        // Clock sync is DETACHED, mirroring restore and cold boot
-        // (CORE-80): the guest wall clock froze at pause time, but
-        // vm-agent re-syncs itself from ptp_kvm on every accepted exec
-        // connection, so correct time no longer depends on this RPC.
-        // Awaiting it would put the post-resume vsock connect settle back
-        // on the resume critical path.
-        {
-            let id = id.clone();
-            let agent = Arc::clone(&agent);
-            tokio::spawn(async move {
-                match tokio::time::timeout(std::time::Duration::from_secs(10), agent.sync_clock())
-                    .await
-                {
-                    Ok(Ok(ClockSync::Synced)) => {}
-                    Ok(Ok(ClockSync::AgentError(code))) => {
-                        warn!(sandbox_id = %id, code, "agent could not set the clock after resume");
-                    }
-                    Ok(Err(e)) => warn!(sandbox_id = %id, "clock sync after resume failed: {e}"),
-                    Err(_) => warn!(sandbox_id = %id, "clock sync after resume timed out"),
-                }
-            });
-        }
+        // The guest wall clock froze at pause time. Nested, the push runs
+        // detached, mirroring restore and cold boot (CORE-80): vm-agent
+        // re-syncs itself from ptp_kvm on every accepted exec connection.
+        // On the host the push is the only clock source and is awaited
+        // (`ClockPush`).
+        clock::push(id, &agent, clock, "resume").await;
 
         // Re-address the guest only when its snapshot is legacy-addressed.
         // An invariant guest (CORE-81) already holds the fixed link-local

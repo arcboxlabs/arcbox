@@ -76,6 +76,7 @@ impl ComputerFlows {
             attachment.as_ref(),
             ready_gate,
             services.agents.as_ref(),
+            services.placement.clock_push(),
         )
         .await
         .map_err(TaskFailure::recoverable)?;
