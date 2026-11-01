@@ -189,7 +189,7 @@ impl ComputerManager {
                 actual: "the internal pause checkpoint of a paused sandbox".into(),
             });
         }
-        if self.config.firecracker.jailer.is_none() {
+        if !relocatable_checkpoints(&self.config, &*self.services.driver) {
             return Err(ComputerError::Config(
                 "checkpoint restore requires jailer isolation; direct mode embeds shared origin \
                  paths"

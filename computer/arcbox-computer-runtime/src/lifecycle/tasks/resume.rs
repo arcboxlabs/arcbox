@@ -19,7 +19,7 @@ use arcbox_vm_driver::{DiskSource, IsolationSpec, NicSpec, PreparedVm, VmDriver,
 use tracing::warn;
 
 use crate::agent::{ClockSync, GuestAgentFactory};
-use crate::config::{JailerConfig, RuntimeConfig};
+use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::sandbox::pause::{PAUSED_ROOTFS_FILE, ResumeFailure, ResumedRuntime};
 use crate::sandbox::reconcile::JournaledLease;
@@ -40,13 +40,13 @@ use crate::snapshot_cow::{CowHandle, CowManager};
 )]
 pub async fn restore_paused(
     id: &ComputerId,
-    jailer: &JailerConfig,
+    isolation: &IsolationSpec,
     snap_meta: &SnapshotMeta,
     vm_dir: &Path,
     networked: bool,
     config: &RuntimeConfig,
     cow_manager: &CowManager,
-    driver: &dyn VmDriver,
+    driver: &Arc<dyn VmDriver>,
     network: &dyn GuestNetwork,
     agents: &dyn GuestAgentFactory,
 ) -> std::result::Result<ResumedRuntime, ResumeFailure> {
@@ -72,7 +72,7 @@ pub async fn restore_paused(
         }
         // The VMM travels as itself rather than as a pid, so its socket cannot
         // be left behind: a record naming a live VMM without one is not
-        // adoptable under the jailer, and resume is jailer-only.
+        // adoptable under the jailer.
         let journal = |vmm: Option<&Arc<dyn PreparedVm>>,
                        cow: Option<&CowHandle>,
                        net: Option<&NetworkLease>| {
@@ -106,13 +106,12 @@ pub async fn restore_paused(
             );
         }
 
-        // A fresh VMM, prepared through the driver.
-        let spawned: Arc<dyn PreparedVm> = Arc::from(
-            sandbox::prepare_capability(driver)
-                .prepare(&VmId::new(id)?, &IsolationSpec::try_from(jailer)?, vm_dir)
-                .await?,
-        );
-        let staging = sandbox::staging_capability(spawned.staging());
+        // A fresh VMM, prepared through the driver (or deferred to the
+        // restore below, for a driver without `Prepare`).
+        let spawned: Arc<dyn PreparedVm> =
+            Arc::from(sandbox::vmm::prepare_vm(driver, &VmId::new(id)?, isolation, vm_dir).await?);
+        let record = spawned.record();
+        let staging = sandbox::vmm::staging_of(spawned.staging(), &record);
         prepared = Some(Arc::clone(&spawned));
         journal(Some(&spawned), None, lease.as_ref())?;
 
@@ -158,7 +157,7 @@ pub async fn restore_paused(
 
         // Load the snapshot on the prepared VMM: the retained disk where
         // staging put it, eth0 retargeted onto the fresh TAP.
-        let restore = restore_spec(id, rootfs, nic.clone(), IsolationSpec::try_from(jailer)?)?;
+        let restore = restore_spec(id, rootfs, nic.clone(), isolation.clone())?;
         let handle: Arc<dyn VmHandle> = Arc::from(
             prepared
                 .as_ref()
@@ -281,7 +280,7 @@ async fn park_copy_mode_rootfs(
     if sandbox::preserved_cow_file(config, id).exists() {
         return true;
     }
-    match sandbox::staging_capability(prepared.staging())
+    match sandbox::vmm::staging_of(prepared.staging(), &prepared.record())
         .unstage_disk(ROOTFS_DISK_ID, &vm_dir.join(PAUSED_ROOTFS_FILE))
         .await
     {

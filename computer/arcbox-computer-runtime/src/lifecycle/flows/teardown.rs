@@ -152,7 +152,12 @@ impl ComputerFlows {
             // Unreachable: `pause_computer` refuses direct mode before it
             // claims anything, because a direct-mode vmstate pins origin
             // paths and could never resume.
-            ReleaseScope::KeepDisk if services.config.firecracker.jailer.is_none() => {
+            ReleaseScope::KeepDisk
+                if !crate::sandbox::relocatable_checkpoints(
+                    &services.config,
+                    &*services.driver,
+                ) =>
+            {
                 Err(ComputerError::Config(
                     "computer pause requires jailer isolation; direct mode cannot resume".into(),
                 ))

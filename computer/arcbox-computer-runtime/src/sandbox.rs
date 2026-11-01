@@ -18,7 +18,7 @@ use arcbox_vm_driver::net::{
     NetworkPolicy, NetworkReconcile,
 };
 use arcbox_vm_driver::{
-    CheckpointFormat, CheckpointImage, CheckpointKind, DiskSource, IsolationSpec, NicSpec, Prepare,
+    CheckpointFormat, CheckpointImage, CheckpointKind, DiskSource, IsolationSpec, NicSpec,
     PreparedVm, Staging, VmDriver, VmHandle, VmId,
 };
 use chrono::{DateTime, Utc};
@@ -59,6 +59,7 @@ mod storage;
 mod templates;
 mod timers;
 pub(crate) mod types;
+pub(crate) mod vmm;
 pub(crate) mod warm;
 pub(crate) mod workload;
 
@@ -129,12 +130,14 @@ impl ComputerManager {
     /// Create a new manager from the given configuration, over the
     /// environment-specific components the composer supplies.
     ///
+    /// `Staging` is optional (see [`vmm`]): without it the VM is handed
+    /// host paths.
+    ///
     /// Fails with [`ComputerError::Config`] when the environment's driver lacks a
     /// capability every sandbox needs — `Prepare` (the flows spawn the VMM
-    /// ahead of the guest), `Staging` (every flow brings its computer's
-    /// files into the area the VMM can reach), `Vsock` (the guest agent is
-    /// reached over it), or whatever the agent factory's readiness gate
-    /// needs (`VsockListen` for the guest's dial-out) — or when its guest
+    /// ahead of the guest), `Vsock` (the guest agent is reached over it), or
+    /// whatever the agent factory's readiness gate needs (`VsockListen` for
+    /// the guest's dial-out) — or when its guest
     /// network offers no `NetworkReconcile` (the cleanup-token protocol is
     /// how a host releases the addresses a previous process held), so an
     /// environment missing one is refused here instead of at the first boot
@@ -147,17 +150,12 @@ impl ComputerManager {
             cow_manager,
         } = environment;
         let capabilities = driver.capabilities();
+        let dial_out = matches!(agent.readiness(), Readiness::DialOut { .. });
         for (missing, capability, need) in [
             (
                 driver.prepare().is_none(),
                 "prepare",
                 "the boot and pool flows spawn the VMM ahead of the guest",
-            ),
-            (
-                !capabilities.staging,
-                "staging",
-                "every flow brings the files its computer boots from into the area the VMM \
-                 can reach, and pause takes the disk back out of it",
             ),
             // The last hard-wired transport assumption in this layer: every
             // agent implementation the crate ships reaches its guest through
@@ -172,8 +170,7 @@ impl ComputerManager {
             // this layer's: only a dial-out has to be listened for before
             // the guest starts.
             (
-                matches!(agent.readiness(), Readiness::DialOut { .. })
-                    && !capabilities.vsock_listen,
+                dial_out && !capabilities.vsock_listen,
                 "vsock_listen",
                 "the readiness gate is the guest's vsock dial-out",
             ),
@@ -587,28 +584,6 @@ pub(super) fn reconcile_capability(network: &dyn GuestNetwork) -> &dyn NetworkRe
         .expect("SandboxManager::new requires the guest network's reconcile capability")
 }
 
-/// The driver's `Prepare` capability, which [`ComputerManager::new`]
-/// requires — the boot, pool, and restore flows all spawn the VMM before
-/// there is a guest to run on it.
-pub(crate) fn prepare_capability(driver: &dyn VmDriver) -> &dyn Prepare {
-    driver
-        .prepare()
-        .expect("SandboxManager::new requires the driver's Prepare capability")
-}
-
-/// A grip's `Staging` capability, which [`ComputerManager::new`] requires —
-/// every flow that puts a guest on a VMM first brings that guest's files
-/// into the area the VMM can reach, and pause takes its disk back out of
-/// it.
-///
-/// Takes the accessor's answer rather than the grip it came from: both
-/// grips on a VM have one and they name the same area, so a computer
-/// booted here asks its [`PreparedVm`] and one this process adopted asks
-/// its [`VmHandle`](arcbox_vm_driver::VmHandle).
-pub(crate) fn staging_capability(staging: Option<&dyn Staging>) -> &dyn Staging {
-    staging.expect("SandboxManager::new requires the driver's Staging capability")
-}
-
 /// The VMM's pid as the crash journal records it: what a restart sweep
 /// kills before tearing the sandbox's other resources down.
 pub(crate) fn journaled_pid(prepared: &dyn PreparedVm) -> Option<i32> {
@@ -640,6 +615,19 @@ pub(crate) fn isolation_spec(config: &RuntimeConfig) -> Result<IsolationSpec> {
         .jailer
         .as_ref()
         .map_or(Ok(IsolationSpec::None), IsolationSpec::try_from)
+}
+
+/// Whether a checkpoint taken here can be restored into a fresh VM, which
+/// pause, restore, warm create and the pool all rest on.
+///
+/// A driver that stages confines its VMM to an area of its own, and a
+/// restore reproduces the staged disk names only inside a fresh one:
+/// Firecracker in direct mode stages as the identity, so its vmstate pins
+/// the origin's host paths and only the jailer makes a restore's paths
+/// private. A driver without `Staging` reads host paths and takes the
+/// restored VM's disks from the `RestoreSpec`, so it needs no confinement.
+pub(crate) fn relocatable_checkpoints(config: &RuntimeConfig, driver: &dyn VmDriver) -> bool {
+    config.firecracker.jailer.is_some() || !driver.capabilities().staging
 }
 
 /// Where a paused computer's retained disk overlay lives: a function of the

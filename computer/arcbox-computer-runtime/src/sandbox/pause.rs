@@ -113,13 +113,14 @@ impl ComputerManager {
     ) -> Result<()> {
         self.await_reconcile().await?;
         let computer = self.computer(id)?;
-        // Resume restores into a fresh jailer chroot; direct-mode vmstate
-        // pins origin paths, so a direct-mode pause could never resume. Read
+        // Resume restores into a fresh VM; a Firecracker direct-mode vmstate
+        // pins origin paths, so a direct-mode pause could never resume
+        // (`relocatable_checkpoints`). Read
         // off the snapshot rather than left to the flow, because it is a
         // refusal the caller gets *instead* of the claim: only a computer
         // that would otherwise be paused hears it, exactly as today.
         if computer.snapshot.borrow().state == ComputerState::Ready
-            && self.config.firecracker.jailer.is_none()
+            && !relocatable_checkpoints(&self.config, &*self.services.driver)
         {
             return Err(ComputerError::Config(
                 "sandbox pause requires jailer isolation; direct mode cannot resume".into(),

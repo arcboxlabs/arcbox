@@ -2,8 +2,9 @@
 //!
 //! The manager runs in more than one environment — the ArcBox System VM
 //! with its known busybox userland, or a stock distro on a bare-metal
-//! node — and every part that differs is supplied here rather than built
-//! in the code. There is no default and no member is optional:
+//! node, or directly on the macOS host — and every part that differs is
+//! supplied here rather than built in the code. There is no default and no
+//! member is optional:
 //! [`ComputerManager::new`](crate::ComputerManager::new) builds none of the
 //! four, so what VMM its Computers run on is the composer's decision and
 //! never a fallback taken here (vm-stack-redesign R3, charter D4).
@@ -25,11 +26,11 @@ use crate::snapshot_cow::CowManager;
 #[derive(Clone)]
 pub struct NodeEnvironment {
     /// The VMM the sandboxes run under, behind the driver port
-    /// (`arcbox_vm_driver::VmDriver`). It must claim the `Prepare` and
-    /// `Staging` capabilities and offer `vsock`: the boot and warm-pool
-    /// flows spawn the VMM ahead of the guest, every flow stages the files
-    /// its computer boots from, and the guest agent is reached over vsock.
-    /// A driver that cannot is refused by
+    /// (`arcbox_vm_driver::VmDriver`). It must offer `vsock`, which the
+    /// guest agent is reached over, and `Prepare`: the boot and warm-pool
+    /// flows spawn the VMM ahead of the guest. `Staging` is optional: a
+    /// driver without it (VZ, HV) is handed host paths. A driver missing
+    /// one of these, or what the agent's readiness gate needs, is refused by
     /// [`ComputerManager::new`](crate::ComputerManager::new) rather than at
     /// the first boot.
     pub driver: Arc<dyn VmDriver>,

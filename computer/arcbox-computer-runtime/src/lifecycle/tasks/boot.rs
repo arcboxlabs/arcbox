@@ -153,7 +153,7 @@ pub async fn do_boot(
     spec: &ComputerSpec,
     net: Option<&NetworkAttachment>,
     vm_dir: &Path,
-    driver: &dyn VmDriver,
+    driver: &Arc<dyn VmDriver>,
     agents: &dyn GuestAgentFactory,
     config: &RuntimeConfig,
     cow_manager: &CowManager,
@@ -165,13 +165,13 @@ pub async fn do_boot(
 
     // Spawn the VMM ahead of the guest: the driver's prepared VM owns the
     // process, pre-creates whatever its spawn needs (log and metrics files
-    // in direct mode, the jail's `run/`), and knows the pid to journal.
+    // in direct mode, the jail's `run/`), and knows the pid to journal. A
+    // driver without `Prepare` spawns at the boot below instead, and there
+    // is no pid to journal.
     let prepared: Result<(Arc<dyn PreparedVm>, IsolationSpec)> = async {
         let vm_id = VmId::new(id)?;
         let isolation = sandbox::isolation_spec(config)?;
-        let prepared = sandbox::prepare_capability(driver)
-            .prepare(&vm_id, &isolation, vm_dir)
-            .await?;
+        let prepared = sandbox::vmm::prepare_vm(driver, &vm_id, &isolation, vm_dir).await?;
         Ok((Arc::from(prepared), isolation))
     }
     .await;
@@ -239,13 +239,18 @@ pub async fn do_boot(
     // only it can decide between a copy-on-write device and the copy that
     // falls back from one — see `stage_rootfs_cow_or_copy`.
     //
-    // Direct mode keeps its own arrangement: without a confinement staging
-    // is the identity, so the VM would be told the ephemeral dm device
-    // name and record *that* in its vmstate. `rootfs.link` is the stable
-    // name a later restore can retarget, and it is worth the branch.
+    // Firecracker's direct mode keeps its own arrangement: without a
+    // confinement staging is the identity, so the VM would be told the
+    // ephemeral dm device name and record *that* in its vmstate.
+    // `rootfs.link` is the stable name a later restore can retarget, and it
+    // is worth the branch. A driver without `Staging` (the host location)
+    // takes the staged path: its restores name their disks in the
+    // `RestoreSpec`, and a failed copy-on-write setup must give it a
+    // private copy rather than the shared template the direct branch
+    // falls back to.
     let mut cow_handle = None;
     let paths: Result<(PathBuf, PathBuf)> = async {
-        if fc_cfg.jailer.is_some() {
+        if fc_cfg.jailer.is_some() || prepared.staging().is_none() {
             let journal = |cow: Option<&CowHandle>| {
                 sandbox::reconcile::ComputerStateRecord::new(
                     id,
@@ -258,14 +263,9 @@ pub async fn do_boot(
                 .map(|record| record.with_vmm(vmm.clone()))
                 .and_then(|record| sandbox::reconcile::write_state_record(vm_dir, &record))
             };
-            let staged = stage_rootfs_cow_or_copy(
-                cow_manager,
-                sandbox::staging_capability(prepared.staging()),
-                id,
-                &spec.rootfs,
-                &journal,
-            )
-            .await;
+            let staging = sandbox::vmm::staging_of(prepared.staging(), &prepared.record());
+            let staged =
+                stage_rootfs_cow_or_copy(cow_manager, &*staging, id, &spec.rootfs, &journal).await;
             let rootfs = match staged {
                 Ok(staged) => {
                     cow_handle = staged.cow_handle;

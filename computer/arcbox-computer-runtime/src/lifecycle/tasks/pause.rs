@@ -74,11 +74,11 @@ pub async fn release_for_pause(
         // adopted after an agent restart (CORE-135) holds only the handle.
         let staging = prepared
             .as_deref()
-            .map(|prepared| sandbox::staging_capability(prepared.staging()))
+            .map(|prepared| sandbox::vmm::staging_of(prepared.staging(), &prepared.record()))
             .or_else(|| {
                 handle
                     .as_deref()
-                    .map(|handle| sandbox::staging_capability(handle.staging()))
+                    .map(|handle| sandbox::vmm::staging_of(handle.staging(), &handle.record()))
             });
         // Nothing taken out is a refusal, not a skip: in copy mode the
         // VM's area is where this computer's only writable disk lives, so

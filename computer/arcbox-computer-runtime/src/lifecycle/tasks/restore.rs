@@ -26,7 +26,7 @@ use arcbox_vm_driver::{
 use tracing::warn;
 
 use crate::agent::{ClockSync, GuestAgent, GuestAgentFactory};
-use crate::config::{JailerConfig, RuntimeConfig};
+use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox;
@@ -50,7 +50,9 @@ pub struct RestoreVm<'a> {
     /// attaches to must agree with it.
     pub net_invariant: bool,
     pub vm_dir: &'a Path,
-    pub jailer: &'a JailerConfig,
+    /// How the restored VMM is confined (`IsolationSpec::None` on a host
+    /// driver).
+    pub isolation: &'a IsolationSpec,
     /// The reserved instance: a claimed pool slot is recorded on it before
     /// anything else, because failure cleanup and the startup sweep key the
     /// chroot and dm/CoW teardown on that id.
@@ -60,7 +62,7 @@ pub struct RestoreVm<'a> {
     pub claimed: Option<PreparedSlot>,
     pub config: &'a RuntimeConfig,
     pub cow_manager: &'a CowManager,
-    pub driver: &'a dyn VmDriver,
+    pub driver: &'a Arc<dyn VmDriver>,
     pub network: &'a dyn GuestNetwork,
     pub agents: &'a dyn GuestAgentFactory,
 }
@@ -116,7 +118,7 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
         nic,
         net_invariant,
         vm_dir,
-        jailer,
+        isolation,
         instance,
         claimed,
         config,
@@ -221,13 +223,9 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
             // it and stages this restore's files into the area it reads
             // from.
             let spawned: Result<Arc<dyn PreparedVm>> = async {
-                let prepared = sandbox::prepare_capability(driver)
-                    .prepare(
-                        &VmId::new(new_id)?,
-                        &IsolationSpec::try_from(jailer)?,
-                        vm_dir,
-                    )
-                    .await?;
+                let prepared =
+                    sandbox::vmm::prepare_vm(driver, &VmId::new(new_id)?, isolation, vm_dir)
+                        .await?;
                 Ok(Arc::from(prepared))
             }
             .await;
@@ -272,7 +270,8 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
             // paths: everything it loads is brought into the area it can
             // reach first, and named by where staging put it.
             let setup_result: Result<(PathBuf, CheckpointImage)> = async {
-                let staging = sandbox::staging_capability(spawned_prepared.staging());
+                let record = spawned_prepared.record();
+                let staging = sandbox::vmm::staging_of(spawned_prepared.staging(), &record);
 
                 // The kernel. A snapshot load names only the vmstate and
                 // the mem file, so this stage may well be vestigial — but
@@ -295,16 +294,21 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
                         snap_meta.id
                     ))
                 })?;
-                let staged =
-                    match stage_rootfs_cow_or_copy(cow_manager, staging, new_id, rootfs, &journal)
-                        .await
-                    {
-                        Ok(staged) => staged,
-                        Err(StageError { error, cow_handle }) => {
-                            pending_cow = cow_handle;
-                            return Err(error);
-                        }
-                    };
+                let staged = match stage_rootfs_cow_or_copy(
+                    cow_manager,
+                    &*staging,
+                    new_id,
+                    rootfs,
+                    &journal,
+                )
+                .await
+                {
+                    Ok(staged) => staged,
+                    Err(StageError { error, cow_handle }) => {
+                        pending_cow = cow_handle;
+                        return Err(error);
+                    }
+                };
                 pending_cow = staged.cow_handle;
 
                 // The checkpoint itself. Its mem file is the guest's whole
@@ -353,12 +357,7 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
     // Load the image on the prepared VMM: the disk is the rootfs staging
     // put in the VMM's reach, eth0 lands on the fresh TAP.
     let loaded: Result<(Arc<dyn VmHandle>, Arc<dyn GuestAgent>)> = async {
-        let restore = restore_spec(
-            &resource_owner,
-            rootfs,
-            nic.clone(),
-            IsolationSpec::try_from(jailer)?,
-        )?;
+        let restore = restore_spec(&resource_owner, rootfs, nic.clone(), isolation.clone())?;
         let handle: Arc<dyn VmHandle> =
             Arc::from(prepared.restore(&staged_checkpoint, restore).await?);
         let agent = agents.connect(Arc::clone(&handle), settled_on_load.as_ref())?;

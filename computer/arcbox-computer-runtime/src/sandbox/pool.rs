@@ -16,7 +16,6 @@
 use super::boot::{StageError, stage_rootfs_cow_or_copy};
 use super::reconcile::{self, ComputerStateRecord, POOL_SLOT_PREFIX};
 use super::*;
-use crate::config::JailerConfig;
 use crate::snapshot::SnapshotMeta;
 
 /// The slot policy — LRU, refill accounting, eviction — lives in
@@ -56,9 +55,12 @@ pub(super) async fn prepare_slot(
     snapshot: &SnapshotMeta,
 ) -> Result<PreparedSlot> {
     let fc_cfg = &config.firecracker;
-    let jc = fc_cfg.jailer.as_ref().ok_or_else(|| {
-        ComputerError::Config("restore slot pooling requires jailer isolation".into())
-    })?;
+    if !super::relocatable_checkpoints(config, driver) {
+        return Err(ComputerError::Config(
+            "restore slot pooling requires jailer isolation".into(),
+        ));
+    }
+    let isolation = super::isolation_spec(config)?;
     // Short suffix on purpose: the slot id becomes a VM identity and must
     // fit the driver's own id budget (`VmDriver::id_budget`) under any
     // configured chroot layout — internal mints bypass the ingress
@@ -81,7 +83,17 @@ pub(super) async fn prepare_slot(
         &ComputerStateRecord::new(&slot_id, None, None, None, config, None)?,
     )?;
 
-    match stage_slot(driver, config, jc, cow_manager, snapshot, &slot_id, &vm_dir).await {
+    match stage_slot(
+        driver,
+        config,
+        &isolation,
+        cow_manager,
+        snapshot,
+        &slot_id,
+        &vm_dir,
+    )
+    .await
+    {
         Ok(staged) => Ok(PreparedSlot {
             slot_id,
             prepared: staged.prepared,
@@ -158,17 +170,18 @@ struct StagedSlot {
 async fn stage_slot(
     driver: &dyn VmDriver,
     config: &RuntimeConfig,
-    jc: &JailerConfig,
+    isolation: &IsolationSpec,
     cow_manager: &CowManager,
     snapshot: &SnapshotMeta,
     slot_id: &str,
     vm_dir: &Path,
 ) -> std::result::Result<StagedSlot, SlotFailure> {
+    let prepare = super::vmm::prepare_capability(driver);
     let prepared: Arc<dyn PreparedVm> = Arc::from(
-        super::prepare_capability(driver)
+        prepare
             .prepare(
                 &VmId::new(slot_id).map_err(ComputerError::from)?,
-                &IsolationSpec::try_from(jc)?,
+                isolation,
                 vm_dir,
             )
             .await
@@ -194,7 +207,8 @@ async fn stage_slot(
     // Everything the restore would otherwise pay for on its critical path,
     // brought into the area this slot's VMM reads from — under the same
     // names a restore renders, so claiming the slot stages nothing twice.
-    let staging = super::staging_capability(prepared.staging());
+    let record = prepared.record();
+    let staging = super::vmm::staging_of(prepared.staging(), &record);
     if let Some(kernel) = snapshot.kernel_path.as_deref() {
         if let Err(error) = staging.stage_kernel(Path::new(kernel)).await {
             return Err(carry(error.into(), Some(prepared), None));
@@ -213,7 +227,7 @@ async fn stage_slot(
         ));
     };
     let staged =
-        match stage_rootfs_cow_or_copy(cow_manager, staging, slot_id, rootfs, &journal).await {
+        match stage_rootfs_cow_or_copy(cow_manager, &*staging, slot_id, rootfs, &journal).await {
             Ok(staged) => staged,
             Err(StageError {
                 error,
@@ -333,6 +347,9 @@ pub fn spawn_pool_refill(
     snapshots: &Arc<SnapshotCatalog>,
     snapshot_id: &str,
 ) {
+    if !super::relocatable_checkpoints(config, driver.as_ref()) {
+        return;
+    }
     {
         let plan = pool.begin_fill(snapshot_id, config.firecracker.pool_size);
         for slot in plan.evicted {

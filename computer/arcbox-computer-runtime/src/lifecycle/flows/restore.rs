@@ -23,7 +23,7 @@ use crate::lifecycle::tasks::resume::restore_paused;
 use crate::lifecycle::tasks::{TaskFailure, TaskResult};
 use crate::sandbox::reconcile::{ComputerStateRecord, JournaledLease, write_state_record};
 use crate::sandbox::record::ComputerProvisionOutcome;
-use crate::sandbox::{journaled_pid, journaled_vmm, pool};
+use crate::sandbox::{self, journaled_pid, journaled_vmm, pool};
 
 impl ComputerFlows {
     /// The restore proper: claim a pre-warmed slot or prepare and stage a
@@ -49,13 +49,15 @@ impl ComputerFlows {
             .map(|lease| lease.ip.to_string())
             .unwrap_or_default();
         let vm_dir = self.computer.lock().unwrap().vm_dir.clone();
-        let Some(jailer) = services.config.firecracker.jailer.clone() else {
+        if !sandbox::relocatable_checkpoints(&services.config, &*services.driver) {
             return Err(TaskFailure::recoverable(ComputerError::Config(
                 "checkpoint restore requires jailer isolation; direct mode embeds shared origin \
                  paths"
                     .into(),
             )));
-        };
+        }
+        let isolation =
+            sandbox::isolation_spec(&services.config).map_err(TaskFailure::recoverable)?;
 
         let claimed = pool::claim_restore_slot(&services.pool, &services.cow_manager, &snapshot_id);
         let restored = restore_vm(RestoreVm {
@@ -65,12 +67,12 @@ impl ComputerFlows {
             nic,
             net_invariant: snap_meta.net_invariant,
             vm_dir: &vm_dir,
-            jailer: &jailer,
+            isolation: &isolation,
             instance: &self.computer,
             claimed,
             config: &services.config,
             cow_manager: &services.cow_manager,
-            driver: &*services.driver,
+            driver: &services.driver,
             network: &*services.network,
             agents: &*services.agents,
         })
@@ -190,11 +192,12 @@ impl ComputerFlows {
             )))
         })?;
         let services = &self.services;
-        let jailer = services.config.firecracker.jailer.clone().ok_or_else(|| {
-            recoverable(ComputerError::Config(
+        if !sandbox::relocatable_checkpoints(&services.config, &*services.driver) {
+            return Err(recoverable(ComputerError::Config(
                 "computer resume requires jailer isolation".into(),
-            ))
-        })?;
+            )));
+        }
+        let isolation = sandbox::isolation_spec(&services.config).map_err(recoverable)?;
         let snap_meta = services
             .snapshots
             .find_by_id(&snapshot_id)
@@ -203,13 +206,13 @@ impl ComputerFlows {
         let started = std::time::Instant::now();
         let resumed = restore_paused(
             &self.id,
-            &jailer,
+            &isolation,
             &snap_meta,
             &vm_dir,
             networked,
             &services.config,
             &services.cow_manager,
-            &*services.driver,
+            &services.driver,
             &*services.network,
             &*services.agents,
         )

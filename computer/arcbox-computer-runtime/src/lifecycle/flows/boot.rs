@@ -43,7 +43,7 @@ impl ComputerFlows {
             &spec,
             attachment.as_ref(),
             &vm_dir,
-            services.driver.as_ref(),
+            &services.driver,
             services.agents.as_ref(),
             &services.config,
             &services.cow_manager,
