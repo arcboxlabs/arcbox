@@ -1,7 +1,9 @@
 # Sandbox gRPC API
 
-ArcBox sandboxes are short-lived, strongly-isolated Firecracker microVMs
-running nested inside the guest VM, aimed at E2B-style local workloads:
+ArcBox sandboxes are short-lived, strongly-isolated microVMs aimed at
+E2B-style local workloads. Each runs in one of two **run locations**: as
+its own VM on the macOS host, or as a Firecracker microVM nested inside the
+System VM (see **Run locations**). Either way they offer the same contract:
 create in milliseconds-to-seconds, run commands, transfer files, expose
 ports, checkpoint and restore. This document is the integration reference
 for SDK authors and frontend clients. Executions are addressable and
@@ -33,14 +35,23 @@ sandbox — see [agent-sandbox.md](agent-sandbox.md).
 
 ## Requirements
 
-Sandboxes need **nested virtualization**: the VZ backend on Apple Silicon
-M3 or newer with macOS 15+. On the HV and QEMU backends or Intel/M1/M2
-hosts every sandbox RPC except `GetCapabilities`, in all five services,
-refuses before reaching the guest: `FAILED_PRECONDITION`, the message
-`sandboxes cannot run on this host: <reason>`, and the
-`NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail whose `reason` context is the
-reason `GetCapabilities` reports. Request validation (malformed ports, an
-invalid sandbox ID) still answers `INVALID_ARGUMENT` first.
+What a sandbox needs depends on its run location:
+
+- **host** — a VM of its own on the Mac, under the VZ or HV backend. No
+  nested virtualization, so it runs on any Apple Silicon Mac with hardware
+  virtualization. A Mac without it (the System VM on QEMU) cannot run host
+  sandboxes either; the location is then unavailable.
+- **nested** — needs **nested virtualization**: the VZ backend on Apple
+  Silicon M3 or newer with macOS 15+. On the HV and QEMU backends or
+  Intel/M1/M2 hosts, every sandbox RPC routed to this location refuses
+  before reaching the guest: `FAILED_PRECONDITION`, the message
+  `sandboxes cannot run on this host: <reason>`, and the
+  `NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail whose `reason` context is
+  the reason `GetCapabilities` reports.
+
+Request validation (malformed ports, an invalid sandbox ID) still answers
+`INVALID_ARGUMENT` first. `GetCapabilities` reports which locations this
+daemon can run and why not; ask it rather than inferring from the hardware.
 
 ## Connection
 
@@ -144,7 +155,31 @@ Key fields:
 | `network.mode` | `NETWORK_MODE_ENABLED` (default, IP from 172.20.0.0/16) or `NETWORK_MODE_NONE` |
 | `ttl_seconds` | hard maximum lifetime from creation (not reset by activity; re-armable via `SetLifecycle`); always destroys |
 | `idle_timeout_seconds`, `on_idle` | idle reaping after this many seconds without a running execution: `KILL` (default) destroys, `PAUSE` checkpoints (CORE-21); both knobs are replaceable via `SetLifecycle` |
+| `run_location` | where the sandbox runs — see **Run locations**; unset = the daemon's default |
 | `mounts`, `ssh_public_key` | **rejected in V1** with `FAILED_PRECONDITION` (see Proto stability) |
+
+### Run locations
+
+`CreateSandboxRequest.run_location` (`RunLocation`) picks where a sandbox
+runs:
+
+| Value | Meaning |
+|---|---|
+| `RUN_LOCATION_UNSPECIFIED` | the daemon's default: the host when this daemon runs host sandboxes, else nested |
+| `RUN_LOCATION_HOST` | a VM of its own on the macOS host, under VZ or HV |
+| `RUN_LOCATION_NESTED` | a Firecracker microVM nested inside the System VM |
+
+The host is the default; the nested location is used only when a request
+asks for it (host sandboxes design, D2). A location the daemon cannot run
+is refused with `FAILED_PRECONDITION` whose message says why. It is never
+silently replaced by the other one. An enum value this daemon does not
+know is `INVALID_ARGUMENT`. `GetCapabilities.locations` says which
+locations are available before anyone asks.
+
+Both locations report the same states, events and API. What differs is
+listed per location in `GetCapabilities` (backend, pause, port publishing,
+bind mounts). Host sandboxes cannot reach each other directly: each VM
+sits behind its own network datapath (D1).
 
 ### Templates
 
@@ -333,6 +368,43 @@ configuration.
 - **Events**: `PAUSING` (attributes `reason: pause`, later
   `idle_timeout`), `PAUSED`, and `RESUMED` (attributes `reason: resume`
   or `auto_resume`) make every automated transition visible.
+- **Pause refusals**: beyond the state machine, a `Pause` of a `READY`
+  sandbox answers `FAILED_PRECONDITION`, with the reason as the message,
+  when the location cannot take the checkpoint. The sandbox stays `READY`
+  and no `PAUSING` event is sent. `GetCapabilities` reports the same
+  answer ahead of time (`pause_available`, `pause_unavailable_reason`).
+  - **Bind mounts** (D3): a sandbox with bind mounts cannot pause, because
+    VirtioFS state is not checkpointed. The message is
+    `a sandbox with bind mounts cannot pause: VirtioFS state is not
+    checkpointed`. No location accepts `mounts` in V1 yet (see `Create`),
+    so this applies once one does.
+  - **VZ while the session is locked**: a VZ save needs an unlocked macOS
+    console session (ADR 0010, decision 6). While the Mac is locked, or
+    nobody is logged in at the console, a `Pause` and a `Checkpoint` on a
+    VZ host sandbox are refused and the message names the session state
+    (for example `vz: checkpoints need an unlocked console session; the
+    console session is locked`). HV host sandboxes and nested sandboxes
+    are not affected.
+  - The idle detector obeys the same rule: an idle VZ sandbox with
+    `on_idle: PAUSE` stays `READY` while the session is locked and writes
+    no checkpoint.
+- **Connections do not survive a checkpoint**: a sandbox brought back from
+  one (`Resume`, or `Restore` into a new sandbox) starts with every TCP
+  flow and vsock connection the guest had open reset. The guest sees an
+  RST for each TCP flow and a vsock transport reset. Clients reconnect;
+  exposed ports are re-exposed, as above.
+- **Resume after a macOS update** (host location, D6): a host checkpoint
+  restores only on the Mac, user and macOS build that wrote it, and it
+  records the build. A `Resume` of a sandbox paused on another build is
+  refused with `FAILED_PRECONDITION` before anything is re-created. The
+  message names both builds, for example `checkpoint <id> was written on
+  macOS build 25E5207k and this Mac runs 25F71; a checkpoint restores only
+  on the build that wrote it, and nothing it retained was touched`. The
+  sandbox stays `PAUSED` with its disk overlay and checkpoint kept, so a
+  `Resume` on the build that wrote it still succeeds. The memory image
+  cannot move to another build, and V1 has no call that boots the kept
+  disk afresh; `Remove` discards both. Checkpoints from the nested
+  location record no build and are not checked.
 - Paused sandboxes report `paused_at` and `storage_bytes` (checkpoint +
   overlay footprint) in `Inspect`/`List`, survive daemon and VM restarts,
   and still honor `ttl_seconds` — the hard cap destroys a paused sandbox
@@ -374,12 +446,31 @@ any sandbox exists):
   compare it against their floor and raise `PROTOCOL_MISMATCH`.
 - `features` — append-only named flags: `pause_resume`, `auto_resume`,
   `idle_policy`, `set_lifecycle`, `list_exposed_ports`.
+- `locations` — one `LocationCapability` per run location the daemon knows
+  of, available or not:
+
+  | Field | Meaning |
+  |---|---|
+  | `location` | the `RunLocation` this entry describes |
+  | `backend` | the driver its sandboxes run under: `fc`, `vz` or `hv`; empty when unavailable |
+  | `available`, `unavailable_reason` | whether `Create` can place a sandbox here, and why not |
+  | `pause_resume` | whether sandboxes here can pause and resume at all |
+  | `pause_available`, `pause_unavailable_reason` | whether a `Pause` could run **at this moment**, and why not — the same text the `FAILED_PRECONDITION` carries. False for a VZ host while the macOS session is locked |
+  | `warm_prespawn` | whether restores claim VMMs started ahead of time |
+  | `port_publishing` | whether `ExposePort` can publish a sandbox port on the host |
+  | `bind_mounts` | whether `Create` accepts `mounts` here; a sandbox with bind mounts can never pause (D3) |
+
+  `pause_available` changes while the daemon runs, so ask again rather
+  than caching it. A daemon
+  that does not run host sandboxes still lists the host entry, unavailable,
+  with the reason.
 - `nested_virt` — `{supported, reason}` for the **current** backend and
-  hardware (VZ on Apple Silicon M3+/macOS 15+). When unsupported, every
-  other sandbox RPC fails fast with `FAILED_PRECONDITION` carrying the
-  `NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail and the same `reason`
-  (see Requirements), so `Create` refuses instead of booting into an
-  opaque KVM failure.
+  hardware (VZ on Apple Silicon M3+/macOS 15+): the nested entry's
+  availability, kept for SDKs that predate `locations`. When unsupported,
+  every sandbox RPC routed to the nested location fails fast with
+  `FAILED_PRECONDITION` carrying the `NESTED_VIRT_UNSUPPORTED` `ErrorInfo`
+  detail and the same `reason` (see Requirements), instead of booting into
+  an opaque KVM failure.
 
 ### Stop / Remove
 
@@ -418,14 +509,21 @@ any sandbox exists):
 | `Restore{snapshot_id, id, network_override, ttl_seconds}` | new sandbox in `READY` state with near-zero boot; set `network_override` for a fresh TAP/IP when restoring concurrently |
 | `ListSnapshots` / `DeleteSnapshot` | catalog management; `ListSnapshots` paginates like `List` |
 
-Restore requires jailer mode. Direct-mode vmstate pins origin sandbox paths
-and is rejected rather than risking mutation of the origin or path collisions.
+A restored sandbox starts with its TCP flows and vsock connections reset
+(see **Pause / Resume**). A host checkpoint restores only on the Mac, user
+and macOS build that wrote it; `Restore` from another build answers
+`FAILED_PRECONDITION` naming both builds, and a VZ `Checkpoint` is refused
+while the macOS session is locked.
+
+On the nested location, Restore requires jailer mode. Direct-mode vmstate
+pins origin sandbox paths and is rejected rather than risking mutation of
+the origin or path collisions.
 Restore retries are durably replayed only when `id` is caller-supplied. An
 empty `id` creates a fresh UUID on every attempt, so retry-capable clients must
 generate and retain the ID before the first call.
 
-`network_override` (a fresh TAP/IP for the restored sandbox) uses
-Firecracker's `network_overrides` snapshot-load field (Firecracker ≥ 1.12;
+On the nested location, `network_override` (a fresh TAP/IP for the
+restored sandbox) uses Firecracker's `network_overrides` snapshot-load field (Firecracker ≥ 1.12;
 the bundle ships 1.16.1). With it, a clone restores and runs while the
 origin keeps its NIC. Restore without `network_override` reuses the
 recorded NIC, so the origin must be stopped first.
@@ -447,7 +545,11 @@ map onto gRPC statuses:
 | malformed request / oversized file | `INVALID_ARGUMENT` |
 | unknown sandbox / snapshot | `NOT_FOUND` |
 | duplicate sandbox ID | `ALREADY_EXISTS` |
+| unknown `run_location` value | `INVALID_ARGUMENT` |
 | wrong state, missing nested virt, V1-unsupported field | `FAILED_PRECONDITION` |
+| requested run location unavailable on this daemon | `FAILED_PRECONDITION`, message names why |
+| `Pause`/`Checkpoint` the location cannot take now (bind mounts, VZ while the session is locked) | `FAILED_PRECONDITION`, message names why |
+| resume or restore of a checkpoint written on another macOS build | `FAILED_PRECONDITION`, message names both builds |
 | paused sandbox, transparent resume not applied (opt-out header or control-plane call) | `FAILED_PRECONDITION` + `SANDBOX_PAUSED` `ErrorInfo` detail |
 | stdin write offset past the accepted count | `OUT_OF_RANGE` (resync via `GetStdinStatus`) |
 | sandbox service initialisation failure | `UNAVAILABLE` |
