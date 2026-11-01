@@ -7,24 +7,28 @@
 //! (`arcbox-hv-vmm`), which serves the same port to the daemon over a
 //! socket (ADR 0010).
 //!
-//! - `render` — [`VmSpec`] → [`VmmConfig`](crate::VmmConfig), pure and
-//!   tested.
+//! - `render` — [`VmSpec`] → [`VmmConfig`](crate::VmmConfig), and a
+//!   checkpoint's spec with a [`RestoreSpec`] applied; pure and tested.
 //! - `handle` — the port's `VmHandle` over a running [`Vmm`]: exit and reset
-//!   events from a watcher thread, shutdown, and the vsock, balloon, debug
-//!   and port-forward capabilities.
+//!   events from a watcher thread, shutdown, checkpoint, and the vsock,
+//!   balloon, debug and port-forward capabilities.
 //! - `port_forward` — `PortForward` over the NAT datapath's inbound
 //!   listener manager.
 //!
-//! Checkpoint is not wired yet, so every image is foreign. The guest
-//! console stays inside the machine, so there is no `Console`.
+//! A checkpoint is the machine's own (`Vmm::hv_checkpoint`) plus the spec
+//! it was built from, `vm.json`, which a restore needs to build the same
+//! machine; the format is [`FORMAT`]. A restore names the disks the
+//! checkpoint referenced at their new paths, cloned from the image's
+//! `disk<N>.img` copies (the N-th disk of the spec). The guest console
+//! stays inside the machine, so there is no `Console`.
 
 use std::path::Path;
 
 use arcbox_fakeip::proxy_detect::ProxyEnvironment;
 use arcbox_net::dns::SharedDns;
 use arcbox_vm_driver::{
-    Adopt, CheckpointImage, DriverCapabilities, Error, NestedVirt, RestoreSpec, Result, VmDriver,
-    VmHandle, VmRecord, VmSpec,
+    Adopt, CheckpointFormat, CheckpointImage, CheckpointKind, DriverCapabilities, Error,
+    NestedVirt, RestoreSpec, Result, VmDriver, VmHandle, VmRecord, VmSpec,
 };
 use async_trait::async_trait;
 
@@ -38,6 +42,12 @@ use handle::HvHandle;
 
 /// The driver's name, as `VmDriver::name` and `VmRecord::driver` report it.
 pub const NAME: &str = "hv";
+
+/// The checkpoint format this driver writes and restores.
+pub const FORMAT: &str = "arcbox-hv/1";
+
+/// The spec a checkpoint was taken from, inside the image directory.
+const SPEC_FILE: &str = "vm.json";
 
 /// What every machine the driver builds shares with the host.
 #[derive(Clone, Default)]
@@ -72,6 +82,7 @@ impl VmDriver for HvMachineDriver {
     fn capabilities(&self) -> DriverCapabilities {
         DriverCapabilities {
             vsock: true,
+            checkpoint: true,
             balloon: true,
             port_forward: true,
             debug: true,
@@ -97,14 +108,27 @@ impl VmDriver for HvMachineDriver {
         Ok(Box::new(HvHandle::new(vmm, spec, self.env.clone(), record)))
     }
 
-    /// This driver writes no checkpoints, so every image is foreign.
     async fn restore(
         &self,
         image: &CheckpointImage,
-        _spec: RestoreSpec,
-        _runtime_dir: &Path,
+        restore: RestoreSpec,
+        runtime_dir: &Path,
     ) -> Result<Box<dyn VmHandle>> {
-        Err(Error::ForeignCheckpoint(image.format.clone()))
+        if image.format.as_str() != FORMAT || image.kind != CheckpointKind::Full {
+            return Err(Error::ForeignCheckpoint(image.format.clone()));
+        }
+        let taken: VmSpec = serde_json::from_slice(&std::fs::read(image.dir.join(SPEC_FILE))?)
+            .map_err(|e| driver_error(format!("{SPEC_FILE} in {}", image.dir.display()), e))?;
+        let spec = render::restored_spec(taken, restore)?;
+        let env = self.env.clone();
+        let dir = image.dir.clone();
+        let restored = spec.clone();
+        let vmm = tokio::task::spawn_blocking(move || restore_vmm(&restored, &env, &dir))
+            .await
+            .map_err(|e| driver_error("restore task", e))??;
+        tracing::info!(vm = %spec.id, "HV VM restored");
+        let record = record(&spec, runtime_dir);
+        Ok(Box::new(HvHandle::new(vmm, spec, self.env.clone(), record)))
     }
 
     fn adopt(&self) -> Option<&dyn Adopt> {
@@ -122,6 +146,30 @@ fn new_vmm(spec: &VmSpec, env: &Env) -> Result<Vmm> {
         vmm.set_proxy_env(proxy.clone());
     }
     Ok(vmm)
+}
+
+/// A machine for `spec`, started from the checkpoint in `dir`. Blocks.
+fn restore_vmm(spec: &VmSpec, env: &Env, dir: &Path) -> Result<Vmm> {
+    let mut vmm = new_vmm(spec, env)?;
+    vmm.hv_restore(dir)
+        .map_err(|e| driver_error("restore", e))?;
+    Ok(vmm)
+}
+
+/// Records `spec` next to the machine's checkpoint in `dir`.
+fn write_spec(dir: &Path, spec: &VmSpec) -> Result<()> {
+    let json = serde_json::to_vec_pretty(spec).map_err(|e| driver_error(SPEC_FILE, e))?;
+    std::fs::write(dir.join(SPEC_FILE), json)?;
+    Ok(())
+}
+
+/// The image a checkpoint into `dir` wrote.
+fn image(dir: &Path) -> CheckpointImage {
+    CheckpointImage {
+        dir: dir.to_path_buf(),
+        format: CheckpointFormat::new(FORMAT),
+        kind: CheckpointKind::Full,
+    }
 }
 
 fn record(spec: &VmSpec, runtime_dir: &Path) -> VmRecord {
