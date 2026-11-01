@@ -64,12 +64,14 @@ from memory. Every new file is added to the index below.
 
 - [Architecture charter — the engine/computer restructure](architecture/charter.md) (active, product scope revised 2026-10-08)
 - [VM stack redesign — the P4b execution design](architecture/vm-stack-redesign.md) (locked, 2026-08-16)
+- [Host sandboxes — one VM per workload on the Mac](architecture/host-sandboxes.md) (locked, 2026-11-01)
 - [HV backend architecture](architecture/hv-backend.md) (current, 2026-08-13; interrupt flow amended by ADR 0001)
 - [VirtIO queue abstraction convergence](architecture/virtio-queue-convergence.md) (historical, 2026-06)
 
 ### Decisions
 
 - [0010 — vhost-user back-ends use ArcBox's own protocol layer, kqueue loop and `SplitQueue`](adr/0010-vhost-user-protocol-layer-is-arcbox-own.md) (2026-11-02)
+- [0010 — Sandboxes run on the host, one VM each, with checkpoints in v1](adr/0010-sandboxes-run-on-the-host.md) (2026-11-01; supersedes the sandbox rows of `architecture/vm-stack-redesign.md`)
 - [0009 — Host work must drain before machine teardown](adr/0009-host-work-drains-before-machine-teardown.md) (2026-10-09; supersedes ADR 0003 decision 5)
 - [0008 — The local CA covers concrete names under `.local`](adr/0008-local-ca-covers-local-domains.md) (2026-10-08)
 - [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
