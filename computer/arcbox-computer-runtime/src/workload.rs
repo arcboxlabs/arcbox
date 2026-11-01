@@ -15,8 +15,10 @@
 //!
 //! [`StartCommand`]: crate::StartCommand
 
+mod check;
 mod start;
 
+pub use check::Rejected;
 pub use start::Workload;
 
 use crate::error::ComputerError;
@@ -27,6 +29,9 @@ pub enum WorkloadError {
     /// The spec fails `arcbox-oci`'s own validation.
     #[error("invalid OCI config: {0}")]
     Invalid(#[from] arcbox_oci::OciError),
+    /// The spec asks for isolation the VM boundary replaces.
+    #[error("OCI {0} are not enforced inside a computer; the VM is the isolation boundary")]
+    Rejected(Rejected),
     /// The spec sets a field the guest agent cannot carry out.
     #[error("OCI field {0} is not supported in a computer")]
     Unsupported(String),

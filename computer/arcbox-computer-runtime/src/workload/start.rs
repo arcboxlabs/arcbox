@@ -26,6 +26,7 @@ impl Workload {
     /// field that is set fails, so nothing in a spec is silently ignored.
     pub fn from_spec(spec: &Spec) -> Result<Self, WorkloadError> {
         spec.validate()?;
+        super::check::check_spec(spec)?;
         let start = match &spec.process {
             Some(process) if !process.args.is_empty() => Some(start_command(process)?),
             _ => None,
