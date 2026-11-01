@@ -22,11 +22,10 @@ Under `Network`, activating a lease again replaces its datapath, and `adopt` is 
 
 - `reserve` offers `NetworkMode::Nat` only (every datapath egresses through the host) and returns `Unavailable` until `replay_complete`, so a fresh lease cannot take the address of a running guest not yet adopted.
 - Nothing this network installs outlives its process, so there is no startup sweep: `startup_cleanup_token` is always `None`. Quarantine still holds the address until the composer finalizes it, after clearing its own host state for the lease — a `PortForward` taken from `take_port_forward` included, whose listeners stay bound until `clear`.
-- `host_ingress` is an error: there is no address for a DNAT rule to target. Ports reach the guest through a `PortForward`.
+- `host_ingress` is an error: there is no address for a DNAT rule to target. Ports reach the guest through a `PortForward`, which delivers on the rule's guest port; its host port may differ or be `0`, and `add` returns the port it bound.
 
 ## Known gaps
 
-- The datapath delivers an inbound TCP connection or UDP datagram to the guest on the port the host listener bound, not on the rule's guest port: `process_inbound_cmd` (`arcbox-net`, `darwin/datapath_loop/intercept.rs`) passes `host_port` to `TcpBridge::initiate_inbound`, and `InboundRelay::inject_udp` (`arcbox-proxy`) uses the listener's port. The System VM relies on dockerd's DNAT for the rest. This crate's `PortForward` therefore refuses a rule whose host port differs from its guest port, `0` included. Every other `PortForward` over `InboundListenerManager`, `arcbox-vz-driver`'s included, has the same gap without the refusal.
 - A guest reaches the Mac's loopback through its gateway (`10.0.2.1` → `127.0.0.1`), so it can reach a port another sandbox exposed on loopback, like any other host service. Guests cannot address each other directly.
 
 ## Testing
@@ -34,6 +33,6 @@ Under `Network`, activating a lease again replaces its datapath, and `adopt` is 
 `cargo test -p arcbox-host-net` on macOS:
 
 - `tests/contract.rs` — the `GuestNetwork` contract, run against `HostNetwork` and against the testkit's `FakeNetwork`, so the checks stay the port's rather than this adapter's.
-- `tests/isolation.rs` — two VMs with real datapaths: each guest's DHCP broadcast is answered on its own link with the address `identity` reports, a port forwarded into one guest is delivered there, and the other guest sees nothing in either case.
+- `tests/isolation.rs` — two VMs with real datapaths: each guest's DHCP broadcast is answered on its own link with the address `identity` reports, a port forwarded into one guest is delivered there on the rule's guest port, and the other guest sees nothing in either case; a TCP forward bound on host port `0` opens its connection to the rule's guest port.
 
 The crate is empty on other platforms.

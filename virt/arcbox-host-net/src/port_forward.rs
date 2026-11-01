@@ -1,7 +1,7 @@
 //! The port's `PortForward` over one datapath's inbound listener manager.
 
 use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
-use arcbox_vm_driver::{Error, ForwardProtocol, ForwardRule, PortForward, Result};
+use arcbox_vm_driver::{ForwardProtocol, ForwardRule, PortForward, Result};
 use async_trait::async_trait;
 
 /// Port forwarding into one VM through the datapath this network runs for
@@ -27,18 +27,9 @@ const fn protocol(protocol: ForwardProtocol) -> InboundProtocol {
 
 #[async_trait]
 impl PortForward for InboundForward {
-    /// Refuses a rule whose host port differs from its guest port, `0`
-    /// included: the datapath delivers inbound TCP and UDP to the guest on
-    /// the port the host listener bound, not on the rule's guest port (its
-    /// System VM consumer relies on dockerd's DNAT for the rest), so such a
-    /// rule would reach the wrong guest port.
+    /// The datapath delivers to the rule's guest port whatever the host
+    /// listener bound, so the host port may differ from it or be `0`.
     async fn add(&mut self, rule: ForwardRule) -> Result<u16> {
-        if rule.host_port != rule.guest_port {
-            return Err(Error::Network(format!(
-                "forward {}:{} -> guest :{}: the host datapath forwards only to the same port",
-                rule.host_ip, rule.host_port, rule.guest_port
-            )));
-        }
         Ok(self
             .manager
             .add_rule(

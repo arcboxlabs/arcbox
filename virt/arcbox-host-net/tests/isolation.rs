@@ -7,6 +7,10 @@
 //! link. A shared datapath or bridge fails these in one of two ways — the
 //! other guest sees the frame, or the answer goes to whichever guest
 //! attached last.
+//!
+//! The forwards also pin the rule's guest port: a host sandbox has no
+//! in-guest DNAT, so a forward must arrive on that port and not on the one
+//! its host listener bound.
 
 #![cfg(target_os = "macos")]
 
@@ -228,6 +232,9 @@ fn free_udp_port() -> u16 {
 }
 
 const ANSWER: Duration = Duration::from_secs(5);
+/// A guest port no free host port the tests bind can equal: it is below
+/// the OS's ephemeral range.
+const GUEST_PORT: u16 = 7777;
 const QUIET: Duration = Duration::from_millis(500);
 
 /// Broadcasts stay on the sender's link: each guest's DHCP discover is
@@ -278,27 +285,24 @@ async fn a_forwarded_port_reaches_only_its_own_guest() {
     let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     for (me, other) in [(&a, &b), (&b, &a)] {
         let mut forward = net.take_port_forward(&me.vm).unwrap();
-        // The datapath delivers on the port the host listener bound, so
-        // only a rule that keeps the port is accepted.
-        let rule = |host_port, guest_port| ForwardRule {
+        let port = free_udp_port();
+        let rule = ForwardRule {
             protocol: ForwardProtocol::Udp,
             host_ip: Ipv4Addr::LOCALHOST,
-            host_port,
-            guest_port,
+            host_port: port,
+            guest_port: GUEST_PORT,
         };
-        assert!(forward.add(rule(0, 7777)).await.is_err());
-        let port = free_udp_port();
-        assert!(forward.add(rule(port, port.wrapping_add(1))).await.is_err());
-        assert_eq!(forward.add(rule(port, port)).await.unwrap(), port);
+        assert_eq!(forward.add(rule).await.unwrap(), port);
         let payload = format!("for {}", me.vm);
         sender
             .send_to(payload.as_bytes(), (Ipv4Addr::LOCALHOST, port))
             .unwrap();
 
+        // Delivered on the rule's guest port, not the host listener's.
         let delivered = tokio::task::block_in_place(|| {
             me.recv_matching(ANSWER, |f| {
                 parse_udp(f).is_some_and(|(_, _, _, dst_port, body)| {
-                    dst_port == port && body == payload.as_bytes()
+                    dst_port == GUEST_PORT && body == payload.as_bytes()
                 })
             })
         })
@@ -316,4 +320,57 @@ async fn a_forwarded_port_reaches_only_its_own_guest() {
         );
         forward.clear().await;
     }
+}
+
+/// A TCP forward whose host port is 0 opens its connection to the rule's
+/// guest port: the guest sees a SYN on that port, not on the port the host
+/// listener bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tcp_forward_connects_to_the_rules_guest_port() {
+    let (net, a, _b) = two_guests().await;
+    tokio::task::block_in_place(|| {
+        a.send(&dhcp_discover(a.mac, 3));
+        a.recv_matching(ANSWER, |f| dhcp_reply(f, 3).is_some())
+            .expect("dhcp offer");
+    });
+
+    let mut forward = net.take_port_forward(&a.vm).unwrap();
+    let host_port = forward
+        .add(ForwardRule {
+            protocol: ForwardProtocol::Tcp,
+            host_ip: Ipv4Addr::LOCALHOST,
+            host_port: 0,
+            guest_port: GUEST_PORT,
+        })
+        .await
+        .unwrap();
+    assert_ne!(host_port, 0, "add must report the port it bound");
+    assert_ne!(host_port, GUEST_PORT);
+
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, host_port))
+        .await
+        .unwrap();
+    let syn = tokio::task::block_in_place(|| a.recv_matching(ANSWER, |f| parse_syn(f).is_some()))
+        .expect("the guest never saw the forwarded connection's SYN");
+    let (dst, dst_port) = parse_syn(&syn).unwrap();
+    assert_eq!(dst, v4(a.identity.ip));
+    assert_eq!(dst_port, GUEST_PORT, "SYN went to the host listener's port");
+    forward.clear().await;
+}
+
+/// The destination of the TCP SYN (without ACK) in `frame`, if it is one.
+fn parse_syn(frame: &[u8]) -> Option<(Ipv4Addr, u16)> {
+    if frame.len() < 14 + 20 + 20 || frame[12..14] != [0x08, 0x00] || frame[14 + 9] != 6 {
+        return None;
+    }
+    let ip = &frame[14..];
+    let ihl = usize::from(ip[0] & 0x0f) * 4;
+    let tcp = ip.get(ihl..ihl + 20)?;
+    let flags = tcp[13];
+    (flags & 0x12 == 0x02).then(|| {
+        (
+            Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]),
+            u16::from_be_bytes([tcp[2], tcp[3]]),
+        )
+    })
 }
