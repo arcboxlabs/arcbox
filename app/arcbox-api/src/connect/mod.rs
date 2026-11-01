@@ -35,6 +35,7 @@ mod migration;
 mod process;
 mod sandbox_errors;
 mod sandbox_resume;
+mod sandbox_route;
 mod snapshot;
 mod stats;
 mod stream_input;
@@ -269,25 +270,26 @@ pub fn router(
     early_runtime: SharedRuntime,
 ) -> connectrpc::Router {
     let clone = || Arc::clone(&system_runtime);
+    let sandboxes = sandbox_route::SandboxRuntimes::new(clone(), Arc::clone(&host_runtime));
     let sandbox_operations = Arc::new(arcbox_computer::locks::SandboxOperationLocks::default());
     let router = connectrpc::Router::new()
         .add_service(Arc::new(SandboxServiceImpl::new(
-            clone(),
+            sandboxes.clone(),
             Arc::clone(&sandbox_operations),
         )))
         .add_service(Arc::new(SandboxProcessServiceImpl::new(
-            clone(),
+            sandboxes.clone(),
             Arc::clone(&sandbox_operations),
         )))
         .add_service(Arc::new(SandboxFilesystemServiceImpl::new(
-            clone(),
+            sandboxes.clone(),
             Arc::clone(&sandbox_operations),
         )))
         .add_service(Arc::new(SandboxSnapshotServiceImpl::new(
-            clone(),
+            sandboxes.clone(),
             Arc::clone(&sandbox_operations),
         )))
-        .add_service(Arc::new(TemplateServiceImpl::new(clone())))
+        .add_service(Arc::new(TemplateServiceImpl::new(sandboxes)))
         // The daemon's own services, all on Connect since CORE-68.
         .add_service(Arc::new(IconServiceImpl::new()))
         .add_service(Arc::new(StatsServiceImpl::new(clone())))
@@ -369,8 +371,9 @@ mod tests {
         use connectrpc::HasMessageView as _;
 
         let (directory, shared) = storage_runtime();
-        let create = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
-        let restore = snapshot::SandboxSnapshotServiceImpl::new(shared, Arc::default());
+        let sandboxes = sandbox_route::SandboxRuntimes::new(shared.clone(), shared);
+        let create = control::SandboxServiceImpl::new(sandboxes.clone(), Arc::default());
+        let restore = snapshot::SandboxSnapshotServiceImpl::new(sandboxes, Arc::default());
         for id in [
             "under_score",
             "-leading",
@@ -466,6 +469,8 @@ mod tests {
             .set_backend(arcbox_core::VmBackend::Qemu);
         let expected = runtime.sandbox_nested_virt();
         assert!(!expected.supported);
+        // No host location is composed, so every route lands on the nested one.
+        let shared = sandbox_route::SandboxRuntimes::new(shared.clone(), shared);
         let control = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
         let process = process::SandboxProcessServiceImpl::new(shared.clone(), Arc::default());
         let filesystem =

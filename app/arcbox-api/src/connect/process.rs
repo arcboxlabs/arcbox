@@ -11,12 +11,11 @@ use connectrpc::{
 };
 use tokio_stream::StreamExt as _;
 
-use super::SharedRuntime;
+use super::sandbox_route::SandboxRuntimes;
 use crate::ApiError;
 
-use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::sandbox_resume;
-use super::{ConnectRuntimeExt as _, ContextExt as _, with_keepalive};
+use super::with_keepalive;
 use arcbox_computer::SandboxHost as _;
 use arcbox_computer::locks::SandboxOperationLocks;
 
@@ -53,14 +52,14 @@ const fn resolve_wait_for_port_budget(requested: u32) -> u32 {
 /// waking the sandbox. Signal and resize also skip resume, but require
 /// storage write admission because they control a running process.
 pub struct SandboxProcessServiceImpl {
-    runtime: SharedRuntime,
+    runtime: SandboxRuntimes,
     operations: Arc<SandboxOperationLocks>,
 }
 
 impl SandboxProcessServiceImpl {
     /// Creates a new execution service with a deferred runtime.
     #[must_use]
-    pub(super) fn new(runtime: SharedRuntime, operations: Arc<SandboxOperationLocks>) -> Self {
+    pub(super) fn new(runtime: SandboxRuntimes, operations: Arc<SandboxOperationLocks>) -> Self {
         Self {
             runtime,
             operations,
@@ -80,9 +79,8 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::StartExecutionRequest>,
     ) -> ServiceResult<pb::Execution> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
         let execution = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -106,15 +104,11 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::AttachExecutionRequest>,
     ) -> ServiceResult<ServiceStream<ExecutionEvent>> {
-        let machine = ctx.sandbox_machine_id()?;
-        let agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
+        let agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let rx = agent
-            .sandbox_exec_attach(request.to_owned_message())
+            .sandbox_exec_attach(req)
             .await
             .map_err(ApiError::from)?;
         let stream = rx.map(|r| r.map_err(|e| ConnectError::from(ApiError::from(e))));
@@ -130,9 +124,8 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::WriteStdinRequest>,
     ) -> ServiceResult<pb::StdinStatus> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
         let status = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -156,15 +149,13 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         mut requests: InboundStream<pb::WriteStdinRequest>,
     ) -> ServiceResult<pb::StdinStatus> {
-        let machine = ctx.sandbox_machine_id()?;
-
         let mut last = None;
         while let Some(item) = requests.next().await {
             // `Some(Err(..))` is an abnormal end (decode failure or a
             // truncated body), so it must fail the RPC rather than be read
             // as a clean finish — only `None` means the client is done.
             let req = item?.to_owned_message();
-            let runtime = self.runtime.ready()?.sandbox_capable()?;
+            let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
             let status = sandbox_resume::with_auto_resume(
                 runtime,
                 &self.operations,
@@ -192,15 +183,11 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::GetStdinStatusRequest>,
     ) -> ServiceResult<pb::StdinStatus> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let status = agent
-            .sandbox_stdin_status(request.to_owned_message())
+            .sandbox_stdin_status(req)
             .await
             .map_err(ApiError::from)?;
         Response::ok(status)
@@ -211,15 +198,11 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::SignalExecutionRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route_for_write(&ctx, &req.sandbox_id)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
-            .sandbox_exec_signal(request.to_owned_message())
+            .sandbox_exec_signal(req)
             .await
             .map_err(ApiError::from)?;
         Response::ok(Empty::default())
@@ -230,15 +213,11 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ResizeExecutionTtyRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route_for_write(&ctx, &req.sandbox_id)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
-            .sandbox_exec_resize(request.to_owned_message())
+            .sandbox_exec_resize(req)
             .await
             .map_err(ApiError::from)?;
         Response::ok(Empty::default())
@@ -249,17 +228,10 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::WaitExecutionRequest>,
     ) -> ServiceResult<pb::Execution> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
-        let execution = agent
-            .sandbox_exec_wait(request.to_owned_message())
-            .await
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
+        let execution = agent.sandbox_exec_wait(req).await.map_err(ApiError::from)?;
         Response::ok(execution)
     }
 
@@ -271,17 +243,10 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ListExecutionsRequest>,
     ) -> ServiceResult<pb::ListExecutionsResponse> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
-        let listing = agent
-            .sandbox_exec_list(request.to_owned_message())
-            .await
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
+        let listing = agent.sandbox_exec_list(req).await.map_err(ApiError::from)?;
         Response::ok(listing)
     }
 
@@ -290,12 +255,11 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::WaitForPortRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
         let mut req = request.to_owned_message();
         // Resolve the proto's "0 = daemon default" and cap the budget here,
         // so the guest always enforces an explicit, bounded wait.
         req.timeout_seconds = resolve_wait_for_port_budget(req.timeout_seconds);
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.sandbox_id)?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,

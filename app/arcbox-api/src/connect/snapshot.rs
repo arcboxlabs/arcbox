@@ -6,24 +6,22 @@ use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, Service
 
 use std::sync::Arc;
 
-use super::SharedRuntime;
+use super::sandbox_route::SandboxRuntimes;
 use crate::ApiError;
 
-use super::sandbox_errors::SandboxCapabilityExt as _;
-use super::{ConnectRuntimeExt as _, ContextExt as _};
 use arcbox_computer::cleanup as sandbox_cleanup;
 use arcbox_computer::locks::SandboxOperationLocks;
 
 /// Sandbox snapshot service implementation.
 pub struct SandboxSnapshotServiceImpl {
-    runtime: SharedRuntime,
+    runtime: SandboxRuntimes,
     operations: Arc<SandboxOperationLocks>,
 }
 
 impl SandboxSnapshotServiceImpl {
     /// Creates a new sandbox snapshot service with a deferred runtime.
     #[must_use]
-    pub(super) fn new(runtime: SharedRuntime, operations: Arc<SandboxOperationLocks>) -> Self {
+    pub(super) fn new(runtime: SandboxRuntimes, operations: Arc<SandboxOperationLocks>) -> Self {
         Self {
             runtime,
             operations,
@@ -43,16 +41,11 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::CheckpointRequest>,
     ) -> ServiceResult<pb::CheckpointResponse> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let sandbox_id = req.sandbox_id.clone();
+        let (runtime, machine) = self.runtime.route_for_write(&ctx, &sandbox_id)?;
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
         // must record a failed lifecycle mutation on its own (CORE-82).
         let resp = agent
@@ -70,17 +63,21 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::RestoreRequest>,
     ) -> ServiceResult<pb::RestoreResponse> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
-        let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready_for_write(&machine)?;
+        // Request validation answers before any location's capability.
         if !sandbox_id.is_empty() {
-            runtime
+            self.runtime
+                .any()?
                 .sandbox_dns_name(&sandbox_id)
                 .map_err(|error| ConnectError::invalid_argument(error.to_string()))?;
         }
-        runtime.sandbox_capable()?;
+        // A restore runs where its checkpoint was written.
+        let (runtime, machine) = self.runtime.route_snapshot(&ctx, &req.snapshot_id)?;
+        runtime
+            .ensure_storage_writes_available(&machine)
+            .map_err(ApiError::from)?;
+        let _operation = self.operations.lock(&machine, &sandbox_id).await;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_restore(req)
@@ -103,15 +100,15 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ListSnapshotsRequest>,
     ) -> ServiceResult<pb::ListSnapshotsResponse> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let req = request.to_owned_message();
+        let (runtime, machine) = if req.sandbox_id.is_empty() {
+            self.runtime.default_location(&ctx)?
+        } else {
+            self.runtime.route(&ctx, &req.sandbox_id)?
+        };
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
-            .sandbox_list_snapshots(request.to_owned_message())
+            .sandbox_list_snapshots(req)
             .await
             .map_err(ApiError::from)?;
         Response::ok(resp)
@@ -122,15 +119,14 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::DeleteSnapshotRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
+        let req = request.to_owned_message();
+        let (runtime, machine) = self.runtime.route_snapshot(&ctx, &req.snapshot_id)?;
+        runtime
+            .ensure_storage_writes_available(&machine)
             .map_err(ApiError::from)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
-            .sandbox_delete_snapshot(request.to_owned_message())
+            .sandbox_delete_snapshot(req)
             .await
             .map_err(ApiError::from)?;
         Response::ok(Empty::default())

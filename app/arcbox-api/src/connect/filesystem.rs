@@ -11,12 +11,12 @@ use connectrpc::{
 };
 use tokio_stream::StreamExt as _;
 
-use super::{SharedRuntime, stream_input};
+use super::sandbox_route::SandboxRuntimes;
+use super::stream_input;
 use crate::ApiError;
 
-use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::sandbox_resume;
-use super::{ConnectRuntimeExt as _, ContextExt as _, with_keepalive};
+use super::with_keepalive;
 use arcbox_computer::SandboxHost as _;
 use arcbox_computer::locks::SandboxOperationLocks;
 
@@ -26,14 +26,14 @@ use arcbox_computer::locks::SandboxOperationLocks;
 /// System VM's agent. File operations transparently resume a paused sandbox
 /// (CORE-21) unless the caller set `x-arcbox-no-auto-resume`.
 pub struct SandboxFilesystemServiceImpl {
-    runtime: SharedRuntime,
+    runtime: SandboxRuntimes,
     operations: Arc<SandboxOperationLocks>,
 }
 
 impl SandboxFilesystemServiceImpl {
     /// Creates a new filesystem service with a deferred runtime.
     #[must_use]
-    pub(super) fn new(runtime: SharedRuntime, operations: Arc<SandboxOperationLocks>) -> Self {
+    pub(super) fn new(runtime: SandboxRuntimes, operations: Arc<SandboxOperationLocks>) -> Self {
         Self {
             runtime,
             operations,
@@ -53,9 +53,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ReadFileRequest>,
     ) -> ServiceResult<ServiceStream<FileChunk>> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
 
         // Optimistic first attempt. The guest's verdict arrives as the first
         // stream frame, so peek it: a SANDBOX_PAUSED answer becomes one
@@ -98,8 +97,6 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         mut requests: InboundStream<pb::WriteFileRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
-
         // The first message in the stream must carry the Open payload.
         let first = requests.next().await.ok_or_else(|| {
             ConnectError::invalid_argument("write_file: stream closed before Open message")
@@ -113,7 +110,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             }
         };
 
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &open.id)?;
         // A paused sandbox must be handled before any chunk is consumed —
         // the input stream cannot be replayed for a retry.
         sandbox_resume::ensure_resumed_for_write(
@@ -143,9 +140,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::StatFileRequest>,
     ) -> ServiceResult<pb::FileStat> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
         let stat = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -169,9 +165,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ListDirRequest>,
     ) -> ServiceResult<pb::ListDirResponse> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
         let listing = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -195,9 +190,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::MakeDirRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -221,9 +215,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::RemoveEntryRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -247,9 +240,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::MoveEntryRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -273,9 +265,8 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::WatchDirRequest>,
     ) -> ServiceResult<ServiceStream<pb::WatchDirResponse>> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?.sandbox_capable()?;
+        let (runtime, machine) = self.runtime.route(&ctx, &req.id)?;
 
         // Optimistic first attempt, mirroring read_file: the guest confirms
         // an established watch with an immediate keepalive frame, so peeking

@@ -1,27 +1,26 @@
 //! Sandbox template catalog service — control plane (CORE-107).
 //!
-//! Pure forwarders to the guest agent, mirroring `snapshot.rs`: the catalog,
-//! every artifact it references, and the build pipeline live inside the
-//! System VM.
+//! Pure forwarders to the default location's agent, mirroring
+//! `snapshot.rs`: the catalog, every artifact it references, and the build
+//! pipeline live with the location — the host when it runs here (D2), the
+//! System VM otherwise.
 
 use arcbox_connect::sandbox_v1 as pb;
 use buffa_types::google::protobuf::Empty;
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult};
 
-use super::SharedRuntime;
-use super::sandbox_errors::SandboxCapabilityExt as _;
-use super::{ConnectRuntimeExt as _, ContextExt as _};
+use super::sandbox_route::SandboxRuntimes;
 use crate::ApiError;
 
 /// Template service implementation.
 pub struct TemplateServiceImpl {
-    runtime: SharedRuntime,
+    runtime: SandboxRuntimes,
 }
 
 impl TemplateServiceImpl {
     /// Creates a new template service with a deferred runtime.
     #[must_use]
-    pub(super) fn new(runtime: SharedRuntime) -> Self {
+    pub(super) fn new(runtime: SandboxRuntimes) -> Self {
         Self { runtime }
     }
 }
@@ -41,15 +40,10 @@ impl pb::TemplateService for TemplateServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::BuildTemplateRequest>,
     ) -> ServiceResult<pb::Template> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let name = req.name.clone();
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let (runtime, machine) = self.runtime.default_location_for_write(&ctx)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
         // must record a failed catalog mutation on its own (CORE-82).
         let resp = agent
@@ -67,15 +61,10 @@ impl pb::TemplateService for TemplateServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::PublishTemplateRequest>,
     ) -> ServiceResult<pb::Template> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let name = req.name.clone();
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let (runtime, machine) = self.runtime.default_location_for_write(&ctx)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
         // must record a failed catalog mutation on its own (CORE-82).
         let resp = agent
@@ -93,14 +82,9 @@ impl pb::TemplateService for TemplateServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::GetTemplateRequest>,
     ) -> ServiceResult<pb::Template> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let (runtime, machine) = self.runtime.default_location(&ctx)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_template_get(req)
             .await
@@ -113,14 +97,9 @@ impl pb::TemplateService for TemplateServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::ListTemplatesRequest>,
     ) -> ServiceResult<pb::ListTemplatesResponse> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let mut agent = self
-            .runtime
-            .ready()?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let (runtime, machine) = self.runtime.default_location(&ctx)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_template_list(req)
             .await
@@ -133,15 +112,10 @@ impl pb::TemplateService for TemplateServiceImpl {
         ctx: RequestContext,
         request: ServiceRequest<'_, pb::DeleteTemplateRequest>,
     ) -> ServiceResult<Empty> {
-        let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let reference = req.reference.clone();
-        let mut agent = self
-            .runtime
-            .ready_for_write(&machine)?
-            .sandbox_capable()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let (runtime, machine) = self.runtime.default_location_for_write(&ctx)?;
+        let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
             .sandbox_template_delete(req)
             .await
