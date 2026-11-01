@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::window::Windowed;
 use super::{SandboxService, convert};
 use crate::error::SandboxError;
-use crate::rpc::{ErrorResponse, MessageType, write_message};
+use crate::frame::{ErrorResponse, MessageType, write_message};
 
 impl SandboxService {
     /// Start an execution and return its identity.

@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use arcbox_agent::config::{AdapterConfig, GuestConfig};
-use arcbox_agent::error::SandboxError;
 use arcbox_agent::sandbox::SandboxService;
 use arcbox_computer_runtime::RuntimeConfig;
 use arcbox_computer_runtime::config::{ComputerConfig, DefaultVmConfig, GrpcConfig, NetworkConfig};
@@ -12,6 +11,7 @@ use arcbox_connect::sandbox_v1::{
     RemoveSandboxRequest, SandboxState, StartExecutionRequest, StopSandboxRequest,
     WaitExecutionRequest, exit_status,
 };
+use arcbox_sandbox_service::SandboxError;
 use buffa::Message;
 
 fn required_env(name: &str) -> String {
@@ -88,8 +88,8 @@ async fn sandbox_service_calls_sandbox_manager() {
         )
         .unwrap(),
     );
-    let service =
-        SandboxService::new(test_config(), dns).expect("failed to initialize sandbox service");
+    let service = arcbox_agent::sandbox::new_service(test_config(), dns)
+        .expect("failed to initialize sandbox service");
 
     // Empty template = the built-in busybox image.
     let create_req = CreateSandboxRequest {

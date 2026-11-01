@@ -6,6 +6,7 @@ on:
     paths:
       - "guest/arcbox-agent/**"
       - "computer/arcbox-computer-runtime/**"
+      - "computer/arcbox-sandbox-service/**"
       - "virt/arcbox-tap-net/**"
       - "virt/arcbox-vm-proto/**"
       - "virt/arcbox-vm-driver/**"
@@ -27,6 +28,7 @@ on:
     paths:
       - "guest/arcbox-agent/**"
       - "computer/arcbox-computer-runtime/**"
+      - "computer/arcbox-sandbox-service/**"
       - "virt/arcbox-tap-net/**"
       - "virt/arcbox-vm-proto/**"
       - "virt/arcbox-vm-driver/**"

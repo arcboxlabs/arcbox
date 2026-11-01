@@ -15,10 +15,10 @@ use arcbox_constants::wire::SANDBOX_STREAM_WINDOW;
 use buffa::Message as _;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::rpc::{MessageType, read_message, write_message};
+use crate::frame::{MessageType, read_message, write_message};
 
 /// A stream's connection, written within the host's window.
-pub(super) struct Windowed<'a, S> {
+pub struct Windowed<'a, S> {
     stream: &'a mut S,
     /// Encoded payload bytes the host still has room for.
     available: usize,
@@ -26,7 +26,7 @@ pub(super) struct Windowed<'a, S> {
 
 impl<'a, S: AsyncRead + AsyncWrite + Unpin> Windowed<'a, S> {
     /// Takes over `stream` for the rest of a streaming request.
-    pub(super) fn new(stream: &'a mut S) -> Self {
+    pub fn new(stream: &'a mut S) -> Self {
         Self {
             stream,
             available: SANDBOX_STREAM_WINDOW as usize,
@@ -37,7 +37,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> Windowed<'a, S> {
     /// waiting it reads the connection, where the only frame the host sends
     /// during a stream is returned window; anything else, or the host
     /// closing, ends the stream.
-    pub(super) async fn write(
+    pub async fn write(
         &mut self,
         msg_type: MessageType,
         trace_id: &str,

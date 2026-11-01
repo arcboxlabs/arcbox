@@ -55,6 +55,7 @@ arcbox-storage.workspace = true
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 h2 = "0.4.20"
 arcbox-transport.workspace = true
+arcbox-sandbox-service.workspace = true
 
 # vsock, the sandbox runtime, the VM-driver port it speaks, and the two
 # adapters this crate composes it over (the Firecracker driver and the TAP

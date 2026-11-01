@@ -61,13 +61,6 @@ mod metadata_migrate;
 #[cfg(target_os = "linux")]
 mod storage_probe;
 
-#[cfg(target_os = "linux")]
-mod create_key;
-#[cfg(target_os = "linux")]
-mod create_registry;
-#[cfg(target_os = "linux")]
-mod error;
-
 mod rpc;
 mod shutdown;
 
@@ -96,8 +89,6 @@ mod volume_icon;
 mod config;
 #[cfg(target_os = "linux")]
 mod sandbox;
-#[cfg(target_os = "linux")]
-mod sandbox_cleanup_watch;
 
 // Guest-side DNS server and Docker event-driven container registration.
 mod dns_server;

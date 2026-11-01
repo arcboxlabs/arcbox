@@ -18,7 +18,7 @@ const DEFAULT_PAGE_SIZE: u32 = 100;
 /// Hard cap on a single page.
 const MAX_PAGE_SIZE: u32 = 1000;
 
-pub(super) fn timestamp(dt: DateTime<Utc>) -> Timestamp {
+pub fn timestamp(dt: DateTime<Utc>) -> Timestamp {
     Timestamp {
         seconds: dt.timestamp(),
         // Sub-second nanos are < 2e9 even on leap seconds; i32 holds them.
@@ -27,13 +27,13 @@ pub(super) fn timestamp(dt: DateTime<Utc>) -> Timestamp {
     }
 }
 
-pub(super) fn timestamp_from_rfc3339(s: &str) -> Option<Timestamp> {
+pub fn timestamp_from_rfc3339(s: &str) -> Option<Timestamp> {
     DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| timestamp(dt.with_timezone(&Utc)))
 }
 
-pub(super) fn timestamp_from_unix_nanos(ns: i64) -> Timestamp {
+pub fn timestamp_from_unix_nanos(ns: i64) -> Timestamp {
     Timestamp {
         seconds: ns.div_euclid(1_000_000_000),
         // rem_euclid of 1e9 is always in [0, 1e9), which fits i32.
@@ -42,7 +42,7 @@ pub(super) fn timestamp_from_unix_nanos(ns: i64) -> Timestamp {
     }
 }
 
-pub(super) fn exit_status_to_proto(status: ExitStatus) -> sandbox_v1::ExitStatus {
+pub fn exit_status_to_proto(status: ExitStatus) -> sandbox_v1::ExitStatus {
     let status = match status {
         ExitStatus::Code(code) => sandbox_v1::exit_status::Status::Code(code),
         ExitStatus::Signaled(signal) => sandbox_v1::exit_status::Status::Signal(signal),
@@ -53,7 +53,7 @@ pub(super) fn exit_status_to_proto(status: ExitStatus) -> sandbox_v1::ExitStatus
     }
 }
 
-pub(super) fn stdin_to_proto(state: StdinState) -> sandbox_v1::StdinStatus {
+pub fn stdin_to_proto(state: StdinState) -> sandbox_v1::StdinStatus {
     sandbox_v1::StdinStatus {
         bytes_written: state.bytes_written,
         closed: state.closed,
@@ -61,7 +61,7 @@ pub(super) fn stdin_to_proto(state: StdinState) -> sandbox_v1::StdinStatus {
     }
 }
 
-pub(super) fn execution_to_proto(snap: &ExecutionSnapshot) -> sandbox_v1::Execution {
+pub fn execution_to_proto(snap: &ExecutionSnapshot) -> sandbox_v1::Execution {
     let state = if snap.is_running() {
         sandbox_v1::ExecutionState::Running
     } else {
@@ -94,7 +94,7 @@ fn file_kind_to_proto(kind: &str) -> sandbox_v1::FileKind {
     }
 }
 
-pub(super) fn file_stat_to_proto(dto: &file_proto::FileStatDto) -> sandbox_v1::FileStat {
+pub fn file_stat_to_proto(dto: &file_proto::FileStatDto) -> sandbox_v1::FileStat {
     sandbox_v1::FileStat {
         name: dto.name.clone(),
         kind: file_kind_to_proto(&dto.kind).into(),
@@ -114,7 +114,7 @@ pub(super) fn file_stat_to_proto(dto: &file_proto::FileStatDto) -> sandbox_v1::F
     }
 }
 
-pub(super) fn fs_event_to_proto(dto: file_proto::FsEventDto) -> sandbox_v1::FsEvent {
+pub fn fs_event_to_proto(dto: file_proto::FsEventDto) -> sandbox_v1::FsEvent {
     let kind = match dto.kind.as_str() {
         file_proto::EVENT_CREATED => sandbox_v1::FsEventKind::Created,
         file_proto::EVENT_MODIFIED => sandbox_v1::FsEventKind::Modified,
@@ -132,7 +132,7 @@ pub(super) fn fs_event_to_proto(dto: file_proto::FsEventDto) -> sandbox_v1::FsEv
 
 /// Map a vm-level output channel to the wire channel. TTY executions carry
 /// the merged PTY stream on the vm-level stdout channel.
-pub(super) fn channel_to_proto(channel: ExecutionChannel, tty: bool) -> sandbox_v1::StdioChannel {
+pub fn channel_to_proto(channel: ExecutionChannel, tty: bool) -> sandbox_v1::StdioChannel {
     match (channel, tty) {
         (ExecutionChannel::Stdout, true) => sandbox_v1::StdioChannel::Pty,
         (ExecutionChannel::Stdout, false) => sandbox_v1::StdioChannel::Stdout,
@@ -140,7 +140,7 @@ pub(super) fn channel_to_proto(channel: ExecutionChannel, tty: bool) -> sandbox_
     }
 }
 
-pub(super) fn state_to_proto(state: ComputerState) -> sandbox_v1::SandboxState {
+pub fn state_to_proto(state: ComputerState) -> sandbox_v1::SandboxState {
     match state {
         ComputerState::Starting => sandbox_v1::SandboxState::Starting,
         ComputerState::Ready => sandbox_v1::SandboxState::Ready,
@@ -155,7 +155,7 @@ pub(super) fn state_to_proto(state: ComputerState) -> sandbox_v1::SandboxState {
 
 /// Map a wire state filter onto the manager's string filter
 /// (`UNSPECIFIED` = no filter).
-pub(super) fn state_filter(state: sandbox_v1::SandboxState) -> Option<&'static str> {
+pub fn state_filter(state: sandbox_v1::SandboxState) -> Option<&'static str> {
     match state {
         sandbox_v1::SandboxState::Unspecified => None,
         sandbox_v1::SandboxState::Starting => Some("starting"),
@@ -170,7 +170,7 @@ pub(super) fn state_filter(state: sandbox_v1::SandboxState) -> Option<&'static s
 }
 
 /// Map a manager event action onto the wire event kind.
-pub(super) fn event_kind(action: &str) -> sandbox_v1::SandboxEventKind {
+pub fn event_kind(action: &str) -> sandbox_v1::SandboxEventKind {
     match action {
         "created" => sandbox_v1::SandboxEventKind::Created,
         "ready" => sandbox_v1::SandboxEventKind::Ready,
@@ -187,7 +187,7 @@ pub(super) fn event_kind(action: &str) -> sandbox_v1::SandboxEventKind {
     }
 }
 
-pub(super) fn vm_event_to_proto(e: ComputerEvent) -> sandbox_v1::SandboxEvent {
+pub fn vm_event_to_proto(e: ComputerEvent) -> sandbox_v1::SandboxEvent {
     sandbox_v1::SandboxEvent {
         sandbox_id: e.sandbox_id,
         kind: event_kind(&e.action).into(),
@@ -198,7 +198,7 @@ pub(super) fn vm_event_to_proto(e: ComputerEvent) -> sandbox_v1::SandboxEvent {
     }
 }
 
-pub(super) fn info_to_proto(info: ComputerInfo) -> sandbox_v1::SandboxInfo {
+pub fn info_to_proto(info: ComputerInfo) -> sandbox_v1::SandboxInfo {
     // The host TAP name is deliberately not exposed (CORE-54): it is a host
     // interface a tenant can neither see nor use.
     let network = info.network.map(|n| sandbox_v1::SandboxNetwork {
@@ -232,14 +232,14 @@ pub(super) fn info_to_proto(info: ComputerInfo) -> sandbox_v1::SandboxInfo {
 }
 
 /// Map the manager's effective idle policy onto the wire enum.
-pub(super) fn idle_action_to_proto(action: IdleAction) -> sandbox_v1::IdleAction {
+pub fn idle_action_to_proto(action: IdleAction) -> sandbox_v1::IdleAction {
     match action {
         IdleAction::Kill => sandbox_v1::IdleAction::Kill,
         IdleAction::Pause => sandbox_v1::IdleAction::Pause,
     }
 }
 
-pub(super) fn summary_to_proto(s: ComputerSummary) -> sandbox_v1::SandboxSummary {
+pub fn summary_to_proto(s: ComputerSummary) -> sandbox_v1::SandboxSummary {
     sandbox_v1::SandboxSummary {
         id: s.id,
         state: state_to_proto(s.state).into(),
@@ -255,7 +255,7 @@ pub(super) fn summary_to_proto(s: ComputerSummary) -> sandbox_v1::SandboxSummary
 // Snapshots are identified by id on the wire; their on-disk directory is a
 // host path and stays inside the guest (CORE-54).
 
-pub(super) fn checkpoint_to_proto(info: CheckpointInfo) -> sandbox_v1::CheckpointResponse {
+pub fn checkpoint_to_proto(info: CheckpointInfo) -> sandbox_v1::CheckpointResponse {
     sandbox_v1::CheckpointResponse {
         snapshot_id: info.snapshot_id,
         created_at: timestamp_from_rfc3339(&info.created_at).into(),
@@ -263,7 +263,7 @@ pub(super) fn checkpoint_to_proto(info: CheckpointInfo) -> sandbox_v1::Checkpoin
     }
 }
 
-pub(super) fn checkpoint_summary_to_proto(s: CheckpointSummary) -> sandbox_v1::SnapshotSummary {
+pub fn checkpoint_summary_to_proto(s: CheckpointSummary) -> sandbox_v1::SnapshotSummary {
     sandbox_v1::SnapshotSummary {
         id: s.id,
         sandbox_id: s.sandbox_id,
@@ -277,7 +277,7 @@ pub(super) fn checkpoint_summary_to_proto(s: CheckpointSummary) -> sandbox_v1::S
 // Template catalog entries cross the wire as `Template` messages; the
 // guest-absolute rootfs path is the documented `rootfs_ref` cache reference.
 
-pub(super) fn template_to_proto(name: &str, entry: &TemplateEntry) -> sandbox_v1::Template {
+pub fn template_to_proto(name: &str, entry: &TemplateEntry) -> sandbox_v1::Template {
     sandbox_v1::Template {
         name: name.to_owned(),
         version: entry.version.clone(),
@@ -302,7 +302,7 @@ const MAX_READY_PROBE_TIMEOUT_SECS: u32 = 600;
 
 /// Decode + validate `TemplateDefaults` from a Build request. Validation
 /// happens once here, at the boundary: a stored entry is trusted downstream.
-pub(super) fn template_defaults_from_proto(
+pub fn template_defaults_from_proto(
     pb: &sandbox_v1::TemplateDefaults,
 ) -> Result<TemplateDefaultsSpec, crate::error::SandboxError> {
     use crate::error::SandboxError;
@@ -419,7 +419,7 @@ fn ready_probe_to_proto(spec: &ReadyProbeSpec) -> sandbox_v1::ReadyProbe {
 /// The continuation token is the last id of the previous page; entries with
 /// ids at or below it are skipped, so a concurrent insert or delete shifts
 /// nothing already returned.
-pub(super) fn paginate<T>(
+pub fn paginate<T>(
     mut items: Vec<T>,
     id_of: impl Fn(&T) -> &str,
     page_size: u32,

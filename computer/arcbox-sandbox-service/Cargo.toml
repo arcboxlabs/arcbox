@@ -1,0 +1,39 @@
+[package]
+name              = "arcbox-sandbox-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description       = "The Sandbox API over a ComputerManager: sandbox_v1 messages in, ComputerManager calls out, served on the agent frame protocol. Composed by the System VM's agent for the nested location and by the daemon for the host location."
+
+[dependencies]
+anyhow.workspace = true
+arcbox-computer-runtime.workspace = true
+arcbox-connect.workspace = true
+arcbox-constants.workspace = true
+arcbox-dns.workspace = true
+arcbox-snapshot.workspace = true
+arcbox-transport.workspace = true
+async-trait.workspace = true
+buffa = "0.9.1"
+buffa-types = "0.9.1"
+bytes.workspace = true
+chrono.workspace = true
+http-body-util = "0.1.4"
+hyper = { workspace = true, features = ["http1", "client"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+tar = "0.4"
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

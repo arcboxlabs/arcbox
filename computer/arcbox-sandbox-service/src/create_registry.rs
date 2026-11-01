@@ -43,7 +43,7 @@ pub struct SlotGuard {
 
 impl SlotGuard {
     /// Publish the response before waking matching retries.
-    pub(crate) fn commit(mut self, response: &CreateSandboxResponse) {
+    pub fn commit(mut self, response: &CreateSandboxResponse) {
         let mut entries = self.registry.entries.lock().unwrap();
         let Some(Entry::Pending { request, done }) = entries.remove(&self.id) else {
             unreachable!("a create slot stays pending until commit or drop");
@@ -75,10 +75,7 @@ impl Drop for SlotGuard {
 
 impl CreateRegistry {
     /// Reserve an ID, replay its response, or wait for its matching request.
-    pub(crate) fn reserve(
-        self: &Arc<Self>,
-        request: &CreateSandboxRequest,
-    ) -> Result<Reserve, Collision> {
+    pub fn reserve(self: &Arc<Self>, request: &CreateSandboxRequest) -> Result<Reserve, Collision> {
         debug_assert_ne!(request.id, "");
         let mut entries = self.entries.lock().unwrap();
         match entries.get(&request.id) {
@@ -112,7 +109,7 @@ impl CreateRegistry {
     }
 
     /// Forget a completed response when its sandbox is no longer live.
-    pub(crate) fn clear_completed_if(&self, id: &str, should_clear: impl FnOnce() -> bool) {
+    pub fn clear_completed_if(&self, id: &str, should_clear: impl FnOnce() -> bool) {
         let mut entries = self.entries.lock().unwrap();
         if matches!(entries.get(id), Some(Entry::Completed { .. })) && should_clear() {
             entries.remove(id);

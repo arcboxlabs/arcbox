@@ -11,9 +11,9 @@ use tokio::sync::mpsc;
 
 use super::window::Windowed;
 use super::{SandboxService, convert};
+use crate::cleanup_watch::unseen_rescan_tickets;
 use crate::error::SandboxError;
-use crate::rpc::{ErrorResponse, MessageType, write_message};
-use crate::sandbox_cleanup_watch::unseen_rescan_tickets;
+use crate::frame::{ErrorResponse, MessageType, write_message};
 
 /// Events buffered between the filter task and one subscriber.
 const EVENT_QUEUE_CAPACITY: usize = 64;

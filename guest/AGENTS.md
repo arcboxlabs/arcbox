@@ -52,7 +52,7 @@ non-obvious invariants and failure signatures.
   not the shortcut — it would pull in `sandbox_manager_e2e` and
   `sandbox_service_manager`, which need root, KVM and Firecracker and are
   already driven by the privileged jobs below. `port_forward_cleanup`
-  re-includes `agent/linux/port_forward.rs` by `#[path]`. The Linux bin target
+  re-includes `sandbox/port_forward.rs` by `#[path]`. The Linux bin target
   already runs those tests, so the extra target would duplicate coverage.
 - **CI still never lints the agent — you must, locally.** No job runs clippy
   on it: the macOS gate excludes it, the Linux `Unit tests` job deliberately

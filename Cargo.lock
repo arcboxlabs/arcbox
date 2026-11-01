@@ -194,6 +194,7 @@ dependencies = [
  "arcbox-local-ca",
  "arcbox-logging",
  "arcbox-pty",
+ "arcbox-sandbox-service",
  "arcbox-snapshot",
  "arcbox-storage",
  "arcbox-tap-net",
@@ -1181,6 +1182,34 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "arcbox-sandbox-service"
+version = "0.10.5"
+dependencies = [
+ "anyhow",
+ "arcbox-computer-runtime",
+ "arcbox-connect",
+ "arcbox-constants",
+ "arcbox-dns",
+ "arcbox-snapshot",
+ "arcbox-transport",
+ "async-trait",
+ "buffa",
+ "buffa-types",
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

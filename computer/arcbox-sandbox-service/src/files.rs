@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::window::Windowed;
 use super::{SandboxService, convert};
 use crate::error::SandboxError;
-use crate::rpc::{ErrorResponse, MessageType, read_message, write_message};
+use crate::frame::{ErrorResponse, MessageType, read_message, write_message};
 
 /// How often an idle watch stream emits a keepalive frame. Below the
 /// daemon's own 15 s client-facing keepalive so the host↔guest hop never

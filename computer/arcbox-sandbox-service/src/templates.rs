@@ -17,7 +17,7 @@ use arcbox_computer_runtime::template_catalog::{
 use arcbox_connect::sandbox_v1;
 use buffa::Message;
 
-use super::{SandboxService, convert, template};
+use super::{ImageOrigin, SandboxService, convert};
 use crate::error::SandboxError;
 
 /// Operation-lock key for a template name: template builds/publishes/deletes
@@ -28,7 +28,7 @@ fn operation_key(name: &str) -> String {
 }
 
 /// What `CreateSandboxRequest.template` resolved to.
-pub(super) enum TemplateSource {
+pub enum TemplateSource {
     /// Built-in busybox + `vm-agent` image.
     Default,
     /// `docker:<ref>` — exported and converted at create time.
@@ -40,7 +40,7 @@ pub(super) enum TemplateSource {
 
 /// Reject the contradictory override combination the proto calls out:
 /// `no_default_cmd` claims "explicitly no command" while `cmd` supplies one.
-pub(super) fn validate_template_overrides(
+pub fn validate_template_overrides(
     request: &sandbox_v1::CreateSandboxRequest,
 ) -> Result<(), SandboxError> {
     if request.no_default_cmd && !request.cmd.is_empty() {
@@ -59,7 +59,7 @@ pub(super) fn validate_template_overrides(
 /// request winning unless `no_default_env` discards the template's map.
 /// `exposed_ports`/`ready_probe` have no per-create counterpart and stay on
 /// the template entry. Runs before the create key is computed.
-pub(super) fn merge_template_defaults(
+pub fn merge_template_defaults(
     request: &mut sandbox_v1::CreateSandboxRequest,
     defaults: &TemplateDefaultsSpec,
 ) {
@@ -127,8 +127,15 @@ impl SandboxService {
         let labels: HashMap<String, String> = req.labels.clone().into_iter().collect();
         match source {
             Source::DockerRef(image) => {
-                self.build_template_from_docker(&req.name, &image, defaults, labels, req.prewarm)
-                    .await
+                self.build_template_from_docker(
+                    &req.name,
+                    &image,
+                    ImageOrigin::Reference,
+                    defaults,
+                    labels,
+                    req.prewarm,
+                )
+                .await
             }
             Source::Dockerfile(dockerfile) => {
                 self.build_template_from_dockerfile(
@@ -242,7 +249,7 @@ impl SandboxService {
         }
     }
 
-    /// Build inline Dockerfile content in the guest's dockerd, then proceed
+    /// Build inline Dockerfile content in the composer's dockerd, then proceed
     /// exactly as a `docker_ref` build of the resulting image.
     ///
     /// The tag is content-addressed (`arcbox-template-build:<sha256[..16]>`
@@ -264,23 +271,28 @@ impl SandboxService {
             ));
         }
         let tag = dockerfile_tag(dockerfile.as_bytes());
-        if template::inspect_image(&tag).await.is_ok() {
-            tracing::info!(template = name, %tag, "reusing previously built dockerfile image");
-        } else {
-            template::build_image(dockerfile.as_bytes(), &tag)
-                .await
-                .map_err(|e| SandboxError::Internal(format!("template build {name}: {e:#}")))?;
-        }
-        self.build_template_from_docker(name, &tag, defaults, labels, prewarm)
+        self.hooks
+            .build_image(dockerfile.as_bytes(), &tag)
             .await
+            .map_err(|e| SandboxError::Internal(format!("template build {name}: {e:#}")))?;
+        self.build_template_from_docker(
+            name,
+            &tag,
+            ImageOrigin::LocalBuild,
+            defaults,
+            labels,
+            prewarm,
+        )
+        .await
     }
 
-    /// Export `image` from the guest's dockerd, convert it to a cached ext4,
-    /// optionally boot-and-checkpoint it (prewarm), and register the draft.
+    /// Convert `image` to a cached ext4 through the composer, optionally
+    /// boot-and-checkpoint it (prewarm), and register the draft.
     async fn build_template_from_docker(
         &self,
         name: &str,
         image: &str,
+        origin: ImageOrigin,
         defaults: TemplateDefaultsSpec,
         labels: HashMap<String, String>,
         prewarm: bool,
@@ -290,20 +302,17 @@ impl SandboxService {
                 "docker_ref must name an image".into(),
             ));
         }
-        let layout = template::export_docker_image(image)
-            .await
-            .map_err(|e| SandboxError::Internal(format!("template build {image}: {e:#}")))?;
         // Snapshot-referenced images must survive the conversion's cache
-        // sweep — a restore cannot rebuild its dm-snapshot origin.
+        // sweep — a restore cannot rebuild its copy-on-write origin.
         let pinned = self
             .manager
             .pinned_rootfs_paths()
             .map_err(SandboxError::from)?;
         let rootfs = self
-            .rootfs
-            .convert_layer_to_rootfs(&layout, &pinned)
+            .hooks
+            .image_rootfs(image, origin, &self.rootfs, &pinned)
             .await
-            .map_err(|e| SandboxError::Internal(format!("template build {image}: {e}")))?;
+            .map_err(|e| SandboxError::Internal(format!("template build {image}: {e:#}")))?;
         // The cache file stem (`rootfs-<layer>-<agent>`) is content-derived —
         // layer diff IDs plus the injected vm-agent — which makes it the
         // digest's source identity: stable across rebuilds, changed by
