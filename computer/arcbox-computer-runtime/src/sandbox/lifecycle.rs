@@ -202,9 +202,14 @@ impl ComputerManager {
         // the boot task publishes the snapshot once the guest is Ready.
         let mut warm_publish = None;
         if matches!(warm_policy, WarmPolicy::Auto)
-            && super::warm::warm_eligible(&self.config, &spec, caller_supplied_boot)
+            && super::warm::warm_eligible(
+                &self.config,
+                &spec,
+                caller_supplied_boot,
+                super::relocatable_checkpoints(&self.config, &*self.services.driver),
+            )
         {
-            match super::warm::derive_warm_key(&spec) {
+            match super::warm::derive_warm_key(&spec, self.services.placement.os_build.as_deref()) {
                 Ok(key) => match super::warm::find_warm_snapshot(&self.snapshots, &key) {
                     Ok(Some(snapshot_id)) => {
                         self.warm.touch(&key);

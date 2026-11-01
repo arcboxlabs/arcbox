@@ -41,11 +41,15 @@ fn fingerprint(path: &Path) -> std::io::Result<FileFingerprint> {
 
 /// Derive the warm key for an effective (defaults-applied) create spec,
 /// fingerprinting the kernel and rootfs files on disk.
-pub(super) fn derive_warm_key(spec: &ComputerSpec) -> std::io::Result<WarmKey> {
+pub(super) fn derive_warm_key(
+    spec: &ComputerSpec,
+    os_build: Option<&str>,
+) -> std::io::Result<WarmKey> {
     Ok(warm_key(
         spec,
         fingerprint(Path::new(&spec.kernel))?,
         fingerprint(Path::new(&spec.rootfs))?,
+        os_build,
     ))
 }
 
@@ -253,7 +257,7 @@ mod tests {
     }
 
     fn some_key() -> WarmKey {
-        warm_key(&base_spec(), fingerprint_of(7), fingerprint_of(42))
+        warm_key(&base_spec(), fingerprint_of(7), fingerprint_of(42), None)
     }
 
     fn base_spec() -> ComputerSpec {
@@ -279,8 +283,12 @@ mod tests {
         spec.kernel = kernel.to_str().unwrap().to_owned();
         spec.rootfs = rootfs.to_str().unwrap().to_owned();
 
-        let first = derive_warm_key(&spec).unwrap();
-        assert_eq!(derive_warm_key(&spec).unwrap(), first, "stat is stable");
+        let first = derive_warm_key(&spec, None).unwrap();
+        assert_eq!(
+            derive_warm_key(&spec, None).unwrap(),
+            first,
+            "stat is stable"
+        );
 
         // The rebuild discipline for both inputs: write a sibling, then
         // rename over the fixed path — same path, new inode. The kernel
@@ -289,13 +297,13 @@ mod tests {
         let staging = dir.path().join(".rootfs.tmp");
         std::fs::write(&staging, b"template v2").unwrap();
         std::fs::rename(&staging, &rootfs).unwrap();
-        let second = derive_warm_key(&spec).unwrap();
+        let second = derive_warm_key(&spec, None).unwrap();
         assert_ne!(second, first);
 
         let staging = dir.path().join(".vmlinux.tmp");
         std::fs::write(&staging, b"kernel v2").unwrap();
         std::fs::rename(&staging, &kernel).unwrap();
-        assert_ne!(derive_warm_key(&spec).unwrap(), second);
+        assert_ne!(derive_warm_key(&spec, None).unwrap(), second);
     }
 
     fn publish_labeled(catalog: &SnapshotCatalog, vm_id: &str, key: Option<&str>) -> String {

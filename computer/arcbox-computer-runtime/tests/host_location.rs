@@ -367,3 +367,22 @@ async fn the_nested_location_reports_what_it_always_did() {
         FakeDriver::new().capabilities()
     );
 }
+
+/// Warm create runs on the host without a jailer: the host drivers read
+/// host paths, so their checkpoints restore into a fresh VM. The second
+/// create of a shape restores the snapshot the first one published.
+#[tokio::test]
+async fn an_hv_warm_create_restores_the_published_snapshot() {
+    let fixture = Setup::host(hv_driver(), Placement::host(BUILD))
+        .warm()
+        .build()
+        .await;
+    fixture.ready("first").await;
+    assert!(fixture.driver().restored_vms().is_empty());
+    let second = fixture.ready("second").await;
+    assert_eq!(
+        fixture.driver().restored_vms(),
+        vec![VmId::new(&second).unwrap()],
+        "the second create of the same shape restores instead of booting"
+    );
+}

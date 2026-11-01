@@ -27,7 +27,8 @@ const MAX_WARM_KEYS: usize = 2;
 pub(in crate::sandbox) const WARM_KEY_LABEL: &str = "arcbox.warm_key";
 
 /// Identity of one warm-cacheable boot shape: hex SHA-256 over the resolved
-/// boot recipe, the VM geometry, and the rootfs content fingerprint.
+/// boot recipe, the VM geometry, the rootfs content fingerprint and, on the
+/// host, the macOS build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::sandbox) struct WarmKey(String);
 
@@ -55,14 +56,32 @@ pub(in crate::sandbox) struct FileFingerprint {
     pub(in crate::sandbox) size: u64,
 }
 
-/// The warm key for an effective (defaults-applied) create spec and the
-/// fingerprints of the boot inputs it resolves to.
+/// The warm key for an effective (defaults-applied) create spec, the
+/// fingerprints of the boot inputs it resolves to, and the macOS build the
+/// location binds checkpoints to (`Placement::os_build`).
+///
+/// A host checkpoint restores only on the build that wrote it (D6), so a
+/// snapshot cached before a macOS update is dead weight afterwards. Keying
+/// by the build makes the update a plain cache miss: the new build
+/// publishes its own entry and LRU retires the old one, instead of every
+/// warm create first failing a restore against the stale snapshot.
 pub(in crate::sandbox) fn warm_key(
     spec: &ComputerSpec,
     kernel: FileFingerprint,
     rootfs: FileFingerprint,
+    os_build: Option<&str>,
 ) -> WarmKey {
     let mut hasher = Sha256::new();
+    // Tagged so `None` and every `Some` hash apart, and a build string can
+    // never shift the fields that follow.
+    match os_build {
+        None => hasher.update([0u8]),
+        Some(build) => {
+            hasher.update([1u8]);
+            hasher.update(build.as_bytes());
+            hasher.update([0u8]);
+        }
+    }
     // vcpus and memory are part of the key on purpose: a memory snapshot
     // restores only onto identical geometry.
     for text in [&spec.kernel, &spec.rootfs, &spec.boot_args] {
@@ -90,17 +109,19 @@ pub(in crate::sandbox) fn warm_key(
 ///
 /// `caller_supplied_boot` is captured before the defaults fill: a caller
 /// pinning its own kernel or cmdline opted out of the template shape, and
-/// anything doubtful cold-boots. Restore also requires jailer isolation and
-/// a networked spec (the restore path re-addresses via `network_override`,
+/// anything doubtful cold-boots. Restore also requires checkpoints that
+/// restore into a fresh VM (`relocatable`: the jailer under Firecracker,
+/// always on the host drivers) and a networked spec (the restore path re-addresses via `network_override`,
 /// which net-invariant snapshots make free); an explicit `ip=` would bake a
 /// caller-chosen identity into the snapshot, so it disqualifies too.
 pub(in crate::sandbox) fn warm_eligible(
     config: &RuntimeConfig,
     spec: &ComputerSpec,
     caller_supplied_boot: bool,
+    relocatable: bool,
 ) -> bool {
     config.firecracker.warm_create
-        && config.firecracker.jailer.is_some()
+        && relocatable
         && !caller_supplied_boot
         && spec.network.mode == "tap"
         && !spec.boot_args.contains("ip=")
@@ -211,7 +232,6 @@ impl WarmCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::JailerConfig;
     use crate::sandbox::{ComputerMountSpec, ComputerNetworkSpec};
 
     fn kernel_fingerprint() -> FileFingerprint {
@@ -247,24 +267,14 @@ mod tests {
     }
 
     fn warm_config() -> RuntimeConfig {
-        let mut config = RuntimeConfig::default();
-        config.firecracker.jailer = Some(JailerConfig {
-            uid: 0,
-            gid: 0,
-            chroot_base_dir: None,
-            netns: None,
-            new_pid_ns: false,
-            cgroup_version: None,
-            parent_cgroup: None,
-        });
-        config
+        RuntimeConfig::default()
     }
 
     #[test]
     fn key_is_stable_for_an_identical_shape() {
         assert_eq!(
-            warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint()),
-            warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint())
+            warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint(), None),
+            warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint(), None)
         );
     }
 
@@ -273,7 +283,7 @@ mod tests {
 
     #[test]
     fn key_tracks_every_boot_recipe_and_geometry_field() {
-        let base = warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint());
+        let base = warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint(), None);
         let variants: Vec<SpecEdit> = vec![
             Box::new(|s| s.kernel = "/run/kernel/vmlinux-new".into()),
             Box::new(|s| s.rootfs = "/data/rootfs-other.ext4".into()),
@@ -285,7 +295,7 @@ mod tests {
             let mut spec = base_spec();
             mutate(&mut spec);
             assert_ne!(
-                warm_key(&spec, kernel_fingerprint(), base_fingerprint()),
+                warm_key(&spec, kernel_fingerprint(), base_fingerprint(), None),
                 base,
                 "{spec:?}"
             );
@@ -297,14 +307,32 @@ mod tests {
         spec.cmd = vec!["sleep".into()];
         spec.ttl_seconds = 60;
         assert_eq!(
-            warm_key(&spec, kernel_fingerprint(), base_fingerprint()),
+            warm_key(&spec, kernel_fingerprint(), base_fingerprint(), None),
             base
         );
     }
 
+    /// A macOS update must miss: the old build's snapshot cannot restore
+    /// here (D6). The nested location, with no build, keeps its own key.
+    #[test]
+    fn key_tracks_the_macos_build() {
+        let key = |build| {
+            warm_key(
+                &base_spec(),
+                kernel_fingerprint(),
+                base_fingerprint(),
+                build,
+            )
+        };
+        assert_ne!(key(Some("25E5207k")), key(Some("25F71")));
+        assert_ne!(key(Some("25E5207k")), key(None));
+        assert_ne!(key(Some("")), key(None), "an empty build is still a build");
+        assert_eq!(key(Some("25E5207k")), key(Some("25E5207k")));
+    }
+
     #[test]
     fn key_tracks_every_fingerprint_field_of_both_files() {
-        let base = warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint());
+        let base = warm_key(&base_spec(), kernel_fingerprint(), base_fingerprint(), None);
         let variants: Vec<FingerprintEdit> = vec![
             Box::new(|f| f.dev += 1),
             Box::new(|f| f.ino += 1),
@@ -316,7 +344,7 @@ mod tests {
             let mut fingerprint = base_fingerprint();
             mutate(&mut fingerprint);
             assert_ne!(
-                warm_key(&base_spec(), kernel_fingerprint(), fingerprint),
+                warm_key(&base_spec(), kernel_fingerprint(), fingerprint, None),
                 base,
                 "rootfs {fingerprint:?}"
             );
@@ -325,7 +353,7 @@ mod tests {
             let mut fingerprint = kernel_fingerprint();
             mutate(&mut fingerprint);
             assert_ne!(
-                warm_key(&base_spec(), fingerprint, base_fingerprint()),
+                warm_key(&base_spec(), fingerprint, base_fingerprint(), None),
                 base,
                 "kernel {fingerprint:?}"
             );
@@ -333,7 +361,7 @@ mod tests {
         // Swapping the two fingerprints must not collide: their positions
         // in the digest are what tells them apart.
         assert_ne!(
-            warm_key(&base_spec(), base_fingerprint(), kernel_fingerprint()),
+            warm_key(&base_spec(), base_fingerprint(), kernel_fingerprint(), None),
             base
         );
     }
@@ -341,31 +369,27 @@ mod tests {
     #[test]
     fn eligibility_requires_the_template_shape() {
         let config = warm_config();
-        assert!(warm_eligible(&config, &base_spec(), false));
+        assert!(warm_eligible(&config, &base_spec(), false, true));
 
         // A caller-pinned boot recipe opts out even when the effective spec
         // looks like the defaults.
-        assert!(!warm_eligible(&config, &base_spec(), true));
+        assert!(!warm_eligible(&config, &base_spec(), true, true));
 
         let mut no_warm = warm_config();
         no_warm.firecracker.warm_create = false;
-        assert!(!warm_eligible(&no_warm, &base_spec(), false));
+        assert!(!warm_eligible(&no_warm, &base_spec(), false, true));
 
         // Restore needs jailer isolation; direct mode must never checkpoint
         // a snapshot it cannot restore.
-        assert!(!warm_eligible(
-            &RuntimeConfig::default(),
-            &base_spec(),
-            false
-        ));
+        assert!(!warm_eligible(&config, &base_spec(), false, false));
 
         let mut no_net = base_spec();
         no_net.network.mode = "none".into();
-        assert!(!warm_eligible(&config, &no_net, false));
+        assert!(!warm_eligible(&config, &no_net, false, true));
 
         let mut explicit_ip = base_spec();
         explicit_ip.boot_args.push_str(" ip=10.0.0.9::10.0.0.1");
-        assert!(!warm_eligible(&config, &explicit_ip, false));
+        assert!(!warm_eligible(&config, &explicit_ip, false, true));
 
         let mut mounted = base_spec();
         mounted.mounts.push(ComputerMountSpec {
@@ -373,11 +397,11 @@ mod tests {
             target: "/dst".into(),
             readonly: true,
         });
-        assert!(!warm_eligible(&config, &mounted, false));
+        assert!(!warm_eligible(&config, &mounted, false, true));
 
         let mut ssh = base_spec();
         ssh.ssh_public_key = Some("ssh-ed25519 AAAA".into());
-        assert!(!warm_eligible(&config, &ssh, false));
+        assert!(!warm_eligible(&config, &ssh, false, true));
     }
 
     #[test]
