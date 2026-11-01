@@ -20,6 +20,8 @@ use crate::pool::Pool;
 use crate::port_forward::InboundForward;
 
 mod reconcile;
+#[cfg(test)]
+mod tests;
 
 /// The device name every guest sees its one NIC under.
 pub const NIC_ID: &str = "eth0";
