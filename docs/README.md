@@ -87,6 +87,7 @@ from memory. Every new file is added to the index below.
 
 ### Plans
 
+- [Host sandboxes v1](plans/host-sandboxes-v1.md) (active, 2026-11-01)
 - [VirtIO improvements](plans/virtio-improvements.md) (historical, 2026-04)
 
 ### Experiments
