@@ -16,6 +16,7 @@ mod link_mss;
 mod ownership;
 mod primary_cancel;
 mod read_batch;
+mod retransmit_frames;
 mod upload_backpressure;
 mod upload_batch;
 mod upload_errors;

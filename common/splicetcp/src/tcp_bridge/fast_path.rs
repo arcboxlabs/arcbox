@@ -311,7 +311,7 @@ impl TcpBridge {
         let dead_flow_timeout = self.dead_flow_timeout;
         let read_buf = &mut self.fast_path_read_buf;
         let read_cap = if ctx.large_frames {
-            32 * 1024
+            super::LARGE_FRAME_MAX_PAYLOAD
         } else {
             read_buf.len()
         };

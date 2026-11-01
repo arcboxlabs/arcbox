@@ -112,7 +112,8 @@ the caller must keep polling while fast-path connections are active.
 Each poll reads at most once per connection, up to 128 KiB within the guest's
 available receive window. The bridge segments these bytes by the peer MSS and
 configured MTU. Large-frame mode retains a 32 KiB read limit so each read fits
-one IPv4 frame when the peer accepts GSO segments. IPv6 downloads always use normal segmentation with 20 fewer payload bytes than the IPv4 link budget and the peer MSS as an upper bound.
+one IPv4 frame when the peer accepts GSO segments; retransmissions split the
+in-flight range into frames of the same 32 KiB bound. IPv6 downloads always use normal segmentation with 20 fewer payload bytes than the IPv4 link budget and the peer MSS as an upper bound.
 
 `TcpBridge::set_fast_path_mtu` also sets the MSS advertised in new guest-facing
 handshakes. An MTU of 4000 advertises MSS 3960 for IPv4 and 3940 for IPv6, so uploads can use the link's full

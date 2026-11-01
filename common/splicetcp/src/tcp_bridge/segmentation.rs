@@ -1,6 +1,6 @@
 //! Build family-aware download and retransmission frames within the link MTU.
 
-use super::{FastPathConn, GSO_SEGMENT_MSS, TCP_MIN_MSS};
+use super::{FastPathConn, GSO_SEGMENT_MSS, LARGE_FRAME_MAX_PAYLOAD, TCP_MIN_MSS};
 use crate::ethernet::ETH_HEADER_LEN;
 use std::net::IpAddr;
 
@@ -14,11 +14,13 @@ pub(super) struct FrameCtx {
 }
 
 /// Builds guest-bound TCP data frames for `data` starting at `seq_start`:
-/// one IPv4 GSO-style frame when enabled and the peer accepts 1460-byte
-/// segments, MSS-clamped segmentation otherwise (each emitted IP packet
-/// must fit every link on the path — e.g. a 1500-MTU docker bridge behind
-/// a 4000-MTU eth0). Does NOT advance `conn.our_seq` — retransmissions
-/// re-emit already-consumed sequence space.
+/// IPv4 GSO-style frames of at most [`LARGE_FRAME_MAX_PAYLOAD`] bytes when
+/// enabled and the peer accepts 1460-byte segments, MSS-clamped segmentation
+/// otherwise (each emitted IP packet must fit every link on the path — e.g. a
+/// 1500-MTU docker bridge behind a 4000-MTU eth0). Retransmissions pass every
+/// in-flight byte (up to the honored window) in one call, so the split here is
+/// what keeps each frame within its budget. Does NOT advance `conn.our_seq` —
+/// retransmissions re-emit already-consumed sequence space.
 pub(super) fn emit_data_frames(
     ctx: &FrameCtx,
     conn: &FastPathConn,
@@ -30,23 +32,24 @@ pub(super) fn emit_data_frames(
         && ctx.large_frames
         && conn.peer_mss >= GSO_SEGMENT_MSS
     {
-        let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
-        let params = crate::ethernet::TcpFrameParams {
-            src_ip: remote_ip,
-            dst_ip: guest_ip,
-            src_port: conn.remote_port,
-            dst_port: conn.guest_port,
-            seq: seq_start,
-            ack: conn.last_ack,
-            window: 65535,
-            src_mac: ctx.gw_mac,
-            dst_mac: ctx.guest_mac,
-        };
-        frames.push(if large {
-            crate::ethernet::build_tcp_data_frame_partial_csum(&params, data)
-        } else {
-            crate::ethernet::build_tcp_data_frame(&params, data)
-        });
+        for (index, chunk) in data.chunks(LARGE_FRAME_MAX_PAYLOAD).enumerate() {
+            let params = crate::ethernet::TcpFrameParams {
+                src_ip: remote_ip,
+                dst_ip: guest_ip,
+                src_port: conn.remote_port,
+                dst_port: conn.guest_port,
+                seq: seq_start.wrapping_add((index * LARGE_FRAME_MAX_PAYLOAD) as u32),
+                ack: conn.last_ack,
+                window: 65535,
+                src_mac: ctx.gw_mac,
+                dst_mac: ctx.guest_mac,
+            };
+            frames.push(if ETH_HEADER_LEN + 40 + chunk.len() > 1500 {
+                crate::ethernet::build_tcp_data_frame_partial_csum(&params, chunk)
+            } else {
+                crate::ethernet::build_tcp_data_frame(&params, chunk)
+            });
+        }
         return;
     }
     let peer_mss = if conn.guest_ip.is_ipv6() {

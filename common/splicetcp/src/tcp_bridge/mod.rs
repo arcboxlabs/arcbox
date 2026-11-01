@@ -176,6 +176,10 @@ pub(crate) const ZERO_WINDOW_PERSIST_INTERVAL: std::time::Duration =
 /// drops frames it can't forward onto its smaller link; such flows stay on the
 /// non-GSO polling path where each segment is clamped to the exact peer MSS.
 const GSO_SEGMENT_MSS: u16 = 1460;
+/// Largest TCP payload emitted as one large-frame (GSO) download frame, for
+/// first transmissions and retransmissions alike. Keeps every frame well
+/// inside the 16-bit IPv4 total-length field.
+pub(crate) const LARGE_FRAME_MAX_PAYLOAD: usize = 32 * 1024;
 
 /// Monotonically advancing ISN source. Stepped by a large odd constant
 /// (Knuth multiplicative) for well-distributed values without a `rand`
