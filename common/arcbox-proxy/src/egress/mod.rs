@@ -130,18 +130,18 @@ impl HostEgress {
         use super::inbound_relay::InboundCommand;
         if let InboundCommand::UdpReceived {
             host_addr,
+            container_port,
             client_addr,
             data,
             reply_tx,
-            ..
         } = cmd
         {
-            // The guest exposes the host listener's port through Docker DNAT.
             self.inbound.inject_udp(
                 super::inbound_relay::InboundUdpPeer {
                     listener: host_addr,
                     client: client_addr,
                 },
+                container_port,
                 &data,
                 reply_tx,
                 guest_mac,

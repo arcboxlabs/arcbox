@@ -39,7 +39,7 @@ async fn association_preserves_source_port_and_routes_each_clients_replies() {
         (second, b"other"),
         (first, b""),
     ] {
-        relay.inject_udp(client, data, client_tx.clone(), GUEST_MAC);
+        relay.inject_udp(client, 7177, data, client_tx.clone(), GUEST_MAC);
         let frame = frames.recv().await.unwrap();
         assert_eq!(&frame[ETH_HEADER_LEN + 28..], data);
         ports.push(source_port(&frame));
@@ -64,20 +64,20 @@ async fn expired_and_recreated_listener_associations_cannot_receive_old_replies(
     let mut relay = InboundRelay::new(tx, GW_MAC, GW_IP, GUEST_IP, 1500);
     let (client_tx, responses) = mpsc::channel(16);
     let client = peer(45001);
-    relay.inject_udp(client, b"first", client_tx.clone(), GUEST_MAC);
+    relay.inject_udp(client, 7177, b"first", client_tx.clone(), GUEST_MAC);
     let old_port = source_port(&frames.recv().await.unwrap());
     relay.udp_flows.values_mut().next().unwrap().last_active =
         Instant::now().checked_sub(Duration::from_secs(61)).unwrap();
     relay.cleanup();
     assert!(relay.udp_flows.is_empty());
     assert!(relay.udp_clients.is_empty());
-    relay.inject_udp(client, b"new", client_tx.clone(), GUEST_MAC);
+    relay.inject_udp(client, 7177, b"new", client_tx.clone(), GUEST_MAC);
     let fresh_port = source_port(&frames.recv().await.unwrap());
     assert_ne!(old_port, fresh_port);
     assert!(!relay.try_handle_reply(&reply(old_port, b"old"), GUEST_MAC));
 
     let (new_tx, new_rx) = mpsc::channel(16);
-    relay.inject_udp(client, b"rebound", new_tx, GUEST_MAC);
+    relay.inject_udp(client, 7177, b"rebound", new_tx, GUEST_MAC);
     let rebound_port = source_port(&frames.recv().await.unwrap());
     assert_ne!(fresh_port, rebound_port);
     assert!(!relay.try_handle_reply(&reply(fresh_port, b"stale"), GUEST_MAC));
@@ -85,7 +85,7 @@ async fn expired_and_recreated_listener_associations_cannot_receive_old_replies(
     assert_eq!(relay.udp_clients.len(), 1);
 
     drop(responses);
-    relay.inject_udp(peer(45002), b"cancelled", client_tx, GUEST_MAC);
+    relay.inject_udp(peer(45002), 7177, b"cancelled", client_tx, GUEST_MAC);
     assert!(frames.try_recv().is_err());
     drop(new_rx);
     relay.cleanup();
@@ -98,10 +98,10 @@ async fn port_wrap_and_exhaustion_never_replace_live_associations() {
     let (tx, mut frames) = mpsc::channel(16);
     let mut relay = InboundRelay::new(tx, GW_MAC, GW_IP, GUEST_IP, 1500);
     let (client_tx, _responses) = mpsc::channel(16);
-    relay.inject_udp(peer(45001), b"first", client_tx.clone(), GUEST_MAC);
+    relay.inject_udp(peer(45001), 7177, b"first", client_tx.clone(), GUEST_MAC);
     let first = source_port(&frames.recv().await.unwrap());
     relay.ephemeral_ports.next = first;
-    relay.inject_udp(peer(45002), b"second", client_tx.clone(), GUEST_MAC);
+    relay.inject_udp(peer(45002), 7177, b"second", client_tx.clone(), GUEST_MAC);
     let second = source_port(&frames.recv().await.unwrap());
     assert_ne!(first, second);
     assert_eq!(
@@ -124,7 +124,7 @@ async fn port_wrap_and_exhaustion_never_replace_live_associations() {
         );
     }
     let count = relay.udp_flows.len();
-    relay.inject_udp(peer(45003), b"overflow", client_tx, GUEST_MAC);
+    relay.inject_udp(peer(45003), 7177, b"overflow", client_tx, GUEST_MAC);
     assert!(frames.try_recv().is_err());
     assert_eq!(relay.udp_flows.len(), count);
     assert!(!relay.udp_clients.contains_key(&peer(45003)));

@@ -240,10 +240,14 @@ impl InboundRelay {
     // UDP: inject datagram to guest
     // -----------------------------------------------------------------------
 
-    /// Injects a UDP datagram using the association's stable source port.
+    /// Injects a UDP datagram to the rule's `container_port` using the
+    /// association's stable source port. The listener's own port plays no
+    /// part in delivery: a rule may bind a host port that differs from its
+    /// guest port, or 0.
     pub(crate) fn inject_udp(
         &mut self,
         peer: InboundUdpPeer,
+        container_port: u16,
         data: &[u8],
         client_tx: mpsc::Sender<(SocketAddr, Vec<u8>)>,
         guest_mac: [u8; 6],
@@ -251,7 +255,6 @@ impl InboundRelay {
         if client_tx.is_closed() {
             return;
         }
-        let container_port = peer.listener.port();
         let now = Instant::now();
         let previous = self.udp_clients.get(&peer).copied().filter(|port| {
             let key = (self.gateway_ip, *port, self.guest_ip, container_port);
@@ -668,9 +671,10 @@ mod tests {
         let (client_tx, _client_rx) = mpsc::channel(16);
         relay.inject_udp(
             InboundUdpPeer {
-                listener: "127.0.0.1:53".parse().unwrap(),
+                listener: "127.0.0.1:5353".parse().unwrap(),
                 client: "127.0.0.1:45678".parse().unwrap(),
             },
+            53,
             b"dns query",
             client_tx,
             GUEST_MAC,
@@ -687,7 +691,7 @@ mod tests {
         // Verify IP protocol = UDP (17).
         assert_eq!(frame[ETH_HEADER_LEN + 9], 17);
 
-        // Verify ports.
+        // Verify ports: the rule's guest port, not the listener's.
         let udp_start = ETH_HEADER_LEN + 20;
         let src_port = u16::from_be_bytes([frame[udp_start], frame[udp_start + 1]]);
         let dst_port = u16::from_be_bytes([frame[udp_start + 2], frame[udp_start + 3]]);
