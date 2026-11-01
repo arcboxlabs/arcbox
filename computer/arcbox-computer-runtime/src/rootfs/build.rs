@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use tokio::sync::oneshot;
 
+use super::inject::write_agent;
 use super::{RootfsBuilder, is_oci_layout, rootfs_err};
 use crate::error::ComputerError;
 
@@ -21,7 +22,7 @@ pub enum RootfsSource {
 
 pub struct RootfsSpec {
     pub source: RootfsSource,
-    /// Destination replaced atomically after conversion and agent injection.
+    /// Destination replaced atomically after conversion, which writes the agent.
     pub out: PathBuf,
     /// Sparse ext4 capacity in bytes, in whole [`ROOTFS_CAPACITY_GRANULARITY`] units.
     pub size: u64,
@@ -31,7 +32,7 @@ impl RootfsBuilder {
     /// Build an ext4 image with the configured agent at the caller's path.
     /// The caller owns the output's lifetime; no cache entry is created.
     /// Cancellation leaves the destination unchanged. The owned worker finishes
-    /// conversion and injection before removing its temporary image.
+    /// conversion before removing its temporary image.
     /// Runtime shutdown or process termination can leave a sibling
     /// `.<uuid>.ext4.tmp` for the caller to remove.
     pub async fn build_rootfs(&self, spec: RootfsSpec) -> crate::error::Result<()> {
@@ -41,8 +42,9 @@ impl RootfsBuilder {
                 spec.size
             )));
         }
+        let vm_agent = self.paths.vm_agent.clone();
         self.write_and_publish_with(&spec.out, move |path| {
-            write_image(spec.source, path, spec.size)
+            write_image(spec.source, path, spec.size, &vm_agent)
                 .and_then(|()| verify_geometry(path, spec.size))
         })
         .await
@@ -55,8 +57,11 @@ impl RootfsBuilder {
         out: &Path,
         initial_size: u64,
     ) -> Result<()> {
-        self.write_and_publish_with(out, move |path| write_image(source, path, initial_size))
-            .await
+        let vm_agent = self.paths.vm_agent.clone();
+        self.write_and_publish_with(out, move |path| {
+            write_image(source, path, initial_size, &vm_agent)
+        })
+        .await
     }
 
     async fn write_and_publish_with(
@@ -68,9 +73,8 @@ impl RootfsBuilder {
             .parent()
             .context("rootfs output path has no parent")?
             .to_owned();
-        let builder = Self::new(self.paths.clone(), self.block_tools.clone());
         let (reply, prepared) = oneshot::channel();
-        // This task owns every blocking step until injection releases its mount.
+        // This task owns the blocking write until the image is complete.
         // Dropping the receiver cancels publication, not resource cleanup.
         tokio::spawn(async move {
             let built = async {
@@ -82,13 +86,10 @@ impl RootfsBuilder {
                     armed: true,
                 };
                 let path = temporary.path.clone();
-                let built = async {
-                    tokio::task::spawn_blocking(move || write(&path))
-                        .await
-                        .context("rootfs conversion task panicked")??;
-                    builder.inject_agent(&temporary.path).await
-                }
-                .await;
+                let built = tokio::task::spawn_blocking(move || write(&path))
+                    .await
+                    .context("rootfs conversion task panicked")
+                    .and_then(std::convert::identity);
                 match built {
                     Ok(()) => Ok(temporary),
                     Err(error) => Err(temporary.fail(error)),
@@ -158,21 +159,28 @@ impl Drop for TemporaryImage {
     }
 }
 
-fn write_image(source: RootfsSource, out: &Path, size: u64) -> Result<()> {
+/// Convert `source` into an ext4 image at `out` and write `vm_agent` into it
+/// before the image is finalized.
+fn write_image(source: RootfsSource, out: &Path, size: u64, vm_agent: &Path) -> Result<()> {
+    let mut agent = std::fs::File::open(vm_agent)
+        .with_context(|| format!("vm-agent not found at {}", vm_agent.display()))?;
+    let inject = |writer: &mut oci2rootfs::Ext4Writer| write_agent(writer, &mut agent);
     let converter = oci2rootfs::Converter::new(out).size(size);
     match source {
-        RootfsSource::Image(image) => converter.convert(image).context("convert image to ext4")?,
+        RootfsSource::Image(image) => converter
+            .convert_with(image, inject)
+            .context("convert image to ext4")?,
         RootfsSource::Directory(dir) if is_oci_layout(&dir) => {
             let source =
                 oci2rootfs::OciLayoutSource::open(&dir).context("open OCI image layout")?;
             converter
-                .convert(source)
+                .convert_with(source, inject)
                 .context("convert OCI layout to ext4")?;
         }
         RootfsSource::Directory(dir) => {
             let source = oci2rootfs::Overlay2Source::open(&dir).context("open overlay2 layer")?;
             converter
-                .convert(source)
+                .convert_with(source, inject)
                 .context("convert overlay2 layer to ext4")?;
         }
     }
@@ -213,10 +221,21 @@ mod tests {
         layer
     }
 
+    /// A builder whose agent is a stub file under `root`.
     fn builder(root: &Path) -> RootfsBuilder {
+        builder_with_agent(root, stub_agent(root))
+    }
+
+    fn stub_agent(root: &Path) -> PathBuf {
+        let agent = root.join("vm-agent");
+        std::fs::write(&agent, b"vm-agent-stub").unwrap();
+        agent
+    }
+
+    fn builder_with_agent(root: &Path, vm_agent: PathBuf) -> RootfsBuilder {
         RootfsBuilder::new(
             RootfsPaths {
-                vm_agent: root.join("absent-vm-agent"),
+                vm_agent,
                 cache_dir: root.join("cache"),
                 busybox: root.join("absent-busybox"),
             },
@@ -379,6 +398,7 @@ mod tests {
                 RootfsSource::Directory(overlay2_layer(dir.path())),
                 &out,
                 size,
+                &stub_agent(dir.path()),
             )
             .unwrap();
             assert_eq!(std::fs::metadata(&out).unwrap().len(), size);
@@ -394,7 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_source_is_rejected_before_injection_and_preserves_destination() {
+    async fn oversized_source_is_rejected_and_preserves_destination() {
         let dir = tempfile::tempdir().unwrap();
         let layer = overlay2_layer(dir.path());
         std::fs::File::create(layer.join("diff/payload"))
@@ -415,7 +435,7 @@ mod tests {
             .unwrap_err();
         assert!(
             error.to_string().contains("requested rootfs capacity"),
-            "capacity must be rejected before agent injection: {error}"
+            "capacity must be rejected: {error}"
         );
         assert_eq!(std::fs::read(&out).unwrap(), b"existing-image");
         assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
@@ -450,7 +470,7 @@ mod tests {
         let out = dir.path().join("images/rootfs.ext4");
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         std::fs::write(&out, b"existing-image").unwrap();
-        let error = builder(dir.path())
+        let error = builder_with_agent(dir.path(), dir.path().join("absent-vm-agent"))
             .build_rootfs(RootfsSpec {
                 source: RootfsSource::Directory(overlay2_layer(dir.path())),
                 out: out.clone(),
@@ -461,5 +481,51 @@ mod tests {
         assert!(error.to_string().contains("vm-agent"), "{error}");
         assert_eq!(std::fs::read(&out).unwrap(), b"existing-image");
         assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_agent_is_written_through_merged_usr_links() {
+        // Debian/Ubuntu link /sbin -> usr/sbin; Arch and Fedora also link
+        // /usr/sbin -> bin. Writing /sbin/vm-agent literally fails on both.
+        for (links, real_dir) in [
+            (&[("sbin", "usr/sbin")][..], "/usr/sbin"),
+            (&[("sbin", "usr/sbin"), ("usr/sbin", "bin")][..], "/usr/bin"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let layer = overlay2_layer(dir.path());
+            let diff = layer.join("diff");
+            std::fs::create_dir_all(diff.join("usr/bin")).unwrap();
+            std::fs::create_dir_all(diff.join("usr/sbin")).unwrap();
+            std::fs::write(diff.join("etc/resolv.conf"), b"nameserver 1.1.1.1\n").unwrap();
+            for (link, target) in links {
+                let _ = std::fs::remove_dir(diff.join(link));
+                std::os::unix::fs::symlink(target, diff.join(link)).unwrap();
+            }
+            let out = dir.path().join("rootfs.ext4");
+            builder(dir.path())
+                .build_rootfs(RootfsSpec {
+                    source: RootfsSource::Directory(layer),
+                    out: out.clone(),
+                    size: ROOTFS_CAPACITY_GRANULARITY,
+                })
+                .await
+                .unwrap();
+
+            let mut reader = arcbox_ext4::Reader::new(&out).unwrap();
+            let agent = super::super::VM_AGENT_PATH;
+            assert_eq!(reader.read_file(agent, 0, None).unwrap(), b"vm-agent-stub");
+            assert_eq!(
+                reader
+                    .read_file(&format!("{real_dir}/vm-agent"), 0, None)
+                    .unwrap(),
+                b"vm-agent-stub"
+            );
+            let (_, sbin) = reader.stat_no_follow("/sbin").unwrap();
+            assert!(sbin.is_link(), "{links:?}: /sbin must stay a link");
+            let (_, agent) = reader.stat(agent).unwrap();
+            assert_eq!(agent.mode & 0o777, 0o755);
+            let (_, resolv) = reader.stat_no_follow("/etc/resolv.conf").unwrap();
+            assert!(resolv.is_link(), "/etc/resolv.conf must point into /run");
+        }
     }
 }

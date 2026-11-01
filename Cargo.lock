@@ -4991,9 +4991,9 @@ dependencies = [
 
 [[package]]
 name = "oci2rootfs"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32117a443cb043dbc1876d75bf0c55b58ecc662642cac06d8f569ce6f9b9ac6e"
+checksum = "1d1c7e827eb047a1f4c57f6b61a7771e4b7a7ccafdb84233c42dc59145b6ec80"
 dependencies = [
  "arcbox-ext4",
  "containerregistry-auth",

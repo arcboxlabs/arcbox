@@ -1,10 +1,35 @@
-//! Write vm-agent into ext4 images through a loop mount.
+//! Write vm-agent into ext4 images: while a conversion builds one
+//! ([`write_agent`]), or into an existing image through a loop mount.
 
 use super::RootfsBuilder;
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::{path::PathBuf, sync::Arc};
+
+/// Write `agent` at [`super::VM_AGENT_PATH`] (mode 755, root) and link
+/// `/etc/resolv.conf` into the `/run` tmpfs, before the image is finalized.
+///
+/// Parents resolve through the image's own symlinks: in a merged-usr image
+/// `/sbin` links to `usr/sbin`, and on Arch or Fedora that links on to
+/// `bin`, so the agent lands at `/usr/bin/vm-agent` and `/sbin/vm-agent`
+/// still reaches it, as the kernel's `init=` lookup does.
+pub(super) fn write_agent(
+    writer: &mut oci2rootfs::Ext4Writer,
+    agent: &mut dyn std::io::Read,
+) -> oci2rootfs::Result<()> {
+    let (dir, name) = super::VM_AGENT_PATH
+        .rsplit_once('/')
+        .expect("VM_AGENT_PATH is absolute");
+    let dir = writer.resolve(dir)?;
+    writer.write_file(&format!("{dir}/{name}"), agent, 0o755, 0, 0)?;
+
+    // DNS rewrites must stay off the CoW block device (CORE-75), as in the
+    // default template. Docker images ship no meaningful resolv.conf: Docker
+    // bind-mounts one at run time.
+    let etc = writer.resolve("/etc")?;
+    writer.symlink("../run/resolv.conf", &format!("{etc}/resolv.conf"))
+}
 
 impl RootfsBuilder {
     /// Inject the configured agent at [`super::VM_AGENT_PATH`] and link
@@ -121,16 +146,14 @@ impl RootfsBuilder {
         Ok(())
     }
 
-    /// Off Linux there is no loop mount, and the image must be written while
-    /// it is built instead. That needs an append hook oci2rootfs 0.2.1 lacks:
-    /// `Converter::convert` finalizes the image itself and its `Ext4Writer`
-    /// is private.
+    /// Injecting into an existing image needs a loop mount, which only Linux
+    /// has. Images this builder converts get the agent from [`write_agent`]
+    /// on every platform.
     #[cfg(not(target_os = "linux"))]
     pub(super) async fn inject_agent(&self, _image: &Path) -> Result<()> {
         bail!(
-            "writing vm-agent into a rootfs on this host needs oci2rootfs 0.3 \
-             (`Converter::convert_with` and a public `Ext4Writer`); 0.2.1 has neither, \
-             and the Linux path injects through a loop mount instead"
+            "injecting vm-agent into an existing image needs a Linux loop mount; \
+             build_rootfs writes it while converting on any host"
         )
     }
 

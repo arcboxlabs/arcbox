@@ -36,7 +36,7 @@ libc.workspace         = true
 chrono.workspace       = true
 toml.workspace         = true
 sha2.workspace         = true
-oci2rootfs = { version = "0.2.1", default-features = false }
+oci2rootfs = { version = "0.3.0", default-features = false }
 arcbox-ext4 = "0.1.2"
 statig = "0.4.1"
 

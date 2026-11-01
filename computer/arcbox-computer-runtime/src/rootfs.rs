@@ -4,10 +4,12 @@
 //! `arcbox-ext4` stack (no external binary, no mount, no root required for
 //! the ext4 write itself):
 //!
-//! - [`RootfsBuilder::convert_layer_to_rootfs`] — convert a staged OCI image
-//!   layout (or a Docker overlay2 layer directory) to ext4, then inject
-//!   `/sbin/vm-agent` through a loop mount. Cached ext4 images are reused to
-//!   avoid redundant conversions.
+//! - [`RootfsBuilder::convert_layer_to_rootfs`] and
+//!   [`RootfsBuilder::build_rootfs`] — convert a staged OCI image layout, a
+//!   Docker overlay2 layer directory, or a pulled image to ext4, writing
+//!   `/sbin/vm-agent` into it before the image is finalized. Nothing is
+//!   mounted, so this runs on the macOS host as well as in the System VM.
+//!   Cached ext4 images are reused to avoid redundant conversions.
 //! - [`RootfsBuilder::ensure_default_rootfs`] — build the default busybox +
 //!   vm-agent image used when a create supplies no rootfs. Rebuilt when the
 //!   source binaries are newer than the cached image.
@@ -19,6 +21,10 @@
 //! the output location supplied by the composer through [`RootfsPaths`].
 //! Converted images retain their own `/sbin/init`; select the agent with
 //! `init=/sbin/vm-agent`. The default busybox image also links `/sbin/init`.
+//! In a merged-usr image `/sbin` is a symlink, and the agent is written
+//! where it resolves (`/usr/sbin`, or `/usr/bin` on Arch and Fedora).
+//! [`RootfsBuilder::inject_vm_agent`] writes the agent into an existing image
+//! instead, through a loop mount, and needs Linux.
 
 mod build;
 mod inject;
@@ -68,7 +74,7 @@ pub struct RootfsPaths {
 /// Builds sandbox rootfs images; see the module docs.
 pub struct RootfsBuilder {
     paths: RootfsPaths,
-    /// Loop-device attach/detach for the `vm-agent` injection mount.
+    /// Loop-device attach/detach for [`Self::inject_vm_agent`]'s mount.
     #[cfg_attr(
         not(target_os = "linux"),
         allow(
