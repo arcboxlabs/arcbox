@@ -79,7 +79,7 @@ pub use arcbox_snapshot::{snapshot, snapshot_cow, template_catalog};
 
 pub use agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand};
 pub use config::{ComputerConfig, DefaultVmConfig, GrpcConfig, NetworkConfig, RuntimeConfig};
-pub use environment::NodeEnvironment;
+pub use environment::{CheckpointGate, NodeEnvironment, Placement, RunLocation};
 pub use error::{ComputerError, Result};
 pub use rootfs::{
     ROOTFS_CAPACITY_GRANULARITY, RootfsBuilder, RootfsPaths, RootfsSource, RootfsSpec,
@@ -87,10 +87,10 @@ pub use rootfs::{
 };
 pub use sandbox::pause_reason;
 pub use sandbox::{
-    CheckpointInfo, CheckpointSummary, ComputerEvent, ComputerId, ComputerInfo, ComputerManager,
-    ComputerMountSpec, ComputerNetworkIdentity, ComputerNetworkInfo, ComputerNetworkSpec,
-    ComputerSpec, ComputerState, ComputerSummary, IdleAction, LifecycleUpdate, RestoreComputerSpec,
-    TemplateWarmRef,
+    CheckpointInfo, CheckpointSummary, ComputerCapabilities, ComputerEvent, ComputerId,
+    ComputerInfo, ComputerManager, ComputerMountSpec, ComputerNetworkIdentity, ComputerNetworkInfo,
+    ComputerNetworkSpec, ComputerSpec, ComputerState, ComputerSummary, IdleAction, LifecycleUpdate,
+    RestoreComputerSpec, TemplateWarmRef,
 };
 pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,

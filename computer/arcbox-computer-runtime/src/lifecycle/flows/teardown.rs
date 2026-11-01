@@ -29,6 +29,17 @@ impl ComputerFlows {
         hold: bool,
         spec: Option<CaptureSpec>,
     ) -> TaskResult<CheckpointInfo> {
+        // Refused before anything is frozen, so the computer stays `Ready`:
+        // a VZ save while the session is locked, and a pause of a computer
+        // whose bind mounts no checkpoint carries (D3). The idle detector's
+        // pause comes through here too.
+        let bind_mounts = !self.computer.lock().unwrap().spec.mounts.is_empty();
+        crate::sandbox::capabilities::capture_precondition(
+            &self.services.placement,
+            spec.is_none(),
+            bind_mounts,
+        )
+        .map_err(TaskFailure::recoverable)?;
         let request = match spec {
             Some(spec) => CheckpointRequest {
                 name: spec.name,

@@ -270,6 +270,9 @@ pub struct ComputerSnapshot {
     /// path cannot be derived from the sandbox id alone. `None` in copy
     /// mode and once pause has detached the overlay.
     pub cow_file: Option<PathBuf>,
+    /// Whether the computer was created with bind mounts, which a pause
+    /// refuses (D3) before it claims anything.
+    pub bind_mounts: bool,
     pub deadlines: Deadlines,
 }
 
@@ -299,6 +302,7 @@ impl ComputerSnapshot {
                 .cow_handle
                 .as_ref()
                 .map(|handle| handle.cow_file.clone()),
+            bind_mounts: !runtime.spec.mounts.is_empty(),
             deadlines,
         }
     }

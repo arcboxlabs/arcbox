@@ -56,6 +56,7 @@ pub struct ComputerServices {
     pub snapshots: Arc<SnapshotCatalog>,
     pub events: Arc<crate::sandbox::events::EventBus>,
     pub pool: Arc<SlotPool>,
+    pub placement: crate::environment::Placement,
 }
 
 /// How this computer comes up, and the inputs only its first flow consumes.

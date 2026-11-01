@@ -124,6 +124,7 @@ mod tests {
             paused_at: None,
             pause_snapshot_id: None,
             cow_file,
+            bind_mounts: false,
             deadlines: Deadlines::default(),
         }
     }

@@ -126,6 +126,18 @@ impl ComputerManager {
                 "sandbox pause requires jailer isolation; direct mode cannot resume".into(),
             ));
         }
+        // The location's own refusals, before the claim for the same reason:
+        // a caller asking for a pause that cannot run gets
+        // `FAILED_PRECONDITION` with the cause, and the computer never
+        // passes through `Pausing`. The capture checks again, because the
+        // idle detector does not come through here.
+        let ready = {
+            let snapshot = computer.snapshot.borrow();
+            (snapshot.state == ComputerState::Ready).then_some(snapshot.bind_mounts)
+        };
+        if let Some(bind_mounts) = ready {
+            super::capabilities::capture_precondition(&self.services.placement, true, bind_mounts)?;
+        }
         computer
             .mailbox
             .ask(id, |reply| Command::Pause { reason, reply })

@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand};
 use crate::agent::{GuestAgent, Readiness};
 use crate::config::RuntimeConfig;
-use crate::environment::NodeEnvironment;
+use crate::environment::{NodeEnvironment, Placement};
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::actor::{
     Command, ComputerActor, ComputerSeed, ComputerSnapshot, Deadlines, Mailbox, Seeded,
@@ -43,6 +43,7 @@ use crate::snapshot_cow::{CowHandle, CowManager};
 use crate::template_catalog::TemplateCatalog;
 
 pub(crate) mod boot;
+pub(crate) mod capabilities;
 mod checkpoint;
 pub(crate) mod cleanup;
 pub(crate) mod events;
@@ -63,6 +64,7 @@ pub(crate) mod vmm;
 pub(crate) mod warm;
 pub(crate) mod workload;
 
+pub use capabilities::ComputerCapabilities;
 pub use execution::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,
 };
@@ -144,6 +146,17 @@ impl ComputerManager {
     /// environment missing one is refused here instead of at the first boot
     /// or the first cleanup ticket.
     pub fn new(config: RuntimeConfig, environment: NodeEnvironment) -> Result<Self> {
+        Self::new_at(config, environment, Placement::nested())
+    }
+
+    /// [`Self::new`] at an explicit location: the host location binds its
+    /// checkpoints to the macOS build and asks the composer's gate before
+    /// each one (see [`Placement`]).
+    pub fn new_at(
+        config: RuntimeConfig,
+        environment: NodeEnvironment,
+        placement: Placement,
+    ) -> Result<Self> {
         let NodeEnvironment {
             driver,
             network,
@@ -221,6 +234,7 @@ impl ComputerManager {
             snapshots: Arc::clone(&snapshots),
             events: Arc::clone(&events),
             pool: Arc::clone(&pool),
+            placement,
         });
         if tokio::runtime::Handle::try_current().is_ok() {
             let config = Arc::clone(&config);
