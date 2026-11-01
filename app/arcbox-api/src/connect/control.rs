@@ -21,6 +21,38 @@ use arcbox_computer::cleanup as sandbox_cleanup;
 use arcbox_computer::locks::SandboxOperationLocks;
 use arcbox_computer::ports;
 
+/// Why Create refuses `RUN_LOCATION_HOST` and `GetCapabilities` reports
+/// the host unavailable: no host manager is composed in this daemon yet.
+const HOST_UNAVAILABLE: &str = "this daemon does not run host sandboxes yet";
+
+/// One entry per run location. The nested location answers what it always
+/// has: it pauses whenever it runs, publishes ports through guest DNAT, and
+/// takes no bind mounts. Its pool prewarm is the agent's configuration,
+/// which the daemon cannot see, so it is reported off.
+fn location_capabilities(
+    nested: &arcbox_computer::NestedVirtCapability,
+) -> Vec<pb::LocationCapability> {
+    let host = pb::LocationCapability {
+        location: pb::RunLocation::Host.into(),
+        unavailable_reason: HOST_UNAVAILABLE.to_owned(),
+        pause_unavailable_reason: HOST_UNAVAILABLE.to_owned(),
+        ..Default::default()
+    };
+    let unavailable = (!nested.supported).then(|| nested.reason.clone());
+    let nested = pb::LocationCapability {
+        location: pb::RunLocation::Nested.into(),
+        backend: if nested.supported { "fc" } else { "" }.to_owned(),
+        available: nested.supported,
+        unavailable_reason: unavailable.clone().unwrap_or_default(),
+        pause_resume: true,
+        pause_available: nested.supported,
+        pause_unavailable_reason: unavailable.unwrap_or_default(),
+        port_publishing: true,
+        ..Default::default()
+    };
+    vec![host, nested]
+}
+
 /// Sandbox lifecycle service implementation.
 ///
 /// The local daemon handles sandbox lifecycle, events, and published ports.
@@ -63,6 +95,20 @@ impl pb::SandboxService for SandboxServiceImpl {
             runtime
                 .sandbox_dns_name(&sandbox_id)
                 .map_err(|error| ConnectError::invalid_argument(error.to_string()))?;
+        }
+        // Only the nested location is composed in this daemon so far; a
+        // host request is refused rather than silently nested (D2).
+        match req.run_location.as_known() {
+            Some(pb::RunLocation::Unspecified | pb::RunLocation::Nested) => {}
+            Some(pb::RunLocation::Host) => {
+                return Err(ConnectError::failed_precondition(HOST_UNAVAILABLE));
+            }
+            None => {
+                return Err(ConnectError::invalid_argument(format!(
+                    "unknown run_location {}",
+                    req.run_location.to_i32()
+                )));
+            }
         }
         // CORE-13 fail-fast: refuse before dialing the guest instead of a
         // boot that wedges into FAILED with an opaque KVM error.
@@ -234,6 +280,7 @@ impl pb::SandboxService for SandboxServiceImpl {
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
+            locations: location_capabilities(&nested),
             nested_virt: pb::NestedVirtCapability {
                 supported: nested.supported,
                 reason: nested.reason,
@@ -405,5 +452,38 @@ impl pb::SandboxService for SandboxServiceImpl {
             ..Default::default()
         });
         Response::ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unsupported nested location says so with the same reason the
+    /// legacy `nested_virt` field carries, and the host stays unavailable
+    /// until a host manager is composed.
+    #[test]
+    fn locations_follow_nested_support() {
+        let unsupported = arcbox_computer::NestedVirtCapability {
+            supported: false,
+            reason: "M1 has no nested virtualization".to_owned(),
+        };
+        let [host, nested] = location_capabilities(&unsupported).try_into().unwrap();
+        assert_eq!(host.location, pb::RunLocation::Host);
+        assert!(!host.available && !host.pause_available);
+        assert_eq!(host.unavailable_reason, HOST_UNAVAILABLE);
+        assert_eq!(nested.location, pb::RunLocation::Nested);
+        assert!(!nested.available && !nested.pause_available);
+        assert_eq!(nested.unavailable_reason, unsupported.reason);
+        assert!(nested.backend.is_empty());
+
+        let supported = arcbox_computer::NestedVirtCapability {
+            supported: true,
+            reason: String::new(),
+        };
+        let [_, nested] = location_capabilities(&supported).try_into().unwrap();
+        assert!(nested.available && nested.pause_available && nested.port_publishing);
+        assert_eq!(nested.backend, "fc");
+        assert!(nested.unavailable_reason.is_empty() && !nested.bind_mounts);
     }
 }

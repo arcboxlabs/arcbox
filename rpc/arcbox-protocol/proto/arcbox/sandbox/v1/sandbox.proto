@@ -357,6 +357,23 @@ message CreateSandboxRequest {
     // What to do when the idle timeout expires (UNSPECIFIED = the
     // daemon default, currently KILL).
     IdleAction on_idle = 19;
+
+    // --- Placement ---
+    // Where the sandbox runs (host sandboxes design, D2). Unset = the
+    // daemon's default: the host when this daemon runs host sandboxes,
+    // else nested. A location this daemon cannot run is refused with
+    // FAILED_PRECONDITION naming why; `GetCapabilities.locations` says
+    // which it can before anyone asks.
+    RunLocation run_location = 22;
+}
+
+// Where a sandbox runs.
+enum RunLocation {
+    RUN_LOCATION_UNSPECIFIED = 0;
+    // A VM of its own on the macOS host, under VZ or HV.
+    RUN_LOCATION_HOST = 1;
+    // A Firecracker microVM nested inside the System VM.
+    RUN_LOCATION_NESTED = 2;
 }
 
 // Response to CreateSandbox.
@@ -444,6 +461,38 @@ message GetCapabilitiesResponse {
     repeated string features = 3;
     // Whether this host can run sandboxes at all (CORE-13).
     NestedVirtCapability nested_virt = 4;
+    // One entry per run location this daemon knows of, available or not.
+    // `nested_virt` stays the nested entry's availability, for SDKs that
+    // predate this list.
+    repeated LocationCapability locations = 5;
+}
+
+// What one run location can do, and whether it can right now.
+message LocationCapability {
+    RunLocation location = 1;
+    // The driver its sandboxes run under: "fc", "vz" or "hv". Empty when
+    // the location is unavailable.
+    string backend = 2;
+    // Whether Create can place a sandbox here.
+    bool available = 3;
+    // Why not, when unavailable.
+    string unavailable_reason = 4;
+    // Whether sandboxes here can pause and resume at all.
+    bool pause_resume = 5;
+    // Whether a Pause could run at this moment. A VZ host refuses while
+    // the macOS session is locked; this changes without the daemon
+    // restarting, so ask again rather than caching it.
+    bool pause_available = 6;
+    // Why a Pause would be refused now, when it would; the same text the
+    // FAILED_PRECONDITION carries.
+    string pause_unavailable_reason = 7;
+    // Whether restores claim VMMs started ahead of time.
+    bool warm_prespawn = 8;
+    // Whether ExposePort can publish a sandbox port on the host.
+    bool port_publishing = 9;
+    // Whether Create accepts `mounts` here. A sandbox with bind mounts
+    // can never pause (D3).
+    bool bind_mounts = 10;
 }
 
 // Nested-virtualization support on this host.

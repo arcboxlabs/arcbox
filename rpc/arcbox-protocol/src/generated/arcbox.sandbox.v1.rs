@@ -155,6 +155,14 @@ pub struct CreateSandboxRequest {
     /// daemon default, currently KILL).
     #[prost(enumeration = "IdleAction", tag = "19")]
     pub on_idle: i32,
+    /// --- Placement ---
+    /// Where the sandbox runs (host sandboxes design, D2). Unset = the
+    /// daemon's default: the host when this daemon runs host sandboxes,
+    /// else nested. A location this daemon cannot run is refused with
+    /// FAILED_PRECONDITION naming why; `GetCapabilities.locations` says
+    /// which it can before anyone asks.
+    #[prost(enumeration = "RunLocation", tag = "22")]
+    pub run_location: i32,
 }
 /// Response to CreateSandbox.
 /// Returned immediately; the sandbox may still be booting (state STARTING).
@@ -230,7 +238,7 @@ pub struct SetLifecycleRequest {
 pub struct GetCapabilitiesRequest {}
 /// What this daemon can do. SDKs fetch it lazily once per process and
 /// fail fast with an actionable error instead of probing per call.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetCapabilitiesResponse {
     /// Daemon version string (informational).
     #[prost(string, tag = "1")]
@@ -247,6 +255,49 @@ pub struct GetCapabilitiesResponse {
     /// Whether this host can run sandboxes at all (CORE-13).
     #[prost(message, optional, tag = "4")]
     pub nested_virt: ::core::option::Option<NestedVirtCapability>,
+    /// One entry per run location this daemon knows of, available or not.
+    /// `nested_virt` stays the nested entry's availability, for SDKs that
+    /// predate this list.
+    #[prost(message, repeated, tag = "5")]
+    pub locations: ::prost::alloc::vec::Vec<LocationCapability>,
+}
+/// What one run location can do, and whether it can right now.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocationCapability {
+    #[prost(enumeration = "RunLocation", tag = "1")]
+    pub location: i32,
+    /// The driver its sandboxes run under: "fc", "vz" or "hv". Empty when
+    /// the location is unavailable.
+    #[prost(string, tag = "2")]
+    pub backend: ::prost::alloc::string::String,
+    /// Whether Create can place a sandbox here.
+    #[prost(bool, tag = "3")]
+    pub available: bool,
+    /// Why not, when unavailable.
+    #[prost(string, tag = "4")]
+    pub unavailable_reason: ::prost::alloc::string::String,
+    /// Whether sandboxes here can pause and resume at all.
+    #[prost(bool, tag = "5")]
+    pub pause_resume: bool,
+    /// Whether a Pause could run at this moment. A VZ host refuses while
+    /// the macOS session is locked; this changes without the daemon
+    /// restarting, so ask again rather than caching it.
+    #[prost(bool, tag = "6")]
+    pub pause_available: bool,
+    /// Why a Pause would be refused now, when it would; the same text the
+    /// FAILED_PRECONDITION carries.
+    #[prost(string, tag = "7")]
+    pub pause_unavailable_reason: ::prost::alloc::string::String,
+    /// Whether restores claim VMMs started ahead of time.
+    #[prost(bool, tag = "8")]
+    pub warm_prespawn: bool,
+    /// Whether ExposePort can publish a sandbox port on the host.
+    #[prost(bool, tag = "9")]
+    pub port_publishing: bool,
+    /// Whether Create accepts `mounts` here. A sandbox with bind mounts
+    /// can never pause (D3).
+    #[prost(bool, tag = "10")]
+    pub bind_mounts: bool,
 }
 /// Nested-virtualization support on this host.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -778,6 +829,38 @@ impl PortProtocol {
             "PORT_PROTOCOL_UNSPECIFIED" => Some(Self::Unspecified),
             "PORT_PROTOCOL_TCP" => Some(Self::Tcp),
             "PORT_PROTOCOL_UDP" => Some(Self::Udp),
+            _ => None,
+        }
+    }
+}
+/// Where a sandbox runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunLocation {
+    Unspecified = 0,
+    /// A VM of its own on the macOS host, under VZ or HV.
+    Host = 1,
+    /// A Firecracker microVM nested inside the System VM.
+    Nested = 2,
+}
+impl RunLocation {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUN_LOCATION_UNSPECIFIED",
+            Self::Host => "RUN_LOCATION_HOST",
+            Self::Nested => "RUN_LOCATION_NESTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUN_LOCATION_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUN_LOCATION_HOST" => Some(Self::Host),
+            "RUN_LOCATION_NESTED" => Some(Self::Nested),
             _ => None,
         }
     }
