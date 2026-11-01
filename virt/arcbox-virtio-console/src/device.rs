@@ -113,10 +113,6 @@ pub struct VirtioConsole {
     io: Option<Arc<Mutex<dyn ConsoleIo>>>,
     /// Event sender for console input.
     input_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    /// Last consumed available index for the RX queue (host -> guest).
-    /// Tracked directly because the HV path reads the ring from guest memory
-    /// rather than via the internal `VirtQueue`.
-    rx_last_avail: u16,
 }
 
 impl VirtioConsole {
@@ -153,7 +149,6 @@ impl VirtioConsole {
             tx_queue: None,
             io: None,
             input_tx: None,
-            rx_last_avail: 0,
         }
     }
 
@@ -326,7 +321,10 @@ impl VirtioConsole {
             )
         });
         let mut queue = arcbox_virtio_core::SplitQueue::new(mem, 0, queue_config, false);
-        queue.set_last_avail_idx(self.rx_last_avail);
+        // Every chain taken below is returned in this call, so the avail
+        // cursor is the guest's used.idx, and the device keeps no queue
+        // state a checkpoint would have to carry.
+        queue.set_last_avail_idx(queue.used_idx());
 
         let mut completions: Vec<(u16, u32)> = Vec::new();
         // Fill RX descriptor chains with buffered input. Stop as soon as the
@@ -364,7 +362,6 @@ impl VirtioConsole {
 
         let injected = !completions.is_empty();
         queue.push_used_batch(&completions);
-        self.rx_last_avail = queue.last_avail_idx();
         Ok(injected)
     }
 }
@@ -437,7 +434,6 @@ impl VirtioDevice for VirtioConsole {
         self.acked_features = 0;
         self.rx_queue = None;
         self.tx_queue = None;
-        self.rx_last_avail = 0;
 
         for port in &mut self.ports {
             port.open = false;
@@ -736,6 +732,22 @@ mod tests {
         // Input fully consumed; a second call is a no-op (no fresh avail entries).
         assert_eq!(console.rx_available(), 0);
         assert!(!console.process_rx_queue(&mut mem, &qc).unwrap());
+
+        // A console restored from a checkpoint is a fresh device on the same
+        // rings: it must fill the next buffer the guest posts (descriptor 1
+        // in avail slot 1), not replay slot 0.
+        mem[DESC + 16..DESC + 24].copy_from_slice(&(BUF as u64 + 16).to_le_bytes());
+        mem[DESC + 24..DESC + 28].copy_from_slice(&16u32.to_le_bytes());
+        mem[DESC + 28..DESC + 30].copy_from_slice(&2u16.to_le_bytes());
+        mem[AVAIL + 6..AVAIL + 8].copy_from_slice(&1u16.to_le_bytes());
+        mem[AVAIL + 2..AVAIL + 4].copy_from_slice(&2u16.to_le_bytes());
+        let mut restored = VirtioConsole::new(ConsoleConfig::default());
+        restored.queue_input(b"again").unwrap();
+        assert!(restored.process_rx_queue(&mut mem, &qc).unwrap());
+        assert_eq!(&mem[BUF..BUF + 5], b"hello");
+        assert_eq!(&mem[BUF + 16..BUF + 21], b"again");
+        assert_eq!(u16::from_le_bytes([mem[USED + 2], mem[USED + 3]]), 2);
+        assert_eq!(mem[USED + 12], 1, "used entry 1 names descriptor 1");
     }
 
     #[test]

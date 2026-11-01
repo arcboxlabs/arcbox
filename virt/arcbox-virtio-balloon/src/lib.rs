@@ -96,10 +96,6 @@ const fn reporting_queue_index(features: u64) -> u16 {
     idx
 }
 
-/// Number of per-queue cursor slots (the reporting queue is the highest,
-/// at most index 4 with every optional queue negotiated).
-const QUEUE_SLOTS: usize = 5;
-
 /// Traditional-balloon page size — fixed 4 KiB per spec §5.5.6.
 const BALLOON_PFN_SHIFT: u32 = 12;
 const BALLOON_PAGE_SIZE: u64 = 1 << BALLOON_PFN_SHIFT;
@@ -118,10 +114,6 @@ pub struct VirtioBalloon {
     features: u64,
     /// Whether the guest driver has signalled `DRIVER_OK`.
     active: bool,
-    /// Last processed `avail_idx` per queue slot (indexed by queue index;
-    /// stats/hinting slots stay unused). Wraps at u16 per VirtIO ring
-    /// semantics.
-    last_avail: [u16; QUEUE_SLOTS],
     /// Host-requested target in 4 KiB pages. Set by
     /// [`Self::set_num_pages`]; read by guest via config space.
     num_pages: AtomicU32,
@@ -159,7 +151,6 @@ impl VirtioBalloon {
                 | VIRTIO_BALLOON_F_DEFLATE_ON_OOM
                 | VIRTIO_BALLOON_F_REPORTING,
             active: false,
-            last_avail: [0; QUEUE_SLOTS],
             num_pages: AtomicU32::new(0),
             actual: AtomicU32::new(0),
             inflated_total: AtomicU32::new(0),
@@ -244,6 +235,29 @@ impl VirtioDevice for VirtioBalloon {
             .store(u32::from_le_bytes(bytes), Ordering::Release);
     }
 
+    /// `num_pages` and `actual`: the target the host set and the inflation
+    /// the guest reported, which the guest's balloon driver keeps working
+    /// from.
+    fn save_config(&self) -> Vec<u8> {
+        let mut config = vec![0; 8];
+        self.read_config(0, &mut config);
+        config
+    }
+
+    fn load_config(&mut self, config: &[u8]) -> arcbox_virtio_core::Result<()> {
+        if config.len() != 8 {
+            return Err(arcbox_virtio_core::VirtioError::InvalidOperation(format!(
+                "virtio-balloon configuration is 8 bytes, got {}",
+                config.len()
+            )));
+        }
+        let word =
+            |i: usize| u32::from_le_bytes([config[i], config[i + 1], config[i + 2], config[i + 3]]);
+        self.num_pages.store(word(0), Ordering::Release);
+        self.actual.store(word(4), Ordering::Release);
+        Ok(())
+    }
+
     fn activate(&mut self) -> arcbox_virtio_core::Result<()> {
         self.active = true;
         tracing::info!("virtio-balloon activated");
@@ -252,7 +266,6 @@ impl VirtioDevice for VirtioBalloon {
 
     fn reset(&mut self) {
         self.active = false;
-        self.last_avail = [0; QUEUE_SLOTS];
         self.num_pages.store(0, Ordering::Release);
         self.actual.store(0, Ordering::Release);
     }
@@ -286,8 +299,10 @@ impl VirtioDevice for VirtioBalloon {
             )
         });
         let mut queue = arcbox_virtio_core::SplitQueue::new(mem, queue_idx, queue_config, false);
-        let idx_slot = queue_idx as usize;
-        queue.set_last_avail_idx(self.last_avail[idx_slot]);
+        // Every chain taken below is returned before this call ends, so the
+        // avail cursor is the guest's used.idx. Deriving it keeps the device
+        // free of queue state a checkpoint would have to carry.
+        queue.set_last_avail_idx(queue.used_idx());
         let ram = GuestRam {
             base: queue.mem().ptr(),
             len: queue.mem().len(),
@@ -334,7 +349,6 @@ impl VirtioDevice for VirtioBalloon {
             }
         }
 
-        self.last_avail[idx_slot] = queue.last_avail_idx();
         Ok(completions)
     }
 }
@@ -623,6 +637,54 @@ mod tests {
             *recorder.0.lock().unwrap(),
             vec![(GPA_BASE + DATA_OFF, host)]
         );
+    }
+
+    /// A device restored from a checkpoint is built fresh while the guest's
+    /// rings carry on: it must start at the guest's used.idx, not replay
+    /// the chains the checkpointed device already returned.
+    #[test]
+    fn a_fresh_device_resumes_at_the_guest_used_index() {
+        let mut ram = TestRam::new(GPA_BASE);
+        let cfg = ram.cfg();
+        let host = release::host_page_size();
+        let mut before = reporting_device();
+        ram.write_desc(0, GPA_BASE + DATA_OFF, host as u32, F_WRITE, 0);
+        ram.publish_avail(0, 0);
+        before
+            .process_queue(QUEUE_REPORTING, ram.slice(), &cfg)
+            .unwrap();
+
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let mut after = VirtioBalloon::with_releaser(Box::new(std::sync::Arc::clone(&recorder)));
+        after.ack_features(after.features());
+        ram.write_desc(
+            1,
+            GPA_BASE + DATA_OFF + host as u64,
+            host as u32,
+            F_WRITE,
+            0,
+        );
+        ram.publish_avail(1, 1);
+        after
+            .process_queue(QUEUE_REPORTING, ram.slice(), &cfg)
+            .unwrap();
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![(GPA_BASE + DATA_OFF + host as u64, host)]
+        );
+        assert_eq!(ram.used_idx(), 2);
+    }
+
+    #[test]
+    fn load_config_restores_target_and_inflation() {
+        let mut saved = VirtioBalloon::new();
+        saved.set_num_pages(0x1234);
+        saved.write_config(4, &0x1200u32.to_le_bytes());
+
+        let mut restored = VirtioBalloon::new();
+        restored.load_config(&saved.save_config()).unwrap();
+        assert_eq!((restored.num_pages(), restored.actual()), (0x1234, 0x1200));
+        assert!(restored.load_config(&[0; 4]).is_err());
     }
 
     #[test]

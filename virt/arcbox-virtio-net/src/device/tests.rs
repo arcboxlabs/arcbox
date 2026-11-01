@@ -62,6 +62,27 @@ fn test_mac_address() {
     assert_eq!(data, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 }
 
+/// A restored NIC is built with a fresh random MAC; loading the saved
+/// configuration must make it advertise the MAC the guest booted with.
+#[test]
+fn load_config_restores_the_saved_mac() {
+    let saved = VirtioNet::new(NetConfig {
+        mac: [0x52, 0x54, 0xAB, 0x01, 0x02, 0x03],
+        ..Default::default()
+    })
+    .save_config();
+    let mut restored = VirtioNet::new(NetConfig {
+        mac: NetConfig::random_mac(),
+        ..Default::default()
+    });
+    restored.load_config(&saved).unwrap();
+
+    let mut data = [0u8; 6];
+    restored.read_config(0, &mut data);
+    assert_eq!(data, [0x52, 0x54, 0xAB, 0x01, 0x02, 0x03]);
+    assert!(restored.load_config(&saved[..5]).is_err());
+}
+
 #[test]
 fn test_read_config_status() {
     let net = VirtioNet::new(NetConfig::default());

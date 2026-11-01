@@ -173,6 +173,35 @@ pub trait VirtioDevice: Send + Sync {
     /// Resets the device.
     fn reset(&mut self);
 
+    /// The configuration-space bytes a checkpoint must carry: the fields
+    /// the host owns, which the guest reads but a freshly built device
+    /// would not reproduce (a NIC's MAC, the balloon's target). A prefix of
+    /// the device's configuration-space layout; empty for a device whose
+    /// configuration follows from how it is built.
+    fn save_config(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Writes back what [`Self::save_config`] returned, into a freshly built
+    /// device and before the guest resumes, including fields the guest
+    /// itself cannot write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config` does not have the length this device
+    /// saves.
+    fn load_config(&mut self, config: &[u8]) -> Result<()> {
+        if config.is_empty() {
+            Ok(())
+        } else {
+            Err(VirtioError::InvalidOperation(format!(
+                "{:?} keeps no checkpointed configuration, got {} bytes",
+                self.device_id(),
+                config.len()
+            )))
+        }
+    }
+
     /// Processes pending buffers in the specified queue.
     ///
     /// `memory` is the entire guest physical memory as a mutable byte slice.

@@ -42,6 +42,22 @@ impl VirtioDevice for VirtioNet {
         // Network config is mostly read-only
     }
 
+    /// The MAC: the guest read it once at probe time and keeps using it,
+    /// so a restored NIC must advertise the same one.
+    fn save_config(&self) -> Vec<u8> {
+        self.config.mac.to_vec()
+    }
+
+    fn load_config(&mut self, config: &[u8]) -> Result<()> {
+        self.config.mac = config.try_into().map_err(|_| {
+            VirtioError::InvalidOperation(format!(
+                "virtio-net configuration is a 6-byte MAC, got {} bytes",
+                config.len()
+            ))
+        })?;
+        Ok(())
+    }
+
     fn activate(&mut self) -> Result<()> {
         let event_idx = (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0;
 
