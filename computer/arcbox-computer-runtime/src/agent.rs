@@ -108,6 +108,11 @@ pub trait ReadyGate: Send {
 /// cold-boot path used as its readiness gate before the guest learned to
 /// dial out. Its side effect is one the boot wants anyway.
 ///
+/// A failed round trip is retried until one answers: a transport that
+/// cannot tell "no listener yet" from a dropped connection (HV hands back
+/// a connection that reads EOF) fails the probe while the guest boots. The
+/// caller's deadline ends a guest that never answers.
+///
 /// Transport-independent, so every factory that answers
 /// [`Readiness::Probe`] returns this rather than its own.
 pub struct ProbeGate;
@@ -119,9 +124,22 @@ impl ReadyGate for ProbeGate {
         _handle: &Arc<dyn VmHandle>,
         agent: &Arc<dyn GuestAgent>,
     ) -> Result<()> {
-        agent.sync_clock().await.map(drop)
+        let mut backoff = PROBE_INITIAL_BACKOFF;
+        loop {
+            match agent.sync_clock().await {
+                Ok(_) => return Ok(()),
+                Err(error) => tracing::trace!(%error, "ready probe: no answer yet"),
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = backoff.saturating_mul(2).min(PROBE_MAX_BACKOFF);
+        }
     }
 }
+
+/// First retry delay of [`ProbeGate`]; doubles per attempt.
+const PROBE_INITIAL_BACKOFF: Duration = Duration::from_millis(2);
+/// Ceiling of [`ProbeGate`]'s retry delay.
+const PROBE_MAX_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The agent inside one running Computer.
 #[async_trait]

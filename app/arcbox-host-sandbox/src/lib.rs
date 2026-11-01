@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use arcbox_computer_runtime::agent::VmProtoAgentFactory;
+use arcbox_computer_runtime::agent::{Readiness, VmProtoAgentFactory};
 use arcbox_computer_runtime::workload::vm_agent_path;
 use arcbox_computer_runtime::{
     CheckpointGate, ComputerCapabilities, ComputerManager, NodeEnvironment, Placement,
@@ -139,8 +139,7 @@ impl HostSandboxes {
         let os_build = os_build()?;
         let root = options.data_dir.join(SANDBOX_DIR);
         let images = root.join("images");
-        std::fs::create_dir_all(&images)
-            .with_context(|| format!("create {}", images.display()))?;
+        std::fs::create_dir_all(&images).with_context(|| format!("create {}", images.display()))?;
 
         let pool = Pool::new(POOL.0.into(), POOL.1)?;
         let dns = Arc::new(names::Publisher::new(Arc::clone(&options.names)));
@@ -165,7 +164,10 @@ impl HostSandboxes {
         let environment = NodeEnvironment {
             driver,
             network: Arc::new(network),
-            agent: Arc::new(VmProtoAgentFactory::default()),
+            // Neither host driver listens for guest vsock dial-outs, and an
+            // HV dial to a port with no listener reads EOF rather than
+            // refusing, so readiness is an agent round trip, retried.
+            agent: Arc::new(VmProtoAgentFactory::with_readiness(Readiness::Probe)),
             cow_manager: Arc::new(CowManager::new(cow)?),
         };
         let config = runtime_config(&root, &options.kernel);
@@ -216,7 +218,12 @@ impl HostSandboxes {
     /// Whether `id` names a computer of this location.
     #[must_use]
     pub fn owns_sandbox(&self, id: &str) -> bool {
-        !id.is_empty() && self.service.manager().inspect_computer(&id.to_owned()).is_ok()
+        !id.is_empty()
+            && self
+                .service
+                .manager()
+                .inspect_computer(&id.to_owned())
+                .is_ok()
     }
 
     /// Whether `id` names a checkpoint of this location.

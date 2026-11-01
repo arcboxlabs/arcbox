@@ -146,21 +146,52 @@ fn is_transient(error: &arcbox_vm_driver::Error) -> bool {
 
 /// Register a dialed connection with the tokio reactor.
 ///
-/// This client is tokio tasks all the way down and has no blocking-thread
-/// transport, so a connection whose driver requires [`IoMode::Blocking`] is
-/// refused rather than misregistered with the reactor.
+/// This client is tokio tasks all the way down. A connection whose driver
+/// requires [`IoMode::Blocking`] (HV's socketpair into the VMM's vsock
+/// device) is never registered with the reactor: it is relayed to one end
+/// of a fresh socket pair by [`relay_blocking`], and the client gets the
+/// other.
 fn into_unix_stream(conn: VsockConn) -> Result<UnixStream> {
-    match conn.mode {
-        IoMode::Async => {
-            let stream = std::os::unix::net::UnixStream::from(conn.fd);
-            stream.set_nonblocking(true)?;
-            Ok(UnixStream::from_std(stream)?)
+    let stream = std::os::unix::net::UnixStream::from(conn.fd);
+    let stream = match conn.mode {
+        IoMode::Async => stream,
+        IoMode::Blocking => {
+            stream.set_nonblocking(false)?;
+            relay_blocking(stream)?
         }
-        IoMode::Blocking => Err(ComputerError::Vsock(
-            "vsock connection requires blocking I/O, which the guest-agent client cannot drive"
-                .into(),
-        )),
-    }
+    };
+    stream.set_nonblocking(true)?;
+    Ok(UnixStream::from_std(stream)?)
+}
+
+/// Copies between `guest`, driven with blocking I/O on two threads, and a
+/// new socket pair; returns the pair's other end.
+///
+/// Each direction forwards end-of-stream as a write shutdown, so a client
+/// that half-closes still reads the reply. The guest-to-client thread ends
+/// when the guest closes its end, or with the VM, whose VMM holds the
+/// other side of `guest`.
+fn relay_blocking(
+    guest: std::os::unix::net::UnixStream,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::net::Shutdown;
+    let (client, near) = std::os::unix::net::UnixStream::pair()?;
+    let (mut guest_rx, mut guest_tx) = (guest.try_clone()?, guest);
+    let (mut near_rx, mut near_tx) = (near.try_clone()?, near);
+    std::thread::Builder::new()
+        .name("vsock-relay-in".into())
+        .spawn(move || {
+            drop(std::io::copy(&mut guest_rx, &mut near_tx));
+            drop(near_tx.shutdown(Shutdown::Write));
+            drop(guest_rx.shutdown(Shutdown::Both));
+        })?;
+    std::thread::Builder::new()
+        .name("vsock-relay-out".into())
+        .spawn(move || {
+            drop(std::io::copy(&mut near_rx, &mut guest_tx));
+            drop(guest_tx.shutdown(Shutdown::Write));
+        })?;
+    Ok(client)
 }
 
 /// Wait for the guest agent's readiness dial-out on a pre-bound listener:
@@ -391,14 +422,30 @@ mod tests {
         assert!(vsock.dials() > 1);
     }
 
+    /// A blocking-mode connection reaches the client through the relay:
+    /// bytes cross both ways, and a client's half-close reaches the guest
+    /// while the guest's reply still reaches the client.
     #[tokio::test]
-    async fn blocking_connections_are_refused_not_misregistered() {
-        let vsock = ScriptedVsock::new([Ok(IoMode::Blocking)]);
-        let err = connect_to_port(&vsock, AGENT_PORT).await.unwrap_err();
-        assert!(
-            matches!(err, ComputerError::Vsock(ref m) if m.contains("blocking I/O")),
-            "unexpected error: {err}"
-        );
+    async fn blocking_connections_are_relayed() {
+        let (guest, mut vm) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = into_unix_stream(VsockConn {
+            fd: OwnedFd::from(guest),
+            mode: IoMode::Blocking,
+        })
+        .unwrap();
+        let vm = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let mut request = Vec::new();
+            vm.read_to_end(&mut request).unwrap();
+            vm.write_all(&[request.as_slice(), b" back"].concat())
+                .unwrap();
+        });
+        client.write_all(b"ping").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut reply = Vec::new();
+        client.read_to_end(&mut reply).await.unwrap();
+        assert_eq!(reply, b"ping back");
+        vm.join().unwrap();
     }
 
     #[tokio::test]
