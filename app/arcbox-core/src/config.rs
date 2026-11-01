@@ -86,6 +86,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// QEMU backend configuration.
     pub qemu: crate::qemu::QemuConfig,
+    /// Host sandbox location configuration (ADR 0010).
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for Config {
@@ -110,6 +112,7 @@ impl Config {
             logging: LoggingConfig::default(),
             storage: StorageConfig::default(),
             qemu: crate::qemu::QemuConfig::default(),
+            sandbox: SandboxConfig::default(),
         }
     }
 
@@ -606,6 +609,24 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Host sandbox location configuration (`[sandbox]`, ADR 0010).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// The hypervisor host sandboxes run under: `"hv"` (the default, D4)
+    /// or `"vz"`. Settable via `ARCBOX_SANDBOX_BACKEND`. Independent of
+    /// the System VM's `[vm] backend`.
+    pub backend: arcbox_vmm::VmBackend,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            backend: arcbox_vmm::VmBackend::Hv,
+        }
+    }
+}
+
 /// Storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -870,6 +891,21 @@ registry-mirrors = ["https://ignored.example.com"]
                 .merge(Env::prefixed("ARCBOX_").split("_"))
                 .extract()?;
             assert_eq!(config.container.cidr.to_string(), "10.96.0.0/16");
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn sandbox_backend_defaults_to_hv_and_parses_from_env() {
+        assert_eq!(Config::default().sandbox.backend, arcbox_vmm::VmBackend::Hv);
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("ARCBOX_SANDBOX_BACKEND", "vz");
+            let config: Config = Figment::new()
+                .merge(Serialized::defaults(Config::default()))
+                .merge(Env::prefixed("ARCBOX_").split("_"))
+                .extract()?;
+            assert_eq!(config.sandbox.backend, arcbox_vmm::VmBackend::Vz);
             Ok(())
         });
     }

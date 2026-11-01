@@ -13,6 +13,8 @@ mod guest_workers;
 mod host_mount;
 mod host_network;
 #[cfg(target_os = "macos")]
+mod host_sandboxes;
+#[cfg(target_os = "macos")]
 mod https_access;
 mod kubernetes_lb;
 mod kubernetes_proxy;

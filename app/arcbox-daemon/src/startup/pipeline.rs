@@ -217,6 +217,10 @@ impl RuntimeServicesStarted {
     }
 
     async fn admit_host_and_start_system(&self) -> Result<()> {
+        // Part of the Machine host: the Sandbox API reaches the host
+        // location from admission on, whatever the System VM does.
+        #[cfg(target_os = "macos")]
+        crate::host_sandboxes::start(&self.ctx, &self.runtime);
         self.ctx
             .host_runtime
             .set(Arc::clone(&self.runtime))

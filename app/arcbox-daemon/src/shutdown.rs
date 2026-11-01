@@ -82,6 +82,8 @@ pub async fn run(ctx: Arc<DaemonContext>, mut handles: ServiceHandles) -> Result
 
     drain(&mut handles).await;
     ctx.rpc_calls.wait().await;
+    #[cfg(target_os = "macos")]
+    crate::host_sandboxes::shutdown(&ctx).await;
 
     let stopped = match ctx.early_runtime.get() {
         Some(runtime) => stop_runtime(Arc::clone(runtime), None).await,

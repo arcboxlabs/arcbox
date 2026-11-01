@@ -593,6 +593,7 @@ dependencies = [
  "arcbox-error",
  "arcbox-grpc",
  "arcbox-helper",
+ "arcbox-host-sandbox",
  "arcbox-image",
  "arcbox-local-ca",
  "arcbox-logging",

@@ -55,6 +55,7 @@ uuid.workspace = true
 arcbox-image.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+arcbox-host-sandbox.workspace = true
 arcbox-route.workspace = true
 security-framework = "3.7.0"
 
