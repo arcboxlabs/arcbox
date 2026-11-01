@@ -46,14 +46,35 @@ The restructure plan and its locked decisions live in
   failure signatures stay documented in `app/AGENTS.md` ("Boot-asset
   pin").
 - `arcbox-snapshot` — snapshot lineage: the checkpoint catalog
-  (`snapshot`), the device-mapper copy-on-write rootfs manager checkpoints
-  are cloned through (`snapshot_cow`), and the template catalog that
-  promotes a snapshot into a versioned base image (`template_catalog`).
-  Consumed by `computer/arcbox-computer-runtime` guest-side today.
+  (`snapshot`), the copy-on-write rootfs manager checkpoints are cloned
+  through (`snapshot_cow`), and the template catalog that promotes a
+  snapshot into a versioned base image (`template_catalog`). Consumed by
+  `computer/arcbox-computer-runtime`, guest-side for the nested location
+  and on the macOS host for host sandboxes.
+  - `CowManager` has two backends, chosen through `CowOptions::backend`;
+    its public API is the same for both. `CowBackend::DeviceMapper`
+    (the default, and what `CowOptions::new` picks) is a dm-snapshot over
+    a shared read-only template loop and a sparse overlay, for
+    Firecracker inside a Linux VM. `CowBackend::Clonefile`
+    (`snapshot_cow/clonefile.rs`) gives each host sandbox an APFS
+    `clonefile(2)` copy of its template, a plain file the VMM opens
+    directly: no loop device, no dm table, no template refcount, and
+    `block_tools`/`dmsetup_candidates` are ignored. It needs the template
+    and the data directory on one APFS volume; anywhere else, and off
+    macOS, setup fails with an I/O error and the runtime falls back to a
+    full copy.
+  - Under `Clonefile` a `CowHandle` keeps its dm field names: `dm_device`
+    and `cow_file` are both the clone, `cow_loop` is empty, and `dm_name`
+    stays `arcbox-snap-<id>` so the owner reads back out of it as on the
+    dm path. A clone is made under a `.clone-*` temporary and renamed into
+    place only once durable; the startup sweep deletes leftover
+    temporaries and clones no journal names. Keep both halves of that
+    contract together.
   - The device-mapper paths only *do* anything on Linux (`dmsetup`, thin
     pools) but compile everywhere, which is what lets the layer above
     keep its own platform-neutrality promise.
-  - Loop-device tooling is a seam, not an assumption: `CowManager` takes
+  - Loop-device tooling (`DeviceMapper` only) is a seam, not an
+    assumption: `CowManager` takes
     `CowOptions { block_tools: Arc<dyn BlockTools>, dmsetup_candidates, .. }`
     (`snapshot_cow/block_tools/`, one file per implementation).
     `BusyboxBlockTools` is the reference (the System VM's `/bin/busybox`
