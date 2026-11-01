@@ -36,6 +36,39 @@ impl VirtioDevice for VirtioVsock {
         // Vsock config is read-only
     }
 
+    /// The connection manager's next host port: a restored process that
+    /// started over at the base would reuse the addresses of connections
+    /// the guest still holds.
+    fn save_config(&self) -> Vec<u8> {
+        self.conn_mgr
+            .as_ref()
+            .map(|m| {
+                let next = m
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next_host_port();
+                next.to_le_bytes().to_vec()
+            })
+            .unwrap_or_default()
+    }
+
+    fn load_config(&mut self, config: &[u8]) -> Result<()> {
+        if config.is_empty() {
+            return Ok(());
+        }
+        let (Ok(port), Some(mgr)) = (<[u8; 4]>::try_from(config), &self.conn_mgr) else {
+            return Err(VirtioError::InvalidOperation(format!(
+                "virtio-vsock checkpoint state is a 4-byte port with a connection manager, \
+                 got {} bytes",
+                config.len()
+            )));
+        };
+        mgr.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resume_host_ports_at(u32::from_le_bytes(port));
+        Ok(())
+    }
+
     fn activate(&mut self) -> Result<()> {
         // Create virtqueues: RX (0), TX (1), Event (2).
         self.rx_queue = Some(VirtQueue::new(256)?);

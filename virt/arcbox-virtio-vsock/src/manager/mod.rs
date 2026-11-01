@@ -79,6 +79,20 @@ impl VsockConnectionManager {
         }
     }
 
+    /// The host port the next connection gets.
+    #[must_use]
+    pub fn next_host_port(&self) -> u32 {
+        self.next_host_port.load(Ordering::Relaxed)
+    }
+
+    /// Continues host port allocation at `port`, where a checkpointed
+    /// process left off. The restored guest still holds the connections
+    /// that process had open, reset but not yet closed, and answers a new
+    /// connection from one of their addresses with OP_RST.
+    pub fn resume_host_ports_at(&mut self, port: u32) {
+        self.next_host_port.store(port, Ordering::Relaxed);
+    }
+
     /// Installs the doorbell rung when new host→guest RX work appears.
     pub fn set_doorbell(&mut self, doorbell: VsockDoorbell) {
         self.doorbell = Some(doorbell);

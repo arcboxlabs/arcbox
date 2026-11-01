@@ -173,11 +173,11 @@ pub trait VirtioDevice: Send + Sync {
     /// Resets the device.
     fn reset(&mut self);
 
-    /// The configuration-space bytes a checkpoint must carry: the fields
-    /// the host owns, which the guest reads but a freshly built device
-    /// would not reproduce (a NIC's MAC, the balloon's target). A prefix of
-    /// the device's configuration-space layout; empty for a device whose
-    /// configuration follows from how it is built.
+    /// The host-owned state a checkpoint must carry, which a freshly built
+    /// device would not reproduce: configuration the guest reads (a NIC's
+    /// MAC, the balloon's target) or host-side state the guest depends on
+    /// (vsock's next host port). Opaque to the VMM; empty for a device whose
+    /// state follows from how it is built.
     fn save_config(&self) -> Vec<u8> {
         Vec::new()
     }

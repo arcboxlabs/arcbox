@@ -1150,3 +1150,37 @@ fn transport_reset_fills_one_event_buffer_and_resumes_from_used_idx() {
     assert!(!vsock.post_transport_reset(&qcfg));
     assert_eq!(u16::from_le_bytes([mem[used + 2], mem[used + 3]]), 2);
 }
+
+/// A restored device's manager continues at the checkpointed process's next
+/// host port, so a new connection never takes the address of one the guest
+/// still holds.
+#[test]
+fn load_config_resumes_host_ports_where_the_checkpoint_left_off() {
+    let bound = || {
+        let mut vsock = VirtioVsock::new(VsockConfig::default());
+        let mgr = Arc::new(Mutex::new(manager::VsockConnectionManager::new()));
+        vsock.bind_connection_manager(Arc::clone(&mgr));
+        (vsock, mgr)
+    };
+    let (before, mgr) = bound();
+    let held: Vec<u32> = (0..3)
+        .map(|_| {
+            mgr.lock()
+                .unwrap()
+                .allocate(5000, 3, make_socketpair().1)
+                .0
+                .host_port
+        })
+        .collect();
+    let saved = before.save_config();
+
+    let (mut after, mgr) = bound();
+    after.load_config(&saved).unwrap();
+    let (next, _) = mgr.lock().unwrap().allocate(5000, 3, make_socketpair().1);
+    assert!(
+        !held.contains(&next.host_port),
+        "{} reuses one of {held:?}",
+        next.host_port
+    );
+    assert!(after.load_config(&[0; 3]).is_err());
+}
