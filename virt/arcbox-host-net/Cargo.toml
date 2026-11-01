@@ -1,0 +1,24 @@
+[package]
+name              = "arcbox-host-net"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description       = "The macOS guest network behind arcbox-vm-driver's GuestNetwork port: an address ledger with the quarantine protocol, one userspace NAT datapath per host sandbox VM, and sandbox DNS publication through the composer."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arcbox-net.workspace = true
+arcbox-vm-driver.workspace = true
+async-trait.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+arcbox-vm-driver = { workspace = true, features = ["testkit"] }
+
+[lints]
+workspace = true
