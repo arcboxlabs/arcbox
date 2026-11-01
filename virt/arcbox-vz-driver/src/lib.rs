@@ -5,9 +5,9 @@
 //! makes a [`VmSpec`](arcbox_vm_driver::VmSpec) run under Apple's
 //! Virtualization.framework through [`arcbox_vz`]. VZ is a managed VMM: the
 //! VM runs in Apple's helper process and this crate holds it in-process, so
-//! there is no adopt, prepare or staging, and checkpointing waits for the
-//! shim to bind `saveMachineStateTo` (vm-stack-redesign "Deferred by
-//! decision").
+//! there is no adopt, prepare or staging. Checkpoints use VZ's own
+//! `saveMachineStateTo`, which needs the console session unlocked
+//! ([`VzDriver::checkpoint_blocker`]).
 //!
 //! # What lives here
 //!
@@ -22,13 +22,16 @@
 //!   (`FileHandle`).
 //! - `console` — the console and agent-log channels over VZ's pipes.
 //! - `handle` — the port's `VmHandle` over a running VM: state and exit
-//!   from a watcher, shutdown, and the vsock, balloon, console, debug and
-//!   port-forward capabilities.
+//!   from a watcher, shutdown, and the vsock, balloon, console, debug,
+//!   port-forward and checkpoint capabilities.
+//! - `checkpoint` — the `vz/v1` image: VZ's state file, the disk clones
+//!   and the manifest a restore rebuilds the configuration from.
 //!
 //! The crate is empty on other platforms.
 
 #![cfg(target_os = "macos")]
 
+mod checkpoint;
 mod console;
 pub mod driver;
 mod handle;
@@ -36,6 +39,8 @@ mod net;
 mod port_forward;
 mod render;
 
+pub use arcbox_vz::SessionState;
+pub use checkpoint::{FORMAT as CHECKPOINT_FORMAT, disk_clone};
 pub use driver::VzDriver;
 
 use arcbox_vm_driver::Error;

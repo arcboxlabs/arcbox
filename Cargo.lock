@@ -1479,6 +1479,7 @@ dependencies = [
  "arcbox-vz",
  "async-trait",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

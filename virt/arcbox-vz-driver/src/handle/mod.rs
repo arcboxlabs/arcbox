@@ -4,14 +4,21 @@
 //! the first stop it sees into the one `VmEvent::Exited`. The host side of
 //! the network is dropped only after the VM has stopped: the datapath and
 //! relays stop, and the descriptors VZ borrowed close.
+//!
+//! A checkpoint (`checkpoint`) pauses the VM; a handle whose checkpoint
+//! held it reports `Quiesced` until it is shut down.
+
+mod checkpoint;
 
 use std::os::fd::{FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use arcbox_vm_driver::{
-    Balloon, BalloonStats, Console, DebugSnapshot, Error, ExitStatus, IoMode, PortForward, Result,
-    ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmState, Vsock, VsockConn,
+    Balloon, BalloonStats, Checkpoint, Console, DebugSnapshot, Error, ExitStatus, IoMode,
+    PortForward, Result, ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmSpec, VmState, Vsock,
+    VsockConn,
 };
 use arcbox_vz::{VirtualMachine, VirtualMachineState};
 use async_trait::async_trait;
@@ -36,6 +43,14 @@ pub struct VzHandle {
 struct Inner {
     record: VmRecord,
     vm: VirtualMachine,
+    /// The spec the VM runs, which a checkpoint records.
+    spec: VmSpec,
+    /// The platform's machine identifier, which a checkpoint records.
+    machine_identifier: Vec<u8>,
+    /// Paused by a checkpoint and not resumed since.
+    quiesced: AtomicBool,
+    /// Serializes checkpoints: each one pauses and resumes the VM.
+    checkpointing: tokio::sync::Mutex<()>,
     exit: Mutex<Option<ExitStatus>>,
     events: broadcast::Sender<VmEvent>,
     console: Option<PipeConsole>,
@@ -49,6 +64,8 @@ struct Inner {
 /// What a running VM keeps besides the VM itself.
 pub struct Parts {
     pub record: VmRecord,
+    pub spec: VmSpec,
+    pub machine_identifier: Vec<u8>,
     pub console: Option<PipeConsole>,
     pub agent_log: Option<PipeConsole>,
     pub net: NetResources,
@@ -63,6 +80,10 @@ impl VzHandle {
         let inner = Arc::new(Inner {
             record: parts.record,
             vm,
+            spec: parts.spec,
+            machine_identifier: parts.machine_identifier,
+            quiesced: AtomicBool::new(false),
+            checkpointing: tokio::sync::Mutex::new(()),
             exit: Mutex::new(None),
             events,
             console: parts.console,
@@ -124,12 +145,22 @@ impl Inner {
         status
     }
 
-    fn require_running(&self) -> Result<()> {
+    fn state(&self) -> VmState {
         match self.exited() {
-            None => Ok(()),
-            Some(status) => Err(Error::WrongState {
+            Some(status) => VmState::Exited(status),
+            None if self.quiesced.load(Ordering::Acquire) => VmState::Quiesced,
+            None => VmState::Running,
+        }
+    }
+
+    /// Fails unless the guest is executing: exited and quiesced VMs answer
+    /// neither vsock nor the balloon.
+    fn require_running(&self) -> Result<()> {
+        match self.state() {
+            VmState::Running => Ok(()),
+            state => Err(Error::WrongState {
                 id: self.record.id.clone(),
-                state: VmState::Exited(status),
+                state,
                 expected: "running",
             }),
         }
@@ -157,6 +188,10 @@ impl Inner {
     async fn graceful(&self, timeout: Duration) -> Result<ExitStatus> {
         if let Some(status) = self.exited() {
             return Ok(status);
+        }
+        // A paused guest cannot answer a stop request.
+        if self.quiesced.load(Ordering::Acquire) {
+            return self.kill().await;
         }
         if let Err(error) = self.vm.request_stop() {
             tracing::debug!(vm = %self.record.id, "stop request refused: {error}");
@@ -211,9 +246,7 @@ impl VmHandle for VzHandle {
     }
 
     fn state(&self) -> VmState {
-        self.inner
-            .exited()
-            .map_or(VmState::Running, VmState::Exited)
+        self.inner.state()
     }
 
     fn events(&self) -> broadcast::Receiver<VmEvent> {
@@ -229,6 +262,10 @@ impl VmHandle for VzHandle {
 
     fn vsock(&self) -> Option<&dyn Vsock> {
         self.inner.vsock.then_some(self)
+    }
+
+    fn checkpoint(&self) -> Option<&dyn Checkpoint> {
+        Some(self)
     }
 
     fn balloon(&self) -> Option<&dyn Balloon> {

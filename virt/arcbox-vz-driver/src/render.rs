@@ -23,12 +23,22 @@ pub struct Rendered {
     pub net: NetResources,
     pub console: Option<PipeConsole>,
     pub agent_log: Option<PipeConsole>,
+    /// The platform's machine identifier, which a restore of this VM's
+    /// checkpoints must present again.
+    pub machine_identifier: Vec<u8>,
 }
 
 /// Renders `spec`. Refuses, with `InvalidSpec`, what this driver cannot
 /// run: firmware and macOS boots, isolation, dirty tracking, a debug
 /// console, console files and sockets, TAP and bridge NICs.
-pub fn render(spec: &VmSpec, host: &HostServices) -> Result<Rendered> {
+///
+/// `machine_identifier` is the identifier of the VM a checkpoint being
+/// restored came from; a fresh boot passes `None` and gets a new one.
+pub fn render(
+    spec: &VmSpec,
+    host: &HostServices,
+    machine_identifier: Option<&[u8]>,
+) -> Result<Rendered> {
     spec.validate()?;
     refuse(spec)?;
     let BootSpec::Kernel {
@@ -46,6 +56,12 @@ pub fn render(spec: &VmSpec, host: &HostServices) -> Result<Rendered> {
     config.set_memory_size(u64::from(spec.memory_mib) * 1024 * 1024);
 
     let platform = GenericPlatform::new().map_err(|e| driver_error("platform", e))?;
+    if let Some(id) = machine_identifier {
+        platform
+            .set_machine_identifier(id)
+            .map_err(|e| driver_error("machine identifier", e))?;
+    }
+    let machine_identifier = platform.machine_identifier();
     if spec.nested_virt {
         if GenericPlatform::is_nested_virt_supported() {
             platform.set_nested_virt_enabled(true);
@@ -113,6 +129,7 @@ pub fn render(spec: &VmSpec, host: &HostServices) -> Result<Rendered> {
         net,
         console,
         agent_log,
+        machine_identifier,
     })
 }
 

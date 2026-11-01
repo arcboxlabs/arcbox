@@ -9,7 +9,7 @@ use arcbox_vm_driver::{
     Adopt, CheckpointImage, DriverCapabilities, Error, NestedVirt, RestoreSpec, Result, VmDriver,
     VmHandle, VmRecord, VmSpec,
 };
-use arcbox_vz::{GenericPlatform, VirtualMachine, VirtualMachineState};
+use arcbox_vz::{GenericPlatform, SessionState, VirtualMachine, VirtualMachineState};
 use async_trait::async_trait;
 
 use crate::handle::{Parts, VzHandle};
@@ -35,6 +35,18 @@ impl VzDriver {
             host: HostServices { dns, proxy },
         }
     }
+
+    /// Why a checkpoint cannot be taken right now, or `None` when it can.
+    ///
+    /// A VZ save needs the console user's session unlocked (ADR 0010,
+    /// decision 6), so a runtime asks before it schedules one — an idle
+    /// pause, a template capture — rather than pausing a guest only to
+    /// have the save refused. A checkpoint asked for anyway fails with
+    /// `Error::Unavailable` naming the same reason.
+    pub fn checkpoint_blocker(&self) -> Option<SessionState> {
+        let session = SessionState::current();
+        (!session.allows_checkpoint()).then_some(session)
+    }
 }
 
 #[async_trait]
@@ -51,6 +63,7 @@ impl VmDriver for VzDriver {
             agent_log: true,
             port_forward: true,
             debug: true,
+            checkpoint: true,
             nested_virt: if GenericPlatform::is_nested_virt_supported() {
                 NestedVirt::supported()
             } else {
@@ -66,7 +79,8 @@ impl VmDriver for VzDriver {
             net,
             mut console,
             mut agent_log,
-        } = render(&spec, &self.host)?;
+            machine_identifier,
+        } = render(&spec, &self.host, None)?;
         let vm = config.build().map_err(|e| driver_error("build", e))?;
         vm.start().await.map_err(|e| driver_error("start", e))?;
         wait_running(&vm).await?;
@@ -79,7 +93,7 @@ impl VmDriver for VzDriver {
             vm,
             Parts {
                 record: VmRecord {
-                    id: spec.id,
+                    id: spec.id.clone(),
                     driver: NAME.to_owned(),
                     runtime_dir: runtime_dir.to_path_buf(),
                     process: None,
@@ -89,11 +103,13 @@ impl VmDriver for VzDriver {
                 net,
                 vsock: spec.vsock.is_some(),
                 balloon: spec.balloon,
+                machine_identifier,
+                spec,
             },
         )))
     }
 
-    /// This driver writes no checkpoints yet, so every image is foreign.
+    /// This driver restores no checkpoints yet, so every image is foreign.
     async fn restore(
         &self,
         image: &CheckpointImage,
