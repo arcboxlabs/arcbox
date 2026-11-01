@@ -4,11 +4,14 @@
 //! is `SIGKILL` to it. Everything else is a request on its control socket.
 //! Dropping the handle kills the process unless it was detached.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use arcbox_vm_driver::{
-    Detach, Error, ExitStatus, IoMode, Result, ShutdownMode, VmEvent, VmHandle, VmId, VmRecord,
-    VmState, Vsock, VsockConn,
+    AfterCheckpoint, Balloon, BalloonStats, Checkpoint, CheckpointImage, CheckpointKind,
+    CheckpointOptions, DebugSnapshot, Detach, Error, ExitStatus, ForwardRule, IoMode, PortForward,
+    Result, ShutdownMode, VmEvent, VmHandle, VmId, VmRecord, VmState, Vsock, VsockConn,
 };
 use async_trait::async_trait;
 use tokio::sync::broadcast;
@@ -29,6 +32,7 @@ struct Inner {
     booted: Booted,
     /// `Running` or `Quiesced` while the process lives.
     state: Mutex<VmState>,
+    forward_taken: AtomicBool,
 }
 
 impl HvHandle {
@@ -45,6 +49,7 @@ impl HvHandle {
                 control,
                 booted,
                 state: Mutex::new(state),
+                forward_taken: AtomicBool::new(false),
             }),
         }
     }
@@ -115,7 +120,29 @@ impl VmHandle for HvHandle {
         self.inner.booted.vsock.then_some(self as &dyn Vsock)
     }
 
+    fn checkpoint(&self) -> Option<&dyn Checkpoint> {
+        Some(self)
+    }
+
     fn detach(&self) -> Option<&dyn Detach> {
+        Some(self)
+    }
+
+    fn balloon(&self) -> Option<&dyn Balloon> {
+        self.inner.booted.balloon.then_some(self as &dyn Balloon)
+    }
+
+    fn take_port_forward(&self) -> Option<Box<dyn PortForward>> {
+        if !self.inner.booted.port_forward || self.inner.forward_taken.swap(true, Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(Box::new(RemoteForward {
+            control: self.inner.control.clone(),
+        }))
+    }
+
+    fn debug(&self) -> Option<&dyn DebugSnapshot> {
         Some(self)
     }
 }
@@ -144,9 +171,121 @@ impl Vsock for HvHandle {
 }
 
 #[async_trait]
+impl Checkpoint for HvHandle {
+    /// See `arcbox_vmm::hv_driver`: `Resume` continues the guest in a
+    /// machine restored in the same process, so host connections into it
+    /// are reset.
+    async fn checkpoint(&self, dst: &Path, opts: CheckpointOptions) -> Result<CheckpointImage> {
+        if opts.kind == CheckpointKind::Diff {
+            return Err(Error::InvalidSpec(
+                "hv: incremental checkpoints are not available".into(),
+            ));
+        }
+        self.inner.require_running()?;
+        let hold = opts.after == AfterCheckpoint::HoldQuiesced;
+        let request = Request::Checkpoint {
+            dir: dst.to_path_buf(),
+            hold,
+        };
+        let image = match self.inner.control.call(request, control::SLOW).await? {
+            (Response::Image(image), _) => image,
+            (other, _) => return Err(unexpected(&other)),
+        };
+        if hold {
+            *lock(&self.inner.state) = VmState::Quiesced;
+        }
+        Ok(image)
+    }
+}
+
+#[async_trait]
 impl Detach for HvHandle {
     async fn detach(&self) -> Result<VmRecord> {
         self.inner.process.detach();
         Ok(self.inner.record.clone())
+    }
+}
+
+#[async_trait]
+impl Balloon for HvHandle {
+    async fn set_target(&self, bytes: u64) -> Result<()> {
+        self.inner.require_running()?;
+        match self
+            .inner
+            .control
+            .call(Request::BalloonTarget(bytes), control::QUICK)
+            .await?
+        {
+            (Response::Ok, _) => Ok(()),
+            (other, _) => Err(unexpected(&other)),
+        }
+    }
+
+    async fn stats(&self) -> Result<BalloonStats> {
+        match self
+            .inner
+            .control
+            .call(Request::BalloonStats, control::QUICK)
+            .await?
+        {
+            (Response::Balloon { target, current }, _) => Ok(BalloonStats {
+                target_bytes: target,
+                current_bytes: current,
+            }),
+            (other, _) => Err(unexpected(&other)),
+        }
+    }
+}
+
+impl DebugSnapshot for HvHandle {
+    fn snapshot(&self) -> serde_json::Value {
+        match self
+            .inner
+            .control
+            .call_blocking(&Request::Debug, control::QUICK)
+        {
+            Ok((Response::Debug(value), _)) => value,
+            Ok(_) | Err(_) => serde_json::Value::Null,
+        }
+    }
+}
+
+/// Port forwarding served by the VMM process: its listeners are bound
+/// there and relay into its datapath.
+struct RemoteForward {
+    control: Control,
+}
+
+#[async_trait]
+impl PortForward for RemoteForward {
+    async fn add(&mut self, rule: ForwardRule) -> Result<u16> {
+        match self
+            .control
+            .call(Request::ForwardAdd(rule.into()), control::QUICK)
+            .await?
+        {
+            (Response::Port(port), _) => Ok(port),
+            (other, _) => Err(unexpected(&other)),
+        }
+    }
+
+    async fn remove(&mut self, rule: ForwardRule) {
+        if let Err(e) = self
+            .control
+            .call(Request::ForwardRemove(rule.into()), control::QUICK)
+            .await
+        {
+            tracing::debug!(?rule, "removing a forward: {e}");
+        }
+    }
+
+    async fn clear(&mut self) {
+        if let Err(e) = self
+            .control
+            .call(Request::ForwardClear, control::QUICK)
+            .await
+        {
+            tracing::debug!("clearing forwards: {e}");
+        }
     }
 }

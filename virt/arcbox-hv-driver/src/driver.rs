@@ -152,8 +152,12 @@ impl VmDriver for HvDriver {
     fn capabilities(&self) -> DriverCapabilities {
         DriverCapabilities {
             vsock: true,
+            checkpoint: true,
             adopt: true,
             prepare: true,
+            balloon: true,
+            port_forward: true,
+            debug: true,
             nested_virt: NestedVirt::unsupported(
                 "Hypervisor.framework guests cannot run their own hypervisor",
             ),
