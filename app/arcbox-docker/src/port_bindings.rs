@@ -9,9 +9,14 @@ pub struct PortBindingInfo {
     pub protocol: String,
 }
 
+/// The runtime's forwarding rule `(host_ip, host_port, guest_port, protocol)`.
+///
+/// The guest port is the *host* port, not the container's: dockerd's own
+/// DNAT inside the guest owns `host_port → container_port`, so the host
+/// relay must arrive on the port that DNAT matches.
 impl From<PortBindingInfo> for (String, u16, u16, String) {
     fn from(b: PortBindingInfo) -> Self {
-        (b.host_ip, b.host_port, b.container_port, b.protocol)
+        (b.host_ip, b.host_port, b.host_port, b.protocol)
     }
 }
 
@@ -107,6 +112,23 @@ mod tests {
 
         let b443 = bindings.iter().find(|b| b.container_port == 443).unwrap();
         assert_eq!(b443.host_port, 8443);
+    }
+
+    /// `-p 8080:80` must reach the guest on 8080, where dockerd's DNAT
+    /// listens; the guest's own port 80 has nothing behind it.
+    #[test]
+    fn forwarding_rule_targets_the_published_host_port() {
+        let json = serde_json::json!({
+            "NetworkSettings": {
+                "Ports": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+            }
+        });
+        let bindings = parse_port_bindings(serde_json::to_vec(&json).unwrap().as_slice());
+        let rules: Vec<(String, u16, u16, String)> = bindings.into_iter().map(Into::into).collect();
+        assert_eq!(
+            rules,
+            [("127.0.0.1".to_owned(), 8080, 8080, "tcp".to_owned())]
+        );
     }
 
     #[test]
