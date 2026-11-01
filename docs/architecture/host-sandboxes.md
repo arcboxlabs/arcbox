@@ -120,14 +120,15 @@ or other sandboxes.
 
 - Templates resolve to an OCI image. `oci2rootfs` converts it into an ext4
   rootfs on the host; `arcbox-ext4` writes it.
-- `vm-agent` (musl) is written into the image while it is built.
-  `rootfs/inject.rs` today loop-mounts the image and bails off Linux; the host
-  path appends the agent through `Ext4Writer::write_file` before `finish`,
-  which needs an append hook in `oci2rootfs`.
+- `vm-agent` (musl) is written into the image while it is built, through
+  `oci2rootfs` 0.3.0's `Converter::convert_with` after the last layer and
+  before the image is finalized. Nothing is mounted, so the build runs on the
+  macOS host. `inject_vm_agent` keeps its loop mount for images that already
+  exist and stays Linux-only.
 - The daemon ships a musl `vm-agent` next to the guest agent.
 - Per-sandbox disks are APFS `clonefile` copies of the template image instead
-  of dm-snapshot. `CowManager` gets a host implementation behind the existing
-  `BlockTools`-style seam.
+  of dm-snapshot: `CowManager`'s `CowBackend::Clonefile`, selected through
+  `CowOptions::backend`, next to the default `CowBackend::DeviceMapper`.
 - `docker:<ref>` templates are pulled from the registry. When the image is
   not in a registry and the System VM is running, it is exported from the
   System VM's `dockerd` instead (D5).
@@ -138,10 +139,14 @@ The image config (Entrypoint, Cmd, Env, WorkingDir, User) and the create
 request are translated into an OCI `config.json` in the consumer, and
 `arcbox-oci` models it. This activates the parked `runtime/` crates under the
 charter's condition ("a workspace crate must build or run an OCI runtime
-bundle itself, without dockerd").
+bundle itself, without dockerd"). The consumer is the `workload` module of
+`arcbox-computer-runtime`, and `arcbox-oci` moved next to it under
+`computer/`.
 
 - Supported: process args, env, cwd, user, tty, mounts that map to a
-  VirtioFS share.
+  VirtioFS share. The contract translates bind mounts, but `vm-agent` mounts
+  no VirtioFS share yet, so no location reports `bind_mounts` in
+  `GetCapabilities`.
 - Rejected with an explicit error: hooks, namespaces, seccomp, capabilities,
   rlimits, devices. `Spec::validate` is shallow, so the consumer checks this
   itself.
@@ -177,7 +182,12 @@ datapath, and there is no shared host bridge between them (D1).
 The code from the spikes is on master: `arcbox_hv::snapshot`,
 `Vmm::hv_checkpoint`/`hv_restore` (spike quality, behind the `gic` feature),
 `DatapathControl`, `VirtioVsock::post_transport_reset`, and the VZ shim's
-`save_state`/`restore_state`. None of it is wired into a driver yet.
+`save_state`/`restore_state`. Wave 1 wired it into the drivers: `HvDriver`
+(`virt/arcbox-hv-driver`, one `arcbox-hv-vmm` process per VM) and `VzDriver`
+both expose the `Checkpoint` capability and `VmDriver::restore`
+([HV driver log](../logs/2026-11-01-hv-driver-process-per-vm.md), the VZ
+spike's follow-up), and the VMM closed most of the HV gaps below
+([HV checkpoint gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)).
 
 ### Constraints
 
@@ -192,18 +202,25 @@ The code from the spikes is on master: `arcbox_hv::snapshot`,
 
 ### Checkpoint gaps
 
-| Gap | Backend | Notes |
-|---|---|---|
-| VirtioFS (FUSE inode table, DAX mappings) | HV | Not in any spike. Out of v1 (D3). |
-| Balloon, console RX cursor (`rx_last_avail`) | HV | Host-side state not yet derived from guest memory. |
-| Bridge NIC, DHCP lease, DNS registration | HV | Spikes used a static address. A restored guest renews a lease from a datapath that never issued it. |
-| Frames queued for the RX inject thread at pause | HV | Lost; TCP retransmits. Not counted. |
-| Flows mid-handshake at checkpoint (`PassiveOpen`, `ActiveOpen`) | HV | `abort` covers them; not tested. |
-| Saving only dirty pages | HV | Save scans all RAM: ~300 ms per GiB. |
-| First-touch cost of the working set after lazy restore | HV | Not measured. |
-| Saves with the session unlocked; restore; restore while locked; size and time for 1 GiB | VZ | Confirms or refutes the lock inference. Also whether one state file restores into several clones, which warm start needs. |
-| `Checkpoint` capability, `RestoreSpec`, `SnapshotCatalog` wiring, `driver_contract!` coverage | Both | Spike entry points become driver capabilities. |
-| Clone identity: MAC/IP via `NetReconfigCommand`, vsock CID, entropy reseed | Both | Needed for warm start and templates. |
+Wave 1 closed the rows marked closed; the HV ones are measured in the
+[HV checkpoint gaps experiment](../experiments/2026-11-01-hv-checkpoint-gaps.md).
+
+| Gap | Backend | Status | Notes |
+|---|---|---|---|
+| VirtioFS (FUSE inode table, DAX mappings) | HV | Open | Not in any spike. Out of v1 (D3). |
+| Balloon, console RX cursor (`rx_last_avail`) | HV | Closed | The balloon's target and inflation travel with the device; balloon and console resume at the guest's `used.idx` ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
+| NIC MAC | HV | Closed | virtio-net saves and restores its MAC. The vmnet bridge NIC's MAC is saved and reused, but nothing exercises that path yet ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
+| macOS build | HV | Closed | `state.json` records `os_build`; a restore on another build fails with `VmmError::CheckpointBuildMismatch` before building anything ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). The runtime also labels every host checkpoint with the build and refuses a mismatch first (D6). |
+| DHCP lease after restore | HV | Closed | The datapath ACKs a renewal of a lease it never issued, now by unicast to the client's address, which is where a renewing client listens ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
+| DNS registration of a restored sandbox | HV | Open | Composition (wave 2). |
+| Frames queued for the RX inject thread at pause | HV | Open | Lost; TCP retransmits. Not counted. |
+| Flows mid-handshake at checkpoint (`PassiveOpen`, `ActiveOpen`) | HV | Closed | A pending dial is reset like an established flow; an `ActiveOpen` saves no reset and the guest's SYN-ACK draws one ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
+| Saving only dirty pages | HV | Closed | `mincore` picks the pages to write: a 1 GiB guest with about 50–68 MiB touched writes its RAM in about 50–59 ms at p50, instead of scanning all RAM (~300 ms per GiB) ([gaps](../experiments/2026-11-01-hv-checkpoint-gaps.md)). |
+| First-touch cost of the working set after lazy restore | HV | Open | Not measured. |
+| Saves with the session unlocked; restore; restore while locked; size and time for 1 GiB | VZ | Partly closed | Unlocked saves and restores work, one state file restores into several VMs at once, and size and time are measured (the [VZ spike's follow-up](../experiments/2026-10-31-vz-checkpoint-spike.md#follow-up-2026-11-01-the-unlocked-runs-restore-and-the-driver)). Open: a save and a restore while locked through the driver, and a restore on another Mac or user account. |
+| `Checkpoint` capability, `RestoreSpec`, `driver_contract!` coverage | Both | Closed | `HvDriver` and `VzDriver` expose `Checkpoint` and `VmDriver::restore`, and `driver_contract!` runs its checkpoint checks against real HV processes and VZ ([HV driver log](../logs/2026-11-01-hv-driver-process-per-vm.md), the VZ follow-up). |
+| `SnapshotCatalog` wiring | Both | Open | The daemon's host composition (wave 2). |
+| Clone identity: MAC/IP via `NetReconfigCommand`, vsock CID, entropy reseed | Both | Open | Needed for warm start and templates. On VZ every clone keeps the source's machine identifier and MAC, so identity has to change inside the guest. |
 
 ## Capabilities and API
 
@@ -213,6 +230,13 @@ and whether pause is available right now (false for VZ while the session is
 locked). A `Pause` that cannot run returns `FAILED_PRECONDITION` with a
 detail naming the reason. Bind mounts and port publishing become optional
 capabilities that a location may lack.
+
+Wave 1 put this into the proto: `CreateSandboxRequest.run_location` and one
+`LocationCapability` per location in `GetCapabilitiesResponse.locations`
+(backend, availability, `pause_resume`, `pause_available` and its reason,
+warm prespawn, port publishing, bind mounts). `nested_virt` stays as the
+nested entry's availability for older SDKs. The contract is in
+`docs/sandbox-api.md`.
 
 ## Documents this changes
 
