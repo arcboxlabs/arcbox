@@ -90,6 +90,7 @@ from memory. Every new file is added to the index below.
 ### Experiments
 
 - [2026-11-02 — Does the real System VM agent run on vhost-user-fs under QEMU TCG?](experiments/2026-11-02-vhost-user-fs-real-agent.md) — probe `virt/arcbox-vhost-user/examples/qemu_system_vm_probe/`
+- [2026-11-02 — Does the HV vsock data plane carry the daemon's real traffic to a QEMU TCG guest over vhost-user?](experiments/2026-11-02-vhost-user-vsock.md) — probe `tests/e2e/src/bin/qemu_vsock_e2e/`
 - [2026-11-02 — Can the daemon serve the System VM's virtio-fs and vsock to QEMU TCG over vhost-user on macOS?](experiments/2026-11-02-vhost-user-on-macos.md) — probe `virt/arcbox-vhost-user/examples/qemu_fs_probe.rs`
 - [2026-10-31 — Can a Hypervisor.framework VM be checkpointed in one process and resumed in another?](experiments/2026-10-31-hv-checkpoint-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
 - [2026-10-31 — Can a multi-vCPU HV VM with a virtio-blk device under load be checkpointed and resumed?](experiments/2026-10-31-hv-checkpoint-blk-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
