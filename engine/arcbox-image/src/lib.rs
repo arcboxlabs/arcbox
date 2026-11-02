@@ -12,6 +12,7 @@
 pub mod boot_assets;
 pub mod error;
 pub mod machine_image;
+pub mod qemu;
 pub mod remote_image;
 
 pub use error::{ImageError, Result};

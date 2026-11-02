@@ -14,11 +14,23 @@
 # side — the CLI tolerates an older daemon through API negotiation, but the
 # two pins should only diverge for the short window between a bundle release
 # and the [boot] bump.
+#
+# [qemu] pins the QEMU build (arcboxlabs/qemu) that runs the System VM on a
+# Mac without hardware virtualization. It is not bundled: the daemon
+# downloads <cdn>/v<version>/qemu-darwin-<arch>-v<version>.tar.gz into
+# ~/.arcbox/runtime/qemu/<version>/ only when the System VM needs it, or
+# `abctl qemu import` installs the same archive from a local file. An empty
+# sha256 means the build is not published yet and nothing is downloaded.
 
 [boot]
 version = "0.8.12"
 cdn = "https://boot.arcboxcdn.com"
 manifest_sha256 = "4e1638ce4d9f5fcb4669420bb41481297807bf7f069ea264e54c1e258abc409b"
+
+[qemu]
+version = "0.1.0"
+cdn = "https://boot.arcboxcdn.com/qemu"
+arch.arm64.sha256 = ""
 
 [[tools]]
 name = "docker"
