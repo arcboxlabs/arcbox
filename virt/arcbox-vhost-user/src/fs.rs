@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use arcbox_fs::FsServer;
 use arcbox_virtio_core::{DescChain, GuestMemWriter, VirtioDevice};
-use arcbox_virtio_fs::{FuseResponse, VirtioFs};
+use arcbox_virtio_fs::{DEFAULT_MAX_WRITE, FuseResponse, VirtioFs};
 
 use crate::{Backend, BackendHandle, Error, Result, VhostUserDevice, Vrings};
 
@@ -33,6 +33,11 @@ pub const REQUEST_QUEUES: usize = 1;
 
 /// Largest `queue-size` the front-end may configure.
 pub const QUEUE_SIZE: u16 = 1024;
+
+/// Longest request a guest can send: a `FUSE_WRITE` of the `max_write` the
+/// session advertises, after one page of headers (the kernel's
+/// `FUSE_BUFFER_HEADER_SIZE`). A longer chain is not a FUSE request.
+const MAX_REQUEST: usize = DEFAULT_MAX_WRITE as usize + 4096;
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
@@ -194,20 +199,25 @@ impl VhostUserDevice for FsDevice {
 /// Gathers the request from the chain's readable descriptors, answers it,
 /// and scatters the reply into the writable ones. Returns the bytes written.
 fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u32 {
-    let mut request = Vec::new();
-    for d in chain.descriptors.iter().filter(|d| !d.is_write()) {
-        if let Some(bytes) = mem.slice(d.addr as usize, d.len as usize) {
-            request.extend_from_slice(bytes);
-        }
-    }
-    let reply = fs.process_request(&request).unwrap_or_else(|e| {
-        tracing::warn!("virtio-fs request failed: {e}");
-        let unique = request
-            .get(8..16)
-            .and_then(|b| b.try_into().ok())
-            .map_or(0, u64::from_le_bytes);
-        FuseResponse::error(unique, libc::EIO).into_data()
-    });
+    // Descriptor lengths are the guest's: up to 1024 of them, each up to
+    // 4 GiB and free to cover the same range, so the total is checked
+    // before anything is copied.
+    let len: u64 = chain
+        .descriptors
+        .iter()
+        .filter(|d| !d.is_write())
+        .map(|d| u64::from(d.len))
+        .sum();
+    let reply = if len > MAX_REQUEST as u64 {
+        tracing::warn!(len, "virtio-fs request longer than any FUSE request");
+        FuseResponse::error(unique(&gather(mem, chain, 16)), libc::EINVAL).into_data()
+    } else {
+        let request = gather(mem, chain, MAX_REQUEST);
+        fs.process_request(&request).unwrap_or_else(|e| {
+            tracing::warn!("virtio-fs request failed: {e}");
+            FuseResponse::error(unique(&request), libc::EIO).into_data()
+        })
+    };
     let mut written = 0;
     for d in chain.descriptors.iter().filter(|d| d.is_write()) {
         let rest = &reply[written..];
@@ -225,12 +235,58 @@ fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u
     written as u32
 }
 
+/// Copies at most `limit` bytes from the chain's readable descriptors.
+fn gather(mem: &GuestMemWriter, chain: &DescChain, limit: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for d in chain.descriptors.iter().filter(|d| !d.is_write()) {
+        let room = limit - out.len();
+        if room == 0 {
+            break;
+        }
+        if let Some(bytes) = mem.slice(d.addr as usize, (d.len as usize).min(room)) {
+            out.extend_from_slice(bytes);
+        }
+    }
+    out
+}
+
+/// The `unique` of a FUSE request, or 0 when its header is cut short.
+fn unique(request: &[u8]) -> u64 {
+    request
+        .get(8..16)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arcbox_virtio_core::VirtqDesc;
 
     const WRITE: u16 = 2;
+
+    fn desc(addr: u64, len: u32, flags: u16) -> VirtqDesc {
+        VirtqDesc {
+            addr,
+            len,
+            flags,
+            next: 0,
+        }
+    }
+
+    /// FUSE_INIT (opcode 26, FUSE 7.31): a 40-byte header and a 16-byte body.
+    fn fuse_init(unique: u64) -> Vec<u8> {
+        let mut init = Vec::new();
+        for v in [56u32, 26] {
+            init.extend_from_slice(&v.to_le_bytes());
+        }
+        init.extend_from_slice(&unique.to_le_bytes());
+        init.resize(40, 0);
+        for v in [7u32, 31, 128 << 10, 0] {
+            init.extend_from_slice(&v.to_le_bytes());
+        }
+        init
+    }
 
     /// The guest splits requests and replies across descriptors wherever its
     /// buffers fall; both directions must cross descriptor boundaries intact.
@@ -239,27 +295,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut fs = FsShare::new("t", dir.path()).session().unwrap();
 
-        // FUSE_INIT (opcode 26, unique 7, FUSE 7.31): a 40-byte header and a
-        // 16-byte body in separate readable descriptors.
-        let mut init = Vec::new();
-        for v in [56u32, 26] {
-            init.extend_from_slice(&v.to_le_bytes());
-        }
-        init.extend_from_slice(&7u64.to_le_bytes());
-        init.resize(40, 0);
-        for v in [7u32, 31, 128 << 10, 0] {
-            init.extend_from_slice(&v.to_le_bytes());
-        }
+        // INIT with unique 7, header and body in separate readable descriptors.
         let mut ram = vec![0u8; 4096];
-        ram[..56].copy_from_slice(&init);
+        ram[..56].copy_from_slice(&fuse_init(7));
         // SAFETY: `ram` outlives the writer.
         let mem = unsafe { GuestMemWriter::new(ram.as_mut_ptr(), ram.len(), 0) };
-        let desc = |addr, len, flags| VirtqDesc {
-            addr,
-            len,
-            flags,
-            next: 0,
-        };
         let chain = DescChain {
             head_idx: 0,
             descriptors: vec![
@@ -281,5 +321,45 @@ mod tests {
             ram[2098..2148].iter().all(|&b| b == 0),
             "nothing past the reply"
         );
+    }
+
+    /// A chain longer than any FUSE request is refused before it is copied,
+    /// since every descriptor may repeat one large range of guest memory.
+    #[test]
+    fn requests_longer_than_a_full_write_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = FsShare::new("t", dir.path()).session().unwrap();
+        fs.process_request(&fuse_init(1)).unwrap();
+
+        // FUSE_GETATTR (opcode 3, unique 9) of the root, padded to `len`
+        // bytes by a second readable descriptor.
+        let reply_at = 0x3_0000;
+        let mut ram = vec![0u8; 0x4_0000];
+        let mut getattr = |len: usize| -> i32 {
+            ram[0..4].copy_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+            ram[4..8].copy_from_slice(&3u32.to_le_bytes());
+            ram[8..16].copy_from_slice(&9u64.to_le_bytes());
+            ram[16..24].copy_from_slice(&1u64.to_le_bytes());
+            ram[reply_at..].fill(0);
+            // SAFETY: `ram` outlives the writer.
+            let mem = unsafe { GuestMemWriter::new(ram.as_mut_ptr(), ram.len(), 0) };
+            let padding = u32::try_from(len - 56).unwrap();
+            let chain = DescChain {
+                head_idx: 0,
+                descriptors: vec![
+                    desc(0, 56, 0),
+                    desc(4096, padding, 0),
+                    desc(reply_at as u64, 256, WRITE),
+                ],
+            };
+            handle_chain(&mut fs, &mem, &chain);
+            drop(mem);
+            let reply = &ram[reply_at..];
+            assert_eq!(reply[8..16], 9u64.to_le_bytes(), "unique echoed");
+            i32::from_le_bytes(reply[4..8].try_into().unwrap())
+        };
+
+        assert_eq!(getattr(MAX_REQUEST), 0, "a full-size request is served");
+        assert_eq!(getattr(MAX_REQUEST + 1), -libc::EINVAL);
     }
 }
