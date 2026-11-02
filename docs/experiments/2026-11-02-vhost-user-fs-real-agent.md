@@ -47,8 +47,9 @@ timing the staging directory under `/run/arcbox/data/runtime`, a cold read
 of the runtime through `/arcbox`, `sync` and `sync -f` on each share, a tar
 of 4000 4 KiB files under `/Users` with one reader and of the same tree
 under `/private` with four. `guest/exec_coherence.rs` checks whether code
-the back-end writes runs as written. Four runs of the final probe; three
-control runs with the agent executed from the share.
+the back-end writes runs as written. Four runs of the probe (10–13), three
+of it as committed after review (14–16), and three control runs with the
+agent executed from the share.
 
 ## Results
 
@@ -58,8 +59,21 @@ control runs with the agent executed from the share.
 | 11 | 3.2 s | 6.45 s | 0.38 s (624 MiB/s) | 5.07 s | 2.70 s | 17.4 s |
 | 12 | 3.2 s | 6.29 s | 0.30 s (790 MiB/s) | 4.98 s | 2.65 s | 16.9 s |
 | 13 | 3.1 s | 6.64 s | 0.28 s (847 MiB/s) | 5.14 s | 2.67 s | 17.6 s |
+| 14 | 3.2 s | 7.59 s | 0.54 s (439 MiB/s) | 6.77 s | 3.26 s | 21.1 s |
+| 15 | 3.4 s | 7.69 s | 0.30 s (790 MiB/s) | 5.98 s | 3.10 s | 20.1 s |
+| 16 | 4.2 s | 9.22 s | 0.34 s (697 MiB/s) | 5.82 s | 3.00 s | 21.7 s |
 
-Back-end load per share (run 12; the others are within 0.02 s):
+Runs 14–16 are the probe as committed, rebased onto the merged vhost-user
+framework, on a new satellite of the same type. The back-end refuses
+requests longer than a full FUSE_WRITE, and each tar now also lists its
+archive in the guest to count the files read and checks tar's exit status
+(`tarred` in `guest/driver.sh`). That listing is guest CPU under TCG and
+is part of the tar times. Every run read 4000 of 4000 files with tar
+exit status 0. Worker busy time was 0.57–0.65 s for `users` and
+0.51–0.58 s for `private` (run 12: 0.48 s and 0.66 s), and execution from
+the share ran stale code in 3, 1 and 2 of 16 rounds.
+
+Back-end load per share (run 12; runs 10, 11 and 13 are within 0.02 s):
 
 | Share | Requests | Worker busy | Deepest batch | Load it served |
 |---|---|---|---|---|
@@ -103,9 +117,9 @@ passed. From the devtmpfs copy: 4 of 4 passed.
    faster than one with the same single worker. The time goes to the
    emulated guest, not the back-end. Hypothesis 3 holds. HV serves FUSE
    with one queue too.
-4. Runtime materialization from `/arcbox/runtime` to Btrfs takes 3.1–3.2 s
+4. Runtime materialization from `/arcbox/runtime` to Btrfs takes 3.1–4.2 s
    for 10 assets (237 MiB), and EnsureRuntime reaches ready, with dockerd
-   answering `/_ping`, 6.3–6.7 s after it is first called.
+   answering `/_ping`, 6.3–9.2 s after it is first called.
 5. QEMU TCG keeps executing its translation of a guest page after a
    vhost-user back-end rewrites that page. QEMU drops translations when
    the guest CPU or one of its own devices writes a page, but the

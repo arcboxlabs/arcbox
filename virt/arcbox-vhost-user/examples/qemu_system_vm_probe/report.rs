@@ -171,12 +171,18 @@ pub fn report(args: &Args, work: &Path, outcome: &Outcome) -> usize {
         syncfs_ok == 4,
         &format!("syncfs exits 0 on every share ({syncfs_ok}/4)"),
     );
-    let expected = (args.small_files * 4096) as f64;
     for key in ["users-tar1 ", "private-tar4 "] {
-        let bytes = field(&console, key).and_then(|l| kv(l, "bytes="));
+        let line = field(&console, key);
+        let files = line.and_then(|l| kv(l, "files="));
+        let rc = line.and_then(|l| kv(l, "rc="));
         check(
-            bytes.is_some_and(|b| b > expected),
-            &format!("{key}read every small file"),
+            files == Some(args.small_files as f64) && rc == Some(0.0),
+            &format!(
+                "{key}read every small file ({} of {}, tar rc {})",
+                files.unwrap_or(-1.0),
+                args.small_files,
+                rc.unwrap_or(-1.0)
+            ),
         );
     }
     check(field(&console, "done").is_some(), "driver finished");
