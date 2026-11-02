@@ -1420,6 +1420,22 @@ pub struct SetupStatus {
     /// System runtime admission is independent of host and local HTTPS readiness.
     #[prost(message, optional, tag = "12")]
     pub system_runtime: ::core::option::Option<SystemRuntimeStatus>,
+    /// Whether this Mac provides hardware virtualization: Virtualization.framework
+    /// or Hypervisor.framework can create a VM. Probed once at daemon start and
+    /// fixed for the daemon's life. False on a macOS virtual machine (cloud Macs,
+    /// CI runners); there neither HV nor VZ can run, so no backend is effective,
+    /// system_runtime is FAILED with the cause in its reason, and every machine
+    /// start fails. The host phase still reaches READY and the daemon keeps
+    /// running. Absent from a daemon that predates the field: check presence
+    /// before reading false as unavailable.
+    #[prost(bool, optional, tag = "13")]
+    pub hardware_virtualization_available: ::core::option::Option<bool>,
+    /// The backend the System VM runs on, or boots with next: the configured
+    /// backend (GetSystemVmBackend) once the daemon has checked this host can run
+    /// it. UNSPECIFIED before the daemon has resolved it and while no backend can
+    /// run here. Updated when SetSystemVmBackend changes the backend.
+    #[prost(enumeration = "SystemVmBackend", tag = "14")]
+    pub effective_backend: i32,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
@@ -1920,6 +1936,10 @@ pub enum SystemVmBackend {
     Hv = 1,
     /// Virtualization.framework — Apple-managed execution. The default.
     Vz = 2,
+    /// QEMU with TCG emulation, for Macs without hardware virtualization.
+    /// Declared ahead of the backend: until a daemon implements it,
+    /// SetSystemVmBackend rejects it with UNIMPLEMENTED and no status reports it.
+    Qemu = 3,
 }
 impl SystemVmBackend {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1931,6 +1951,7 @@ impl SystemVmBackend {
             Self::Unspecified => "SYSTEM_VM_BACKEND_UNSPECIFIED",
             Self::Hv => "SYSTEM_VM_BACKEND_HV",
             Self::Vz => "SYSTEM_VM_BACKEND_VZ",
+            Self::Qemu => "SYSTEM_VM_BACKEND_QEMU",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1939,6 +1960,7 @@ impl SystemVmBackend {
             "SYSTEM_VM_BACKEND_UNSPECIFIED" => Some(Self::Unspecified),
             "SYSTEM_VM_BACKEND_HV" => Some(Self::Hv),
             "SYSTEM_VM_BACKEND_VZ" => Some(Self::Vz),
+            "SYSTEM_VM_BACKEND_QEMU" => Some(Self::Qemu),
             _ => None,
         }
     }

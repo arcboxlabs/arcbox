@@ -269,6 +269,8 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     #[cfg(target_os = "macos")]
     crate::self_setup::tls::prepare(ctx);
     let runtime = Arc::new(Runtime::new(config).context("Failed to create runtime")?);
+    ctx.setup_state
+        .set_effective_backend(runtime.effective_system_vm_backend());
     // A stuck boot must preserve diagnostics and read-only directory access
     // while `shared_runtime` still gates operations.
     ctx.early_runtime

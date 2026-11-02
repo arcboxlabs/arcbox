@@ -110,6 +110,18 @@ impl SetupState {
         });
     }
 
+    /// Publishes whether this host provides hardware virtualization.
+    pub fn set_hardware_virtualization_available(&self, available: bool) {
+        self.publish(|s| s.hardware_virtualization_available = Some(available));
+    }
+
+    /// Publishes the backend the System VM boots with; `None` when this host
+    /// can run none.
+    pub fn set_effective_backend(&self, backend: Option<arcbox_core::VmBackend>) {
+        let backend = backend.map_or(SystemVmBackend::Unspecified, backend_to_proto);
+        self.publish(|s| s.effective_backend = backend.into());
+    }
+
     /// Updates a specific infrastructure flag.
     pub fn set_dns_installed(&self, installed: bool) {
         self.publish(|s| s.dns_resolver_installed = installed);
@@ -200,12 +212,17 @@ impl SystemServiceImpl {
     }
 }
 
-/// Maps the wire enum to the core backend, or `None` for the unspecified value.
-fn backend_from_proto(backend: SystemVmBackend) -> Option<arcbox_core::VmBackend> {
+/// Maps a requested wire backend to the core backend this daemon can run.
+fn backend_from_proto(backend: SystemVmBackend) -> Result<arcbox_core::VmBackend, ConnectError> {
     match backend {
-        SystemVmBackend::Hv => Some(arcbox_core::VmBackend::Hv),
-        SystemVmBackend::Vz => Some(arcbox_core::VmBackend::Vz),
-        SystemVmBackend::Unspecified => None,
+        SystemVmBackend::Hv => Ok(arcbox_core::VmBackend::Hv),
+        SystemVmBackend::Vz => Ok(arcbox_core::VmBackend::Vz),
+        SystemVmBackend::Qemu => Err(ConnectError::unimplemented(
+            "the QEMU backend is not available in this ArcBox version",
+        )),
+        SystemVmBackend::Unspecified => {
+            Err(ConnectError::invalid_argument("backend must be HV or VZ"))
+        }
     }
 }
 
@@ -629,13 +646,14 @@ impl pb::SystemService for SystemServiceImpl {
         request: ServiceRequest<'_, pb::SetSystemVmBackendRequest>,
     ) -> ServiceResult<pb::SystemVmBackendInfo> {
         let req = request.to_owned_message();
-        let backend = backend_from_proto(req.backend.as_known().unwrap_or_default())
-            .ok_or_else(|| ConnectError::invalid_argument("backend must be HV or VZ"))?;
+        let backend = backend_from_proto(req.backend.as_known().unwrap_or_default())?;
         let runtime = self.host_runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
-        runtime
-            .switch_system_vm_backend(backend)
-            .await
-            .map_err(|e| ConnectError::internal(e.to_string()))?;
+        let switched = runtime.switch_system_vm_backend(backend).await;
+        // Publish on failure too: the restart can fail after the switch was
+        // recorded.
+        self.setup_state
+            .set_effective_backend(runtime.effective_system_vm_backend());
+        switched.map_err(|e| ConnectError::internal(e.to_string()))?;
         let info = pb::SystemVmBackendInfo {
             backend: backend_to_proto(runtime.system_vm_backend()).into(),
             ..Default::default()
@@ -754,6 +772,31 @@ mod tests {
 
         assert_eq!(snapshot.phase, setup_status::Phase::AssetsReady);
         assert_eq!(drain(&mut updates), []);
+    }
+
+    /// QEMU is on the wire before any daemon can run it, so a request for it
+    /// is refused rather than mapped onto a backend that exists.
+    #[test]
+    fn requested_backends_map_only_onto_runnable_backends() {
+        use arcbox_core::VmBackend;
+        assert_eq!(
+            backend_from_proto(SystemVmBackend::Hv).unwrap(),
+            VmBackend::Hv
+        );
+        assert_eq!(
+            backend_from_proto(SystemVmBackend::Vz).unwrap(),
+            VmBackend::Vz
+        );
+        assert_eq!(
+            backend_from_proto(SystemVmBackend::Qemu).unwrap_err().code,
+            connectrpc::ErrorCode::Unimplemented
+        );
+        assert_eq!(
+            backend_from_proto(SystemVmBackend::Unspecified)
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::InvalidArgument
+        );
     }
 
     /// Flags travel the same path as phases: a client watching for the route

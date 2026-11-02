@@ -216,7 +216,8 @@ service SystemService {
     // Accepted mutations continue if the client disconnects.
     rpc CommitLocalCaRotation(CommitLocalCaRotationRequest) returns (Empty);
 
-    // Gets the System VM's current hypervisor backend.
+    // Gets the System VM's configured hypervisor backend.
+    // SetupStatus.effective_backend reports whether this host can run it.
     rpc GetSystemVmBackend(Empty) returns (SystemVmBackendInfo);
 
     // Switches the System VM's hypervisor backend (HV <-> VZ). The choice is
@@ -263,6 +264,10 @@ enum SystemVmBackend {
     SYSTEM_VM_BACKEND_HV = 1;
     // Virtualization.framework — Apple-managed execution. The default.
     SYSTEM_VM_BACKEND_VZ = 2;
+    // QEMU with TCG emulation, for Macs without hardware virtualization.
+    // Declared ahead of the backend: until a daemon implements it,
+    // SetSystemVmBackend rejects it with UNIMPLEMENTED and no status reports it.
+    SYSTEM_VM_BACKEND_QEMU = 3;
 }
 
 // The System VM's hypervisor backend.
@@ -1155,6 +1160,20 @@ message SetupStatus {
     LocalHttpsStatus local_https = 11;
     // System runtime admission is independent of host and local HTTPS readiness.
     SystemRuntimeStatus system_runtime = 12;
+    // Whether this Mac provides hardware virtualization: Virtualization.framework
+    // or Hypervisor.framework can create a VM. Probed once at daemon start and
+    // fixed for the daemon's life. False on a macOS virtual machine (cloud Macs,
+    // CI runners); there neither HV nor VZ can run, so no backend is effective,
+    // system_runtime is FAILED with the cause in its reason, and every machine
+    // start fails. The host phase still reaches READY and the daemon keeps
+    // running. Absent from a daemon that predates the field: check presence
+    // before reading false as unavailable.
+    optional bool hardware_virtualization_available = 13;
+    // The backend the System VM runs on, or boots with next: the configured
+    // backend (GetSystemVmBackend) once the daemon has checked this host can run
+    // it. UNSPECIFIED before the daemon has resolved it and while no backend can
+    // run here. Updated when SetSystemVmBackend changes the backend.
+    SystemVmBackend effective_backend = 14;
 }
 
 // Readiness of the System VM and its dependent services.
