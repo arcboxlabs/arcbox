@@ -47,6 +47,25 @@ pub fn system_info(vsock: &VhostUserVsock) -> Result<()> {
     Ok(())
 }
 
+/// Starts containerd and dockerd the way the daemon does: `EnsureRuntime`
+/// with `start_if_needed`, polled until the agent reports the runtime ready.
+pub fn ensure_runtime(vsock: &VhostUserVsock, budget: Duration) -> Result<()> {
+    let deadline = Instant::now() + budget;
+    let mut last = String::from("no answer");
+    while Instant::now() < deadline {
+        let reply = client(vsock.connect_vsock(AGENT_PORT)?, Duration::from_secs(10))
+            .and_then(|mut c| Ok(c.ensure_runtime_blocking(true)?));
+        match reply {
+            Ok(r) if r.ready => return Ok(()),
+            Ok(r) if r.status == "failed" => bail!("guest runtime failed: {}", r.message),
+            Ok(r) => last = r.status,
+            Err(e) => last = format!("{e:#}"),
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    bail!("guest runtime not ready after {budget:?}: {last}")
+}
+
 /// An `AgentClient` on the blocking transport, as the HV backend uses, with
 /// `timeout` on each read and write.
 fn client(fd: OwnedFd, timeout: Duration) -> Result<AgentClient> {

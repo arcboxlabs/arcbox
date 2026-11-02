@@ -4,7 +4,8 @@
 //! `arcbox-agent`) under QEMU TCG with `vhost-user-vsock-pci` served by
 //! `arcbox_virtio_vsock::vhost_user::VhostUserVsock`, then drives the
 //! host-dialled vsock ports with the daemon's own clients: agent RPC on 1024
-//! through `AgentClient`.
+//! through `AgentClient`, the Docker API on 2375 through `HalfCloseStream`
+//! and the Docker CLI.
 //!
 //! ```text
 //! abctl boot prefetch --data-dir "$DATA"          # kernel, rootfs, runtime
@@ -16,7 +17,9 @@
 //! ```
 //!
 //! The data directory becomes the `arcbox` share, as `~/.arcbox` is for the
-//! daemon; use a scratch directory. Exit status 0 means every check passed.
+//! daemon; use a scratch directory. The Docker checks need `--gvproxy` (the
+//! guest's NIC, for `docker pull`) and `docker` on `PATH`. Exit status 0
+//! means every check passed.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -25,6 +28,8 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod agent;
+#[cfg(target_os = "macos")]
+mod docker;
 
 #[cfg(target_os = "macos")]
 const CID: u64 = 3;
@@ -67,11 +72,13 @@ fn main() -> std::process::ExitCode {
 #[cfg(target_os = "macos")]
 mod probe {
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, bail};
     use arcbox_e2e::qemu::{Vm, VmOptions};
 
+    use crate::docker::Docker;
     use crate::{CID, agent};
 
     fn parse_args() -> Result<VmOptions> {
@@ -161,9 +168,11 @@ mod probe {
         let options = parse_args()?;
         println!("[fds] soft limit raised to {}", raise_fd_limit()?);
         println!("[logs] {}", options.log_dir.display());
+        let docker_socket = options.log_dir.join("docker.sock");
+        let with_docker = options.gvproxy.is_some();
         let started = Instant::now();
         let vm = Vm::boot(&options)?;
-        let result = checks(&vm, started);
+        let result = checks(&vm, started, with_docker.then_some(docker_socket));
         if result.is_err() {
             println!(
                 "[state] {} vsock connections open",
@@ -174,7 +183,7 @@ mod probe {
         result
     }
 
-    fn checks(vm: &Vm, started: Instant) -> Result<()> {
+    fn checks(vm: &Vm, started: Instant, docker_socket: Option<PathBuf>) -> Result<()> {
         let vsock = &vm.vsock;
         let ready = agent::wait_ready(vsock, Duration::from_secs(300))?;
         println!(
@@ -186,6 +195,29 @@ mod probe {
         agent::concurrent(vsock, 512)?;
         agent::burst(vsock, 512)?;
         agent::host_close(vsock)?;
+
+        let docker = match docker_socket {
+            Some(socket) => {
+                vm.route_guest_dns_to_gvproxy()?;
+                let docker = Docker::start(Arc::clone(vsock), socket)?;
+                let t = Instant::now();
+                agent::ensure_runtime(vsock, Duration::from_secs(300))?;
+                let version = docker.wait_ready(Duration::from_secs(60))?;
+                println!(
+                    "[ok] EnsureRuntime started dockerd {version} in {:.1}s; it answers through vsock 2375",
+                    t.elapsed().as_secs_f64()
+                );
+                docker.scenarios()?;
+                docker.cleanup()?;
+                agent::drained(vsock, Duration::from_secs(30))?;
+                println!("[ok] every Docker connection closed on both sides");
+                Some(docker)
+            }
+            None => {
+                println!("[skip] Docker checks need --gvproxy");
+                None
+            }
+        };
 
         // The guest closes first: the agent exits under an idle connection.
         let idle = agent::idle_connection(vsock, Duration::from_secs(60))?;
@@ -216,6 +248,11 @@ mod probe {
         );
         agent::system_info(vsock)?;
         agent::latency(vsock, 50)?;
+        if let Some(docker) = docker {
+            agent::ensure_runtime(vsock, Duration::from_secs(300))?;
+            let version = docker.wait_ready(Duration::from_secs(60))?;
+            println!("[ok] dockerd {version} answered again after the reboot");
+        }
         agent::drained(vsock, Duration::from_secs(30))?;
         println!("[ok] no vsock connection left open");
         Ok(())
