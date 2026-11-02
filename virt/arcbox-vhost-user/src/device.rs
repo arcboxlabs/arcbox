@@ -2,12 +2,18 @@
 
 use crate::error::{Error, Result};
 use crate::protocol::ProtocolFeatures;
+use crate::vring::Vring;
 
 /// A virtio device whose data plane runs in this process while QEMU owns the
 /// transport (PCI, interrupts, guest memory).
 pub trait VhostUserDevice: Send + 'static {
     /// Number of virtqueues (`GET_QUEUE_NUM`).
     fn num_queues(&self) -> usize;
+
+    /// Largest queue size the device accepts in `SET_VRING_NUM`.
+    fn max_queue_size(&self) -> u16 {
+        1024
+    }
 
     /// Virtio feature bits the device offers, including `VIRTIO_F_VERSION_1`
     /// and `VIRTIO_RING_F_EVENT_IDX` if wanted. The back-end adds
@@ -45,4 +51,46 @@ pub trait VhostUserDevice: Send + 'static {
     /// The front-end reset the device or went away. Drop all per-connection
     /// state.
     fn reset(&mut self) {}
+}
+
+/// The device's queues.
+#[derive(Debug)]
+pub struct Vrings {
+    rings: Vec<Vring>,
+}
+
+impl Vrings {
+    pub(crate) fn new(count: usize, max_size: u16) -> Self {
+        Self {
+            rings: (0..count).map(|i| Vring::new(i as u16, max_size)).collect(),
+        }
+    }
+
+    /// Number of queues.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rings.len()
+    }
+
+    /// Whether the device has no queues.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rings.is_empty()
+    }
+
+    /// One queue.
+    #[must_use]
+    pub fn get(&self, index: u16) -> Option<&Vring> {
+        self.rings.get(usize::from(index))
+    }
+
+    /// One queue, mutably.
+    pub fn get_mut(&mut self, index: u16) -> Option<&mut Vring> {
+        self.rings.get_mut(usize::from(index))
+    }
+
+    /// Every queue.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Vring> {
+        self.rings.iter_mut()
+    }
 }
