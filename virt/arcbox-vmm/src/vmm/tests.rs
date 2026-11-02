@@ -57,6 +57,26 @@ fn every_backend_decodes_from_its_discriminant() {
     assert_eq!(VmBackend::try_from(u8::MAX), Err(u8::MAX));
 }
 
+/// Hosts without hardware virtualization include the CI runners (a Linux
+/// container without `/dev/kvm`, a macOS VM), so this runs there.
+#[test]
+fn start_without_hardware_virtualization_fails_before_initializing() {
+    let host = arcbox_hypervisor::host_virtualization();
+    if host.available {
+        return;
+    }
+    let mut vmm = Vmm::new(VmmConfig {
+        guest_cid: Some(3),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        vmm.start(),
+        Err(VmmError::PlatformUnsupported(reason)) if reason == host.reason
+    ));
+    assert_eq!(vmm.state(), VmmState::Created);
+}
+
 #[test]
 fn test_vmm_state_transitions() {
     let config = VmmConfig {

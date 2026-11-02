@@ -339,6 +339,12 @@ impl LifecycleShared {
                     self.spawn_route_reconciler();
                     return Ok(());
                 }
+                Err(e) if e.is_platform_unsupported() => {
+                    // Fixed for the life of the process: a retry would only
+                    // delay the failure the caller has to report.
+                    tracing::warn!(error = %e, "VM cannot start on this host; not retrying");
+                    return Err(e);
+                }
                 Err(e) => {
                     if is_not_found_error(&e) {
                         tracing::warn!(

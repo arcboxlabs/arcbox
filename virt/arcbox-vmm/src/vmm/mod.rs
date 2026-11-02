@@ -262,13 +262,19 @@ impl Vmm {
     ///
     /// # Errors
     ///
-    /// Returns an error if initialization fails.
+    /// Returns [`VmmError::PlatformUnsupported`], before touching any
+    /// hypervisor, on a host without hardware virtualization; otherwise an
+    /// error if initialization fails.
     pub fn initialize(&mut self) -> Result<()> {
         if self.state != VmmState::Created {
             return Err(VmmError::invalid_state(format!(
                 "cannot initialize from state {:?}",
                 self.state
             )));
+        }
+        let host = arcbox_hypervisor::host_virtualization();
+        if !host.available {
+            return Err(VmmError::PlatformUnsupported(host.reason));
         }
 
         self.state = VmmState::Initializing;

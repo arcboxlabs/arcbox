@@ -45,6 +45,14 @@ pub enum VmmError {
     /// Operation not supported on the current backend.
     #[error("operation not supported: {0}")]
     Unsupported(String),
+
+    /// The host provides no hardware virtualization, so no VM can start.
+    ///
+    /// A property of the host that holds for the life of the process
+    /// (see [`arcbox_hypervisor::host_virtualization`]): retrying cannot
+    /// clear it.
+    #[error("{0}")]
+    PlatformUnsupported(&'static str),
 }
 
 impl VmmError {
