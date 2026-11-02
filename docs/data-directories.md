@@ -96,8 +96,11 @@ from `Contents/Resources/assets/{version}/` to avoid a network round-trip.
 | `runtime/bin/` | Host Docker CLI tools | daemon (bundle seed) |
 | `runtime/{version}/bin/` | Guest dockerd, containerd, runc, etc. | daemon (bundle seed) |
 | `runtime/{version}/kernel/` | Sandbox guest kernel | daemon (bundle seed) |
+| `runtime/qemu/{version}/` | QEMU build for a Mac without hardware virtualization (`bin/`, `lib/`, `licenses/`), with `.lock` and `.downloads/` beside it | daemon (download), cli (`abctl qemu import`) |
 
-Seeded from `Contents/Resources/runtime/` when running inside the app bundle.
+Seeded from `Contents/Resources/runtime/` when running inside the app bundle,
+except `runtime/qemu/`: the daemon downloads the build `assets.lock` pins
+only on a Mac that needs it, and keeps only that version.
 Each guest generation is exposed via VirtioFS at
 `/arcbox/runtime/{version}/` as a transport source. The agent verifies each
 manifest entry and materializes it onto the guest Btrfs data disk before
