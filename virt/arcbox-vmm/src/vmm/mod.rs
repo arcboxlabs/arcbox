@@ -153,9 +153,16 @@ impl Vmm {
         );
 
         let running = Arc::new(AtomicBool::new(false));
+        // Every `self.hv` dispatch reads `None` as VZ, so this match is
+        // where a new backend has to choose its machine.
         #[cfg(target_os = "macos")]
-        let hv = (config.backend == VmBackend::Hv)
-            .then(|| darwin_hv::HvMachine::new(config.clone(), Arc::clone(&running)));
+        let hv = match config.backend {
+            VmBackend::Hv => Some(darwin_hv::HvMachine::new(
+                config.clone(),
+                Arc::clone(&running),
+            )),
+            VmBackend::Vz => None,
+        };
 
         Ok(Self {
             config,
@@ -587,14 +594,16 @@ impl Vmm {
         }
 
         #[cfg(target_os = "macos")]
-        {
-            if matches!(self.config.backend, VmBackend::Hv) {
+        match self.config.backend {
+            VmBackend::Hv => {
                 return Err(VmmError::Unsupported(
                     "snapshot capture is not yet implemented for the HV backend".to_string(),
                 ));
             }
-            if let Some(result) = self.capture_snapshot_darwin() {
-                return result;
+            VmBackend::Vz => {
+                if let Some(result) = self.capture_snapshot_darwin() {
+                    return result;
+                }
             }
         }
 
@@ -640,14 +649,16 @@ impl Vmm {
         }
 
         #[cfg(target_os = "macos")]
-        {
-            if matches!(self.config.backend, VmBackend::Hv) {
+        match self.config.backend {
+            VmBackend::Hv => {
                 return Err(VmmError::Unsupported(
                     "snapshot restore is not yet implemented for the HV backend".to_string(),
                 ));
             }
-            if let Some(result) = self.restore_snapshot_darwin(restore_data) {
-                return result;
+            VmBackend::Vz => {
+                if let Some(result) = self.restore_snapshot_darwin(restore_data) {
+                    return result;
+                }
             }
         }
 
@@ -766,7 +777,11 @@ impl Drop for Vmm {
     fn drop(&mut self) {
         if self.state != VmmState::Stopped && self.state != VmmState::Created {
             #[cfg(target_os = "macos")]
-            let skip = self.skip_hypervisor_stop && self.config.backend == VmBackend::Vz;
+            let skip = self.skip_hypervisor_stop
+                && match self.config.backend {
+                    VmBackend::Vz => true,
+                    VmBackend::Hv => false,
+                };
             #[cfg(not(target_os = "macos"))]
             let skip = self.skip_hypervisor_stop;
             if skip {

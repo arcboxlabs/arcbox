@@ -608,13 +608,17 @@ impl LifecycleShared {
         // Escape hatch to A/B-test the console's effect on the flaky HV cold
         // boot: `ARCBOX_NO_DEBUG_CONSOLE=1` strips any token (host attaches no
         // console, guest rcS spawns no shell). Default: console always attached.
+        let backend_has_debug_console = match self.backend() {
+            arcbox_vmm::VmBackend::Hv => true,
+            arcbox_vmm::VmBackend::Vz => false,
+        };
         if std::env::var_os("ARCBOX_NO_DEBUG_CONSOLE").is_some() {
             cmdline = cmdline
                 .split_whitespace()
                 .filter(|t| !t.starts_with(DEBUG_CONSOLE_KEY))
                 .collect::<Vec<_>>()
                 .join(" ");
-        } else if matches!(self.backend(), arcbox_vmm::VmBackend::Hv)
+        } else if backend_has_debug_console
             && !cmdline
                 .split_whitespace()
                 .any(|t| t.starts_with(DEBUG_CONSOLE_KEY))
@@ -839,8 +843,9 @@ pub(super) fn with_network_config(
 /// early boot — its cmdline is left untouched. An explicit operator `earlycon=`
 /// is always respected.
 pub(super) fn ensure_earlycon(cmdline: String, backend: arcbox_vmm::VmBackend) -> String {
-    if !matches!(backend, arcbox_vmm::VmBackend::Hv) {
-        return cmdline;
+    match backend {
+        arcbox_vmm::VmBackend::Hv => {}
+        arcbox_vmm::VmBackend::Vz => return cmdline,
     }
     if cmdline
         .split_whitespace()

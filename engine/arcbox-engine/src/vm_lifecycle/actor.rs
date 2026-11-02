@@ -185,11 +185,10 @@ impl LifecycleShared {
 
     /// Returns the System VM's current hypervisor backend.
     pub(super) fn backend(&self) -> arcbox_vmm::VmBackend {
-        // Encoded as `VmBackend as u8` (Hv = 0, Vz = 1).
-        match self.backend.load(Ordering::Acquire) {
-            0 => arcbox_vmm::VmBackend::Hv,
-            _ => arcbox_vmm::VmBackend::Vz,
-        }
+        let encoded = self.backend.load(Ordering::Acquire);
+        arcbox_vmm::VmBackend::try_from(encoded).unwrap_or_else(|unknown| {
+            unreachable!("only `VmBackend as u8` is stored, never {unknown}")
+        })
     }
 
     /// Gets the agent CID for this lifecycle's machine.
