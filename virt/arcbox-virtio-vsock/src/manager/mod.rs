@@ -60,6 +60,8 @@ pub struct VsockConnectionManager {
     /// driver is already awake there, and ringing on its re-pushes would
     /// spin it while the guest catches up.
     doorbell: Option<VsockDoorbell>,
+    /// Set by [`Self::close`] once no device will serve the manager again.
+    closed: bool,
 }
 
 impl VsockConnectionManager {
@@ -73,6 +75,7 @@ impl VsockConnectionManager {
             backend_rxq: VecDeque::new(),
             next_host_port: AtomicU32::new(Self::EPHEMERAL_PORT_BASE),
             doorbell: None,
+            closed: false,
         }
     }
 
@@ -193,6 +196,19 @@ impl VsockConnectionManager {
         for id in ids {
             self.remove(&id);
         }
+    }
+
+    /// Removes every connection for good: the device behind the manager is
+    /// gone. A caller that can race this checks [`Self::is_closed`] under the
+    /// same lock before it allocates, so no connection outlives the device.
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.remove_all();
+    }
+
+    /// Whether [`Self::close`] has run.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Returns IDs of connections that have pending RX ops but are NOT
