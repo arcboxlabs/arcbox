@@ -1228,6 +1228,7 @@ dependencies = [
 name = "arcbox-vhost-user"
 version = "0.10.5"
 dependencies = [
+ "arcbox-virtio-core",
  "libc",
  "tempfile",
  "thiserror 2.0.18",
