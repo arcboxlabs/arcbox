@@ -67,9 +67,9 @@ pub(super) fn check_sha256(archive: &Path, artifact: &QemuArtifact) -> Result<()
 }
 
 /// Extracts `archive` into a staging directory, checks it, and moves it to
-/// `<root>/<version>`, replacing an older install of that version. The
-/// caller holds the lock and has checked the archive's SHA-256. Returns the
-/// executable.
+/// `<root>/<version>`, replacing an older install of that version and
+/// removing every other version. The caller holds the lock and has checked
+/// the archive's SHA-256. Returns the executable.
 pub(super) fn install(
     root: &Path,
     artifact: &QemuArtifact,
@@ -81,6 +81,7 @@ pub(super) fn install(
     let mut guard = StagingGuard::new(staging.clone());
     extract(archive, &staging)?;
     check_layout(&staging, artifact)?;
+    clear_quarantine(&staging)?;
     for (path, executable) in binaries(&staging)? {
         let requirement = artifact.signature.requirement(executable);
         verifier
@@ -100,6 +101,7 @@ pub(super) fn install(
     }
     std::fs::rename(&staging, &destination)?;
     guard.disarm();
+    prune(root, &artifact.version);
     Ok(destination.join(QEMU_EXECUTABLE))
 }
 
@@ -198,4 +200,50 @@ fn binaries(staging: &Path) -> Result<Vec<(PathBuf, bool)>> {
         }
     }
     Ok(found)
+}
+
+/// Removes `com.apple.quarantine` from everything staged, so Gatekeeper does
+/// not assess a build that already passed the pin and signature checks.
+#[cfg(target_os = "macos")]
+pub(super) fn clear_quarantine(directory: &Path) -> Result<()> {
+    const QUARANTINE: &str = "com.apple.quarantine";
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if xattr::get(&path, QUARANTINE)?.is_some() {
+            xattr::remove(&path, QUARANTINE)?;
+        }
+        if path.is_dir() {
+            clear_quarantine(&path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps, reason = "matches the macOS signature")]
+fn clear_quarantine(_directory: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Removes every other version, leftover staging and the finished download:
+/// the daemon only ever runs the build it pins.
+fn prune(root: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == LOCK || name == keep {
+            continue;
+        }
+        let path = entry.path();
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(error) = removed {
+            tracing::warn!(path = %path.display(), %error, "could not remove a stale QEMU install");
+        }
+    }
 }
