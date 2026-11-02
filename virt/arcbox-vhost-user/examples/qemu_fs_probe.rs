@@ -6,12 +6,15 @@
 //! `/arcbox/bin/arcbox-agent init`. The probe puts a shell script there that
 //! reboots the guest once (so QEMU stops and restarts the device over the
 //! same connection), then reports what the guest sees on the console, reads a
-//! large file through the share, writes a file back, and powers off.
+//! large file and a tree of small files through the share, writes a file
+//! back, and powers off. A second back-end serves `vhost-user-vsock-pci` with
+//! only a config space (the guest CID), to check that QEMU accepts it and the
+//! guest driver starts its rings; it moves no vsock traffic.
 //!
 //! ```text
 //! cargo run --release -p arcbox-vhost-user --example qemu_fs_probe -- \
 //!     --qemu qemu-system-aarch64 --kernel kernel --rootfs rootfs.erofs \
-//!     [--bios-dir <qemu>/pc-bios] [--big-mib 64] [--smp 4]
+//!     [--bios-dir <qemu>/pc-bios] [--big-mib 64] [--small-files 2000] [--smp 4]
 //! ```
 //!
 //! QEMU must be built with `--enable-vhost-user --disable-vhost-net` (macOS
@@ -51,8 +54,9 @@ mod probe {
     use std::time::{Duration, Instant};
 
     use arcbox_fs::{CacheProfile, FsServer};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use arcbox_vhost_user::{Backend, VhostUserDevice, Vrings};
+    use arcbox_vhost_user::{Backend, ProtocolFeatures, VhostUserDevice, Vrings};
     use arcbox_virtio_core::{DescChain, GuestMemWriter, VirtioDevice};
     use arcbox_virtio_fs::{FsConfig, FuseResponse, VirtioFs};
 
@@ -97,6 +101,54 @@ mod probe {
         }
     }
 
+    /// vhost-user-vsock with a config space and nothing else: enough for QEMU
+    /// to realize the device and for the guest driver to post RX buffers.
+    struct VsockConfigOnly {
+        cid: u64,
+        rx_posted: Arc<AtomicBool>,
+    }
+
+    impl VhostUserDevice for VsockConfigOnly {
+        fn num_queues(&self) -> usize {
+            2 // RX, TX; QEMU emulates the event queue itself
+        }
+
+        fn features(&self) -> u64 {
+            VIRTIO_F_VERSION_1
+        }
+
+        fn protocol_features(&self) -> ProtocolFeatures {
+            ProtocolFeatures::CONFIG
+        }
+
+        fn read_config(&self, offset: u32, data: &mut [u8]) -> arcbox_vhost_user::Result<()> {
+            // struct virtio_vsock_config { le64 guest_cid; }
+            let config = self.cid.to_le_bytes();
+            let src = config
+                .get(offset as usize..offset as usize + data.len())
+                .ok_or_else(|| {
+                    arcbox_vhost_user::Error::Device(format!("config read at {offset}"))
+                })?;
+            data.copy_from_slice(src);
+            Ok(())
+        }
+
+        fn process_queue(
+            &mut self,
+            queue: u16,
+            vrings: &mut Vrings,
+        ) -> arcbox_vhost_user::Result<()> {
+            if queue == 0 {
+                let posted = vrings
+                    .get_mut(0)
+                    .and_then(|v| v.queue_mut())
+                    .is_some_and(|q| q.has_avail());
+                self.rx_posted.fetch_or(posted, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
     /// Gathers the request from the readable descriptors, runs it, and
     /// scatters the reply into the writable ones.
     fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u32 {
@@ -136,6 +188,7 @@ mod probe {
         rootfs: PathBuf,
         bios_dir: Option<PathBuf>,
         big_mib: usize,
+        small_files: usize,
         smp: u32,
         timeout: Duration,
     }
@@ -143,7 +196,7 @@ mod probe {
     fn parse_args() -> Result<Args, Error> {
         let mut args = std::env::args().skip(1);
         let (mut qemu, mut kernel, mut rootfs, mut bios_dir) = (None, None, None, None);
-        let (mut big_mib, mut smp, mut timeout) = (64, 4, 600);
+        let (mut big_mib, mut small_files, mut smp, mut timeout) = (64, 2000, 4, 600);
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
             match flag.as_str() {
@@ -152,6 +205,7 @@ mod probe {
                 "--rootfs" => rootfs = Some(PathBuf::from(value()?)),
                 "--bios-dir" => bios_dir = Some(PathBuf::from(value()?)),
                 "--big-mib" => big_mib = value()?.parse()?,
+                "--small-files" => small_files = value()?.parse()?,
                 "--smp" => smp = value()?.parse()?,
                 "--timeout-secs" => timeout = value()?.parse()?,
                 other => return Err(format!("unknown argument {other}").into()),
@@ -163,6 +217,7 @@ mod probe {
             rootfs: rootfs.ok_or("--rootfs is required")?,
             bios_dir,
             big_mib,
+            small_files,
             smp,
             timeout: Duration::from_secs(timeout),
         })
@@ -172,6 +227,7 @@ mod probe {
     const AGENT: &str = r#"#!/bin/busybox sh
 bb=/bin/busybox
 say() { $bb printf 'VHOST-PROBE %s\n' "$*" > /dev/console; }
+up() { $bb cut -d' ' -f1 /proc/uptime; }
 say "agent-exec args=$*"
 if [ ! -e /arcbox/probe/rebooted ]; then
   echo 1 > /arcbox/probe/rebooted && $bb sync
@@ -179,18 +235,26 @@ if [ ! -e /arcbox/probe/rebooted ]; then
   $bb reboot -f
 fi
 say "mount=$($bb grep ' /arcbox ' /proc/mounts)"
+say "vsock=$($bb ls /sys/bus/virtio/drivers/vmw_vsock_virtio_transport 2>/dev/null | $bb grep virtio)"
 say "hello=$($bb cat /arcbox/probe/hello.txt)"
 echo 3 > /proc/sys/vm/drop_caches
+t0=$(up); $bb dd if=/arcbox/probe/big.bin of=/dev/null bs=1M 2>/dev/null; t1=$(up)
+say "big-read start=$t0 end=$t1"
+echo 3 > /proc/sys/vm/drop_caches
 say "sha256=$($bb sha256sum /arcbox/probe/big.bin | $bb cut -d' ' -f1)"
+t0=$(up); n=$($bb cat /arcbox/probe/small/* | $bb wc -c); t1=$(up)
+say "small-read bytes=$n start=$t0 end=$t1"
+t0=$(up); n=$($bb ls -l /arcbox/probe/small | $bb wc -l); t1=$(up)
+say "small-stat entries=$n start=$t0 end=$t1"
 echo "written-by-guest $($bb uname -r)" > /arcbox/probe/from-guest.txt && $bb sync
 say "wrote=$?"
 say "done"
 $bb poweroff -f
 "#;
 
-    fn build_share(root: &Path, big_mib: usize) -> Result<String, Error> {
+    fn build_share(root: &Path, big_mib: usize, small_files: usize) -> Result<String, Error> {
         std::fs::create_dir_all(root.join("bin"))?;
-        std::fs::create_dir_all(root.join("probe"))?;
+        std::fs::create_dir_all(root.join("probe/small"))?;
         let agent = root.join("bin/arcbox-agent");
         std::fs::write(&agent, AGENT)?;
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755))?;
@@ -198,6 +262,9 @@ $bb poweroff -f
         let mut big = vec![0u8; big_mib << 20];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut big)?;
         std::fs::write(root.join("probe/big.bin"), &big)?;
+        for i in 0..small_files {
+            std::fs::write(root.join(format!("probe/small/{i:05}")), [b'x'; 1024])?;
+        }
         let out = Command::new("shasum")
             .args(["-a", "256"])
             .arg(root.join("probe/big.bin"))
@@ -232,11 +299,16 @@ $bb poweroff -f
             .find_map(|rest| rest.strip_prefix(key))
     }
 
+    fn kv(line: &str, key: &str) -> Option<f64> {
+        line.split_whitespace()
+            .find_map(|w| w.strip_prefix(key)?.parse().ok())
+    }
+
     pub fn run() -> Result<(), Error> {
         let args = parse_args()?;
         let work = tempfile::tempdir()?;
         let share = work.path().join("share");
-        let expected_sha = build_share(&share, args.big_mib)?;
+        let expected_sha = build_share(&share, args.big_mib, args.small_files)?;
         let console_path = work.path().join("console.log");
         let qemu_log = work.path().join("qemu.log");
 
@@ -259,6 +331,16 @@ $bb poweroff -f
 
         let (ours, theirs) = chardev_pair()?;
         let backend = Backend::new("vhost-fs-arcbox", FsDevice { fs, requests: 0 }).spawn(ours)?;
+        let (vsock_ours, vsock_theirs) = chardev_pair()?;
+        let rx_posted = Arc::new(AtomicBool::new(false));
+        let vsock = Backend::new(
+            "vhost-vsock",
+            VsockConfigOnly {
+                cid: 3,
+                rx_posted: Arc::clone(&rx_posted),
+            },
+        )
+        .spawn(vsock_ours)?;
 
         let mut qemu = Command::new(&args.qemu);
         if let Some(dir) = &args.bios_dir {
@@ -295,6 +377,9 @@ $bb poweroff -f
                 "-device",
                 "vhost-user-fs-pci,chardev=fs0,tag=arcbox,queue-size=1024",
             ])
+            .arg("-chardev")
+            .arg(format!("socket,id=vs0,fd={}", vsock_theirs.as_raw_fd()))
+            .args(["-device", "vhost-user-vsock-pci,chardev=vs0"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&qemu_log)?);
@@ -302,6 +387,7 @@ $bb poweroff -f
         let started = Instant::now();
         let mut child = qemu.spawn()?;
         drop(theirs);
+        drop(vsock_theirs);
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break Some(status);
@@ -316,6 +402,7 @@ $bb poweroff -f
         let elapsed = started.elapsed();
         let qemu_out = std::fs::read_to_string(&qemu_log).unwrap_or_default();
         let device = backend.join()?;
+        vsock.join()?;
         let console = std::fs::read_to_string(&console_path).unwrap_or_default();
 
         println!("--- console (VHOST-PROBE and virtiofs lines) ---");
@@ -356,6 +443,17 @@ $bb poweroff -f
             format!("guest mount: {}", field(&console, "mount=").unwrap_or("-")),
         );
         check(
+            field(&console, "vsock=").is_some_and(|v| v.starts_with("virtio")),
+            format!(
+                "guest vsock driver bound: {}",
+                field(&console, "vsock=").unwrap_or("-")
+            ),
+        );
+        check(
+            rx_posted.load(Ordering::SeqCst),
+            "guest posted vsock RX buffers".into(),
+        );
+        check(
             field(&console, "hello=") == Some("hello from the host"),
             "small file content".into(),
         );
@@ -378,6 +476,28 @@ $bb poweroff -f
             "probe script finished".into(),
         );
 
+        if let Some(line) = field(&console, "big-read ") {
+            if let (Some(t0), Some(t1)) = (kv(line, "start="), kv(line, "end=")) {
+                let secs = (t1 - t0).max(0.01);
+                println!(
+                    "big read: {} MiB in {secs:.2}s = {:.1} MiB/s",
+                    args.big_mib,
+                    args.big_mib as f64 / secs
+                );
+            }
+        }
+        for (key, what) in [("small-read ", "cat"), ("small-stat ", "ls -l")] {
+            if let Some(line) = field(&console, key) {
+                if let (Some(t0), Some(t1)) = (kv(line, "start="), kv(line, "end=")) {
+                    let secs = (t1 - t0).max(0.01);
+                    println!(
+                        "{what} of {} small files: {secs:.2}s = {:.0} files/s",
+                        args.small_files,
+                        args.small_files as f64 / secs
+                    );
+                }
+            }
+        }
         std::io::stdout().flush()?;
         if failures.is_empty() {
             Ok(())
