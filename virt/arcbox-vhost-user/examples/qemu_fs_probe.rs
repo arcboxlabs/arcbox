@@ -53,53 +53,14 @@ mod probe {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use arcbox_fs::{CacheProfile, FsServer};
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use arcbox_vhost_user::fs::FsShare;
     use arcbox_vhost_user::{Backend, ProtocolFeatures, VhostUserDevice, Vrings};
-    use arcbox_virtio_core::{DescChain, GuestMemWriter, VirtioDevice};
-    use arcbox_virtio_fs::{FsConfig, FuseResponse, VirtioFs};
 
     type Error = Box<dyn std::error::Error>;
 
     const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-    const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
-    /// Queue 0 is hiprio (FORGET, INTERRUPT); queue 1 carries requests.
-    const NUM_QUEUES: usize = 2;
-
-    /// virtio-fs over vhost-user: the HV backend's `VirtioFs` session and
-    /// `FsServer` handler, fed from vhost-user vrings.
-    struct FsDevice {
-        fs: VirtioFs,
-        requests: u64,
-    }
-
-    impl VhostUserDevice for FsDevice {
-        fn num_queues(&self) -> usize {
-            NUM_QUEUES
-        }
-
-        fn features(&self) -> u64 {
-            VIRTIO_F_VERSION_1 | VIRTIO_RING_F_EVENT_IDX
-        }
-
-        fn process_queue(
-            &mut self,
-            queue: u16,
-            vrings: &mut Vrings,
-        ) -> arcbox_vhost_user::Result<()> {
-            let Some(vring) = vrings.get_mut(queue) else {
-                return Ok(());
-            };
-            let fs = &mut self.fs;
-            self.requests += vring.process_avail(|mem, chain| handle_chain(fs, mem, chain)) as u64;
-            Ok(())
-        }
-
-        fn reset(&mut self) {
-            self.fs.reset();
-        }
-    }
 
     /// vhost-user-vsock with a config space and nothing else: enough for QEMU
     /// to realize the device and for the guest driver to post RX buffers.
@@ -147,39 +108,6 @@ mod probe {
             }
             Ok(())
         }
-    }
-
-    /// Gathers the request from the readable descriptors, runs it, and
-    /// scatters the reply into the writable ones.
-    fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u32 {
-        let mut request = Vec::new();
-        for d in chain.descriptors.iter().filter(|d| !d.is_write()) {
-            if let Some(bytes) = mem.slice(d.addr as usize, d.len as usize) {
-                request.extend_from_slice(bytes);
-            }
-        }
-        let reply = fs.process_request(&request).unwrap_or_else(|e| {
-            tracing::warn!("FUSE request failed: {e}");
-            let unique = request
-                .get(8..16)
-                .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
-            FuseResponse::error(unique, libc::EIO).into_data()
-        });
-        let mut written = 0;
-        for d in chain.descriptors.iter().filter(|d| d.is_write()) {
-            let rest = &reply[written..];
-            if rest.is_empty() {
-                break;
-            }
-            let n = rest.len().min(d.len as usize);
-            // SAFETY: writable descriptors belong to the device until the used
-            // ring publishes the chain.
-            if let Some(dst) = unsafe { mem.slice_mut(d.addr as usize, n) } {
-                dst.copy_from_slice(&rest[..n]);
-                written += n;
-            }
-        }
-        written as u32
     }
 
     struct Args {
@@ -312,25 +240,8 @@ $bb poweroff -f
         let console_path = work.path().join("console.log");
         let qemu_log = work.path().join("qemu.log");
 
-        let mut server = FsServer::new(arcbox_fs::FsConfig {
-            tag: "arcbox".into(),
-            source: share.to_string_lossy().into_owned(),
-            cache_profile: CacheProfile::Dynamic,
-            ..arcbox_fs::FsConfig::default()
-        });
-        server.start()?;
-        let fs = VirtioFs::with_handler(
-            FsConfig {
-                tag: "arcbox".into(),
-                num_queues: 1,
-                queue_size: 1024,
-                shared_dir: share.to_string_lossy().into_owned(),
-            },
-            Arc::new(server),
-        );
-
         let (ours, theirs) = chardev_pair()?;
-        let backend = Backend::new("vhost-fs-arcbox", FsDevice { fs, requests: 0 }).spawn(ours)?;
+        let backend = FsShare::new("arcbox", &share).spawn(ours)?;
         let (vsock_ours, vsock_theirs) = chardev_pair()?;
         let rx_posted = Arc::new(AtomicBool::new(false));
         let vsock = Backend::new(
@@ -401,7 +312,7 @@ $bb poweroff -f
         };
         let elapsed = started.elapsed();
         let qemu_out = std::fs::read_to_string(&qemu_log).unwrap_or_default();
-        let device = backend.join()?;
+        let stats = backend.join()?;
         vsock.join()?;
         let console = std::fs::read_to_string(&console_path).unwrap_or_default();
 
@@ -423,7 +334,7 @@ $bb poweroff -f
             ),
             None => println!("qemu killed after {:.0}s timeout", elapsed.as_secs_f64()),
         }
-        println!("FUSE requests served: {}", device.requests);
+        println!("FUSE requests served: {}", stats.requests);
 
         let mut failures = Vec::new();
         let mut check = |ok: bool, what: String| {
