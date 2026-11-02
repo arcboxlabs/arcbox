@@ -1228,11 +1228,14 @@ dependencies = [
 name = "arcbox-vhost-user"
 version = "0.10.5"
 dependencies = [
+ "arcbox-fs",
  "arcbox-virtio-core",
+ "arcbox-virtio-fs",
  "libc",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
