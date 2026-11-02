@@ -120,6 +120,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-11-02 — FsServer reads the guest's open flags as Linux flags](logs/2026-11-02-fuse-open-flags.md)
 - [2026-11-02 — A Mac without hardware virtualization no longer crash-loops the daemon](logs/2026-11-02-no-virtualization-host.md)
 - [2026-10-31 — nfsdcld lets nfsd skip the NFSv4 grace period](logs/2026-10-31-nfs-grace-nfsdcld.md)
 - [2026-10-30 — Container CA injection retries archive requests that hit a busy overlay](logs/2026-10-30-ca-injection-overlay-busy.md)

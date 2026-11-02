@@ -27,6 +27,22 @@ pub const FUSE_KERNEL_MINOR_VERSION: u32 = 38;
 /// Root inode number.
 pub const FUSE_ROOT_ID: u64 = 1;
 
+/// `open(2)` flags as FUSE_OPEN and FUSE_CREATE carry them: the guest's Linux
+/// values, not the host's. On macOS they differ: Linux `O_APPEND` is the
+/// host's `O_TRUNC`.
+pub mod open_flags {
+    /// Access-mode mask (`O_RDONLY`, `O_WRONLY`, `O_RDWR`; same on every host).
+    pub const O_ACCMODE: u32 = 0o3;
+    /// Open for writing only.
+    pub const O_WRONLY: u32 = 0o1;
+    /// Open for reading and writing.
+    pub const O_RDWR: u32 = 0o2;
+    /// Truncate to zero length.
+    pub const O_TRUNC: u32 = 0o1000;
+    /// Append on each write.
+    pub const O_APPEND: u32 = 0o2000;
+}
+
 // FUSE init flags
 pub const FUSE_ASYNC_READ: u32 = 1 << 0;
 pub const FUSE_POSIX_LOCKS: u32 = 1 << 1;
