@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::Digest as _;
 
+use super::signature::Verify;
 use super::{QEMU_EXECUTABLE, QemuArtifact};
 use crate::error::{ImageError, Result};
 use crate::remote_image::StagingGuard;
@@ -69,12 +70,26 @@ pub(super) fn check_sha256(archive: &Path, artifact: &QemuArtifact) -> Result<()
 /// `<root>/<version>`, replacing an older install of that version. The
 /// caller holds the lock and has checked the archive's SHA-256. Returns the
 /// executable.
-pub(super) fn install(root: &Path, artifact: &QemuArtifact, archive: &Path) -> Result<PathBuf> {
+pub(super) fn install(
+    root: &Path,
+    artifact: &QemuArtifact,
+    archive: &Path,
+    verifier: &dyn Verify,
+) -> Result<PathBuf> {
     let staging = root.join(unique(".staging"));
     std::fs::create_dir_all(&staging)?;
     let mut guard = StagingGuard::new(staging.clone());
     extract(archive, &staging)?;
     check_layout(&staging, artifact)?;
+    for (path, executable) in binaries(&staging)? {
+        let requirement = artifact.signature.requirement(executable);
+        verifier
+            .verify(&path, requirement.as_deref())
+            .map_err(|reason| {
+                let name = path.strip_prefix(&staging).unwrap_or(&path).display();
+                ImageError::QemuBuild(format!("{name} fails its code signature check: {reason}"))
+            })?;
+    }
     std::fs::write(staging.join(MARKER), &artifact.sha256)?;
 
     let destination = root.join(&artifact.version);
@@ -159,4 +174,28 @@ fn check_layout(staging: &Path, artifact: &QemuArtifact) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Every regular file under `bin/` and `lib/`, flagged when it is the
+/// executable. All of them must be signed.
+fn binaries(staging: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    let mut found = Vec::new();
+    let mut pending = vec![staging.join("bin"), staging.join("lib")];
+    while let Some(directory) = pending.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let executable = path == staging.join(QEMU_EXECUTABLE);
+                found.push((path, executable));
+            }
+        }
+    }
+    Ok(found)
 }

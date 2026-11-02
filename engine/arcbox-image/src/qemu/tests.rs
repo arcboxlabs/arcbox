@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use sha2::Digest as _;
 
@@ -96,6 +97,25 @@ fn only_a_development_daemon_honours_the_override() {
     assert!(select("arm64", true, Some(&pin(SHA)), malformed).is_err());
 }
 
+#[derive(Default)]
+struct Recorder {
+    calls: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl signature::Verify for Recorder {
+    fn verify(&self, path: &Path, requirement: Option<&str>) -> std::result::Result<(), String> {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        self.calls
+            .lock()
+            .unwrap()
+            .push((name, requirement.map(str::to_owned)));
+        if std::fs::read(path).unwrap().starts_with(b"unsigned") {
+            return Err("code object is not signed at all".into());
+        }
+        Ok(())
+    }
+}
+
 type Entries = Vec<(&'static str, Vec<u8>)>;
 
 fn entries(version: &str) -> Entries {
@@ -142,7 +162,8 @@ fn write_archive(path: &Path, entries: &Entries, link: Option<(&str, &str)>) -> 
     format!("{:x}", hasher.finalize())
 }
 
-fn runtime(root: &Path, sha256: &str) -> QemuRuntime {
+fn runtime(root: &Path, sha256: &str) -> (QemuRuntime, Arc<Recorder>) {
+    let recorder = Arc::new(Recorder::default());
     let artifact = QemuArtifact {
         version: "0.1.0".to_owned(),
         arch: "arm64".to_owned(),
@@ -150,7 +171,12 @@ fn runtime(root: &Path, sha256: &str) -> QemuRuntime {
         cdn: "http://127.0.0.1:9/qemu".to_owned(),
         signature: SignaturePolicy::DeveloperId,
     };
-    QemuRuntime::new(root.to_owned(), artifact)
+    let runtime = QemuRuntime {
+        root: root.to_owned(),
+        artifact,
+        verifier: recorder.clone(),
+    };
+    (runtime, recorder)
 }
 
 fn names(root: &Path) -> Vec<String> {
@@ -167,7 +193,7 @@ async fn import_installs_the_pinned_archive_with_its_licenses() {
     let dir = tempfile::tempdir().unwrap();
     let (archive, root) = (dir.path().join("qemu.tar.gz"), dir.path().join("qemu"));
     let sha256 = write_archive(&archive, &entries("0.1.0"), None);
-    let runtime = runtime(&root, &sha256);
+    let (runtime, recorder) = runtime(&root, &sha256);
 
     let executable = runtime.import(&archive).await.unwrap();
     assert_eq!(executable, root.join("0.1.0").join(QEMU_EXECUTABLE));
@@ -177,9 +203,37 @@ async fn import_installs_the_pinned_archive_with_its_licenses() {
         b"GPL-2.0"
     );
 
+    let mut calls = recorder.calls.lock().unwrap().clone();
+    calls.sort();
+    let [(lib, lib_requirement), (exe, exe_requirement)] = calls.as_slice() else {
+        panic!("expected two signature checks, got {calls:?}");
+    };
+    assert_eq!(
+        (lib.as_str(), exe.as_str()),
+        ("libglib-2.0.0.dylib", "qemu-system-aarch64")
+    );
+    let (lib_requirement, exe_requirement) = (
+        lib_requirement.as_deref().unwrap(),
+        exe_requirement.as_deref().unwrap(),
+    );
+    assert!(lib_requirement.contains("\"422ACSY6Y5\"") && !lib_requirement.contains("identifier"));
+    assert!(
+        exe_requirement.contains("\"422ACSY6Y5\"")
+            && exe_requirement.ends_with("identifier \"com.arcboxlabs.qemu.system-aarch64\"")
+    );
+
     // Importing again replaces the build in place.
     runtime.import(&archive).await.unwrap();
     assert_eq!(names(&root), [".lock", "0.1.0"]);
+}
+
+#[test]
+fn development_builds_relax_the_certificate_but_not_the_identifier() {
+    assert_eq!(
+        SignaturePolicy::Development.requirement(true).as_deref(),
+        Some("identifier \"com.arcboxlabs.qemu.system-aarch64\"")
+    );
+    assert_eq!(SignaturePolicy::Development.requirement(false), None);
 }
 
 #[tokio::test]
@@ -187,7 +241,7 @@ async fn an_archive_that_does_not_match_the_pin_is_not_installed() {
     let dir = tempfile::tempdir().unwrap();
     let (archive, root) = (dir.path().join("qemu.tar.gz"), dir.path().join("qemu"));
     write_archive(&archive, &entries("0.1.0"), None);
-    let runtime = runtime(&root, SHA);
+    let (runtime, recorder) = runtime(&root, SHA);
 
     let error = runtime.import(&archive).await.unwrap_err();
     assert!(
@@ -198,30 +252,67 @@ async fn an_archive_that_does_not_match_the_pin_is_not_installed() {
         "{error}"
     );
     assert_eq!(names(&root), [".lock"]);
+    assert!(recorder.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn a_build_failing_a_check_leaves_nothing_installed() {
+    let mut unsigned = entries("0.1.0");
+    unsigned[2].1 = b"unsigned glib".to_vec();
     type Link = Option<(&'static str, &'static str)>;
-    let cases: [(&str, Entries, Link); 2] = [
-        ("another version", entries("0.0.9"), None),
+    let cases: [(&str, Entries, Link, &str); 3] = [
+        (
+            "unsigned library",
+            unsigned,
+            None,
+            "lib/libglib-2.0.0.dylib fails its code signature check: \
+             code object is not signed at all",
+        ),
+        (
+            "another version",
+            entries("0.0.9"),
+            None,
+            "the archive is 0.0.9 arm64",
+        ),
         (
             "symlink",
             entries("0.1.0"),
             Some(("lib/libz.dylib", "/usr/lib/libz.dylib")),
+            "archive entry lib/libz.dylib is not a file or directory",
         ),
     ];
-    for (case, entries, link) in cases {
+    for (case, entries, link, reason) in cases {
         let dir = tempfile::tempdir().unwrap();
         let (archive, root) = (dir.path().join("qemu.tar.gz"), dir.path().join("qemu"));
         let sha256 = write_archive(&archive, &entries, link);
-        let runtime = runtime(&root, &sha256);
+        let (runtime, _) = runtime(&root, &sha256);
 
+        let error = runtime.import(&archive).await.expect_err(case).to_string();
         assert!(
-            runtime.import(&archive).await.is_err(),
-            "{case} was installed"
+            error.starts_with(&format!("rejected QEMU build: {reason}")),
+            "{case}: {error}"
         );
         assert_eq!(runtime.installed_executable(), None, "{case}");
         assert_eq!(names(&root), [".lock"], "{case} left files behind");
+    }
+}
+
+/// A malformed requirement fails every install the same way a foreign
+/// signer does, so check that `codesign` parses ours and rejects only the
+/// signer.
+#[cfg(target_os = "macos")]
+#[test]
+fn codesign_parses_the_developer_id_requirement_and_rejects_other_signers() {
+    use signature::Verify as _;
+    let apple_signed = Path::new("/bin/ls");
+    signature::Codesign.verify(apple_signed, None).unwrap();
+    for executable in [true, false] {
+        let requirement = SignaturePolicy::DeveloperId
+            .requirement(executable)
+            .unwrap();
+        let error = signature::Codesign
+            .verify(apple_signed, Some(&requirement))
+            .unwrap_err();
+        assert!(error.contains("failed to satisfy"), "{error}");
     }
 }
