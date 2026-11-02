@@ -5,56 +5,61 @@ use crate::error::{Result, VmmError};
 
 use super::*;
 
+/// Lowest descriptor the daemon end of a vsock connection is moved to. The
+/// kernel hands out the lowest free number, so the rest of the process's
+/// descriptors, and every number it just closed, sit below this.
+const VSOCK_FD_FLOOR: RawFd = 1024;
+
+/// How many starting points above the floor successive connections rotate
+/// through: a number comes back only this many connections later.
+const VSOCK_FD_ROTATION: RawFd = 1024;
+
 impl HvMachine {
-    /// Duplicates a daemon-facing socketpair fd into a monotonically increasing
-    /// descriptor range derived from the connection's host port.
+    /// Duplicates a daemon-facing socketpair fd above the low descriptor
+    /// range, starting at a position that rotates with the connection's host
+    /// port.
     ///
     /// During guest boot, the daemon opens and drops several short-lived vsock
     /// probe connections in quick succession. On macOS the low socketpair fd
     /// number was being recycled immediately (`20`, `20`, `20`, ...), which in
     /// turn let Tokio/kqueue reuse the same registration slot across retries.
     /// When a previous registration had not been fully torn down yet, later
-    /// attempts could miss both EOF and timeout wakeups. Rebinding the daemon
-    /// end to the per-connection host port avoids that fd-number reuse while
-    /// keeping the actual socket semantics unchanged.
-    pub(super) fn duplicate_client_vsock_fd(fd: OwnedFd, min_fd: RawFd) -> Result<OwnedFd> {
-        // Clamp `min_fd` below the current RLIMIT_NOFILE soft limit. Port
-        // numbers passed in as `min_fd` can legitimately reach ~65 k, but on
-        // macOS CI runners the soft limit defaults to ~2560, making a raw
-        // F_DUPFD_CLOEXEC return EINVAL. The caller only needs an fd number
-        // that avoids the recycled low range — any value well above the
-        // socketpair/tokio-registration churn band (say, fd > 1024) works.
-        let clamped_min = {
-            let mut rl = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            // SAFETY: `getrlimit` writes a single `rlimit` struct; the raw
-            // pointer is valid for the duration of the call.
-            let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, std::ptr::from_mut(&mut rl)) };
-            if rc == 0 && (rl.rlim_cur as RawFd) > 128 {
-                // Reserve ~64 fds for the rest of the process; clamp min_fd
-                // to whichever is smaller.
-                let ceiling = (rl.rlim_cur as RawFd).saturating_sub(64);
-                min_fd.min(ceiling)
-            } else {
-                min_fd
+    /// attempts could miss both EOF and timeout wakeups. Giving each
+    /// connection a number the previous ones did not use avoids that reuse
+    /// while keeping the actual socket semantics unchanged.
+    ///
+    /// The position is a preference, never a cap. When every descriptor from
+    /// it up to the soft `RLIMIT_NOFILE` is taken, the search wraps to the
+    /// floor and then to any free number, so vsock connections are bounded
+    /// only by the process's limit. Under a limit below 2048, the floor and
+    /// the rotation shrink to the upper half of it.
+    pub(super) fn duplicate_client_vsock_fd(fd: OwnedFd, host_port: u32) -> Result<OwnedFd> {
+        let limit = soft_nofile_limit();
+        let floor = VSOCK_FD_FLOOR.min(limit / 2);
+        let rotation = VSOCK_FD_ROTATION.min(limit - floor).max(1);
+        let start = floor + (host_port % rotation as u32).cast_signed();
+
+        let mut error = std::io::Error::from_raw_os_error(libc::EMFILE);
+        for min_fd in [start, floor, 0] {
+            // SAFETY: `fd` is a live OwnedFd; fcntl(F_DUPFD_CLOEXEC) only
+            // allocates a new descriptor for the same open file.
+            let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd) };
+            if dup_fd >= 0 {
+                // SAFETY: `dup_fd` is a fresh fd produced by the kernel; no
+                // other owner exists, so `OwnedFd` takes sole ownership.
+                return Ok(unsafe { OwnedFd::from_raw_fd(dup_fd) });
             }
-        };
-
-        // SAFETY: `fd` is a live OwnedFd; fcntl(F_DUPFD_CLOEXEC) is a
-        // read-only operation on the open file table and cannot cause UB.
-        let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, clamped_min) };
-        if dup_fd < 0 {
-            return Err(VmmError::Device(format!(
-                "vsock client fd dup failed: {} (clamped_min={clamped_min})",
-                std::io::Error::last_os_error()
-            )));
+            error = std::io::Error::last_os_error();
+            // EMFILE: nothing is free from `min_fd` up. EINVAL: `min_fd` is
+            // at or above `kern.maxfilesperproc`, which macOS enforces even
+            // when the soft limit is higher.
+            if !matches!(error.raw_os_error(), Some(libc::EMFILE | libc::EINVAL)) {
+                break;
+            }
         }
-
-        // SAFETY: `dup_fd` is a fresh fd produced by the kernel on success;
-        // no other owner exists, so `OwnedFd` takes sole ownership.
-        Ok(unsafe { OwnedFd::from_raw_fd(dup_fd) })
+        Err(VmmError::Device(format!(
+            "vsock client fd dup failed: {error} (limit={limit})"
+        )))
     }
 
     /// Creates the vsock doorbell pipe, installs the ring callback into the
@@ -257,17 +262,12 @@ impl HvMachine {
             mgr.allocate(port, guest_cid, internal_fd)
         };
 
-        let min_fd = RawFd::try_from(conn_id.host_port).map_err(|_| {
-            VmmError::Device(format!(
-                "vsock host_port {} exceeds RawFd range",
-                conn_id.host_port
-            ))
-        })?;
-        let host_fd = Self::duplicate_client_vsock_fd(host_fd, min_fd).inspect_err(|_| {
-            if let Ok(mut mgr) = conns.lock() {
-                mgr.remove(&conn_id);
-            }
-        })?;
+        let host_fd =
+            Self::duplicate_client_vsock_fd(host_fd, conn_id.host_port).inspect_err(|_| {
+                if let Ok(mut mgr) = conns.lock() {
+                    mgr.remove(&conn_id);
+                }
+            })?;
 
         tracing::info!(
             "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
@@ -290,4 +290,19 @@ impl HvMachine {
 
         Ok(host_fd.into_raw_fd())
     }
+}
+
+/// The soft `RLIMIT_NOFILE` as a descriptor number; `RLIM_INFINITY` and
+/// anything else past `RawFd::MAX` saturate. 0 when it cannot be read.
+fn soft_nofile_limit() -> RawFd {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one `rlimit` through a pointer that is valid
+    // for the duration of the call.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return 0;
+    }
+    RawFd::try_from(limit.rlim_cur).unwrap_or(RawFd::MAX)
 }

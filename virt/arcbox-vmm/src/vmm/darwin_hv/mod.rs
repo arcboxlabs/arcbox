@@ -186,6 +186,8 @@ fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::io::RawFd;
+
     use super::*;
 
     #[test]
@@ -311,8 +313,10 @@ mod tests {
         assert_eq!(uart.output(), b"");
     }
 
-    #[test]
-    fn test_duplicate_client_vsock_fd_uses_high_fd_without_breaking_socketpair() {
+    /// A socketpair whose first end went through `duplicate_client_vsock_fd`
+    /// as the daemon end of a connection on `host_port`; returns
+    /// `(daemon end, its number before the move, peer end)`.
+    fn moved_vsock_pair(host_port: u32) -> (OwnedFd, RawFd, OwnedFd) {
         let mut fds = [0; 2];
         // SAFETY: `fds` is a 2-element array; socketpair fills it on success.
         let ret =
@@ -323,28 +327,25 @@ mod tests {
             "socketpair failed: {}",
             std::io::Error::last_os_error()
         );
-
-        let original_host_fd = fds[0];
         // SAFETY: Both fds are fresh from socketpair with sole ownership.
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         // SAFETY: Same as above for the peer fd.
         let peer_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let moved = HvMachine::duplicate_client_vsock_fd(host_fd, host_port).unwrap();
+        (moved, fds[0], peer_fd)
+    }
 
-        let duplicated = HvMachine::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
-        // The dup clamps `min_fd` below RLIMIT_NOFILE to stay portable across
-        // runners with a low soft limit (CI macOS defaults to ~2560). We
-        // only require that the result escapes the low socketpair-recycle
-        // band (fds 1–20 ish). A couple-hundred floor is safe on every
-        // environment we target.
-        assert!(
-            duplicated.as_raw_fd() >= 512,
-            "duplicated fd should move out of the low recycled range (got {})",
-            duplicated.as_raw_fd(),
-        );
+    // One test, not three: the steps place descriptors in the same range and
+    // would disturb each other running in parallel. The last two fail on a
+    // placement that confines connections to a window below the soft limit,
+    // which is what any limit under ~50 000 did, the default 256 included.
+    #[test]
+    fn test_duplicate_client_vsock_fd_rotates_numbers_without_capping_connections() {
+        let (moved, original, peer) = moved_vsock_pair(50_000);
 
         // SAFETY: fcntl F_GETFD is a pure query; EBADF is the expected result
         // since the original fd was consumed by `duplicate_client_vsock_fd`.
-        let probe = unsafe { libc::fcntl(original_host_fd, libc::F_GETFD) };
+        let probe = unsafe { libc::fcntl(original, libc::F_GETFD) };
         assert_eq!(probe, -1, "original fd should be closed after duplication");
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
@@ -352,29 +353,45 @@ mod tests {
         );
 
         let payload = b"ok";
-        // SAFETY: `peer_fd` is live; `payload` is a valid slice covering
+        // SAFETY: `peer` is live; `payload` is a valid slice covering
         // `payload.len()` bytes for the duration of the write.
         let written = unsafe {
             libc::write(
-                peer_fd.as_raw_fd(),
+                peer.as_raw_fd(),
                 payload.as_ptr().cast::<libc::c_void>(),
                 payload.len(),
             )
         };
         assert_eq!(written, isize::try_from(payload.len()).unwrap());
-
         let mut buf = [0u8; 2];
-        // SAFETY: `duplicated` is live; `buf` is a valid mutable slice
-        // covering `buf.len()` bytes for the duration of the read.
+        // SAFETY: `moved` is live; `buf` is a valid mutable slice covering
+        // `buf.len()` bytes for the duration of the read.
         let read = unsafe {
             libc::read(
-                duplicated.as_raw_fd(),
+                moved.as_raw_fd(),
                 buf.as_mut_ptr().cast::<libc::c_void>(),
                 buf.len(),
             )
         };
         assert_eq!(read, isize::try_from(buf.len()).unwrap());
         assert_eq!(&buf, payload);
+
+        // The next connection must not get the number just closed.
+        let closed = moved.as_raw_fd();
+        drop((moved, peer));
+        let (next, _, _) = moved_vsock_pair(50_001);
+        assert_ne!(
+            next.as_raw_fd(),
+            closed,
+            "a just-closed vsock fd number was handed out again"
+        );
+
+        // 64 concurrent connections was the old cap; hold well past it.
+        let mut held = Vec::new();
+        for port in 50_002..50_102 {
+            held.push(moved_vsock_pair(port).0);
+        }
+        assert_eq!(held.len(), 100, "every connection is open at once");
     }
 
     #[test]
