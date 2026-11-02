@@ -272,10 +272,9 @@ impl Vmm {
                 self.state
             )));
         }
-        let host = arcbox_hypervisor::host_virtualization();
-        if !host.available {
-            return Err(VmmError::PlatformUnsupported(host.reason));
-        }
+        arcbox_hypervisor::host_virtualization()
+            .require()
+            .map_err(VmmError::PlatformUnsupported)?;
 
         self.state = VmmState::Initializing;
         tracing::info!("Initializing VMM");

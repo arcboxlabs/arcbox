@@ -212,6 +212,15 @@ impl SystemServiceImpl {
     }
 }
 
+/// Maps a failed System VM restart: a host without hardware virtualization
+/// classifies as every RPC does; any other failure is internal.
+fn restart_error(error: arcbox_core::CoreError) -> ConnectError {
+    if error.platform_unsupported().is_some() {
+        return crate::ApiError::from(error).into();
+    }
+    ConnectError::internal(error.to_string())
+}
+
 /// Maps a requested wire backend to the core backend this daemon can run.
 fn backend_from_proto(backend: SystemVmBackend) -> Result<arcbox_core::VmBackend, ConnectError> {
     match backend {
@@ -635,7 +644,7 @@ impl pb::SystemService for SystemServiceImpl {
                 arcbox_core::CoreError::Common(arcbox_error::CommonError::Config(_)) => {
                     ConnectError::invalid_argument(e.to_string())
                 }
-                other => ConnectError::internal(other.to_string()),
+                other => restart_error(other),
             })?;
         Response::ok(resources_to_proto(resources))
     }
@@ -653,7 +662,7 @@ impl pb::SystemService for SystemServiceImpl {
         // recorded.
         self.setup_state
             .set_effective_backend(runtime.effective_system_vm_backend());
-        switched.map_err(|e| ConnectError::internal(e.to_string()))?;
+        switched.map_err(restart_error)?;
         let info = pb::SystemVmBackendInfo {
             backend: backend_to_proto(runtime.system_vm_backend()).into(),
             ..Default::default()

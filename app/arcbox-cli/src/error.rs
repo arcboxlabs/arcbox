@@ -57,6 +57,16 @@ pub fn machine_operation(error: ConnectError, name: &str, action: &str) -> Error
             "Machine '{name}' is unavailable. Retry the command; if the problem persists, \
              check `abctl daemon status`."
         ),
+        // Something this daemon or host cannot do at all, such as running a
+        // VM on a Mac without hardware virtualization: the message says what.
+        ErrorCode::Unimplemented => format!(
+            "Could not {action} machine '{name}': {}.",
+            error
+                .message
+                .as_deref()
+                .unwrap_or("this daemon does not support it")
+                .trim_end_matches('.')
+        ),
         _ => format!("Could not {action} machine '{name}'. Re-run with --debug for details."),
     };
     actionable(message, error)
@@ -311,6 +321,19 @@ mod tests {
              `abctl machine inspect dev`."
         );
         assert!(render(&already_running, true).contains("machine already running"));
+
+        // The host, not the machine, is at fault; the daemon's reason is the
+        // whole explanation.
+        let no_virtualization = machine_operation(
+            ConnectError::unimplemented("this Mac does not provide hardware virtualization"),
+            "dev",
+            "start",
+        );
+        assert_eq!(
+            render(&no_virtualization, false),
+            "Error: Could not start machine 'dev': this Mac does not provide hardware \
+             virtualization."
+        );
 
         let missing_execution = execution_wait(
             ConnectError::not_found("execution not found"),

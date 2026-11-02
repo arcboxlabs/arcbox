@@ -128,6 +128,16 @@ impl CoreError {
         Self::Common(CommonError::invalid_state(msg))
     }
 
+    /// The host's reason when this error means the host cannot run a VM at
+    /// all, which no retry or client action changes.
+    #[must_use]
+    pub const fn platform_unsupported(&self) -> Option<&'static str> {
+        match self {
+            Self::Vmm(arcbox_vmm::VmmError::PlatformUnsupported(reason)) => Some(*reason),
+            _ => None,
+        }
+    }
+
     /// Creates a new published-image registry error.
     #[must_use]
     pub fn image(msg: impl Into<String>) -> Self {

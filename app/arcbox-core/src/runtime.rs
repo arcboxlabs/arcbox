@@ -661,7 +661,10 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if the backend cannot be applied or the VM cannot be
-    /// restarted on the new backend.
+    /// restarted on the new backend, and
+    /// [`arcbox_vmm::VmmError::PlatformUnsupported`], before recording
+    /// anything or downloading boot assets, on a host without hardware
+    /// virtualization.
     pub async fn switch_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
         let _operation = self
             .storage_recovery
@@ -669,6 +672,9 @@ impl Runtime {
             .try_lock()
             .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
         self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
+        arcbox_engine::host_virtualization()
+            .require()
+            .map_err(arcbox_vmm::VmmError::PlatformUnsupported)?;
         let lifecycle = &self.vm_lifecycle;
         if lifecycle.backend() == backend {
             // Already on the requested backend — but an earlier switch may have
@@ -725,7 +731,10 @@ impl Runtime {
     ///
     /// Returns an error if a limit is outside `1..=host cpus` or
     /// `512..=host memory` MiB, the config file cannot be written, or the
-    /// System VM fails to stop or boot.
+    /// System VM fails to stop or boot; and
+    /// [`arcbox_vmm::VmmError::PlatformUnsupported`], before writing the
+    /// config or downloading boot assets, on a host without hardware
+    /// virtualization.
     pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
         let _operation = self
             .storage_recovery
@@ -733,6 +742,9 @@ impl Runtime {
             .try_lock()
             .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
         self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
+        arcbox_engine::host_virtualization()
+            .require()
+            .map_err(arcbox_vmm::VmmError::PlatformUnsupported)?;
         let current = self.system_vm_resources();
         let cpus = if cpus == 0 { current.cpus } else { cpus };
         let memory_mb = if memory_mb == 0 {

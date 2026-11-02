@@ -49,6 +49,14 @@ impl From<ApiError> for connectrpc::ConnectError {
     fn from(err: ApiError) -> Self {
         use connectrpc::ErrorCode;
 
+        // Not a fault and not a state the client can change: the host has no
+        // hardware virtualization. The bare reason is the one SetupStatus
+        // reports.
+        if let ApiError::Core(core) = &err
+            && let Some(reason) = core.platform_unsupported()
+        {
+            return Self::new(ErrorCode::Unimplemented, reason);
+        }
         let message = err.to_string();
         let code = match &err {
             ApiError::Common(common) | ApiError::Core(arcbox_core::CoreError::Common(common)) => {

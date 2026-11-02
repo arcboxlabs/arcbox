@@ -22,6 +22,22 @@ pub struct HostVirtualization {
     pub reason: &'static str,
 }
 
+impl HostVirtualization {
+    /// `Err` carrying [`Self::reason`] when the host cannot run a VM, for
+    /// work that must stop before it prepares one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when `available` is false.
+    pub const fn require(self) -> Result<(), &'static str> {
+        if self.available {
+            Ok(())
+        } else {
+            Err(self.reason)
+        }
+    }
+}
+
 /// Probes whether this host provides hardware virtualization.
 ///
 /// On macOS a host is capable when either framework says so: the two
