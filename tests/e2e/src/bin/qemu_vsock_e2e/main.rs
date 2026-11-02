@@ -81,6 +81,8 @@ mod probe {
     use crate::docker::Docker;
     use crate::{CID, agent};
 
+    const MIB: usize = 1 << 20;
+
     fn parse_args() -> Result<VmOptions> {
         let mut args = std::env::args().skip(1);
         let (mut qemu, mut data_dir, mut agent, mut gvproxy) = (None, None, None, None);
@@ -208,6 +210,8 @@ mod probe {
                     t.elapsed().as_secs_f64()
                 );
                 docker.scenarios()?;
+                docker.ping_latency(100)?;
+                docker.throughput(vm.qemu.id(), 256 * MIB, 16, 16 * MIB)?;
                 docker.cleanup()?;
                 agent::drained(vsock, Duration::from_secs(30))?;
                 println!("[ok] every Docker connection closed on both sides");
@@ -252,6 +256,7 @@ mod probe {
             agent::ensure_runtime(vsock, Duration::from_secs(300))?;
             let version = docker.wait_ready(Duration::from_secs(60))?;
             println!("[ok] dockerd {version} answered again after the reboot");
+            docker.ping_latency(20)?;
         }
         agent::drained(vsock, Duration::from_secs(30))?;
         println!("[ok] no vsock connection left open");

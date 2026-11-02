@@ -229,6 +229,104 @@ impl Docker {
         Ok(())
     }
 
+    /// Bulk transfer through `docker exec`, both directions, and many
+    /// host→guest streams at once.
+    pub fn throughput(
+        &self,
+        qemu_pid: u32,
+        bytes: usize,
+        streams: usize,
+        per_stream: usize,
+    ) -> Result<()> {
+        let cpu = Cpu::start(qemu_pid)?;
+        let t = Instant::now();
+        let out = self.run(
+            &["exec", "-i", "qv-sleeper", "wc", "-c"],
+            Some(vec![0u8; bytes]),
+            secs(600),
+        )?;
+        ensure!(out.trim() == bytes.to_string(), "wc -c printed {out:?}");
+        println!(
+            "[ok] host→guest {} MiB via docker exec -i: {}; {}",
+            bytes / MIB,
+            rate(bytes, t.elapsed()),
+            cpu.lap(t.elapsed())?
+        );
+
+        let t = Instant::now();
+        let count = bytes.to_string();
+        let out = self
+            .cli(&["exec", "qv-sleeper", "head", "-c", &count, "/dev/zero"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let received = drain_count(out, secs(600))?;
+        ensure!(received == bytes, "received {received} of {bytes} bytes");
+        println!(
+            "[ok] guest→host {} MiB via docker exec: {}; {}",
+            bytes / MIB,
+            rate(bytes, t.elapsed()),
+            cpu.lap(t.elapsed())?
+        );
+
+        let t = Instant::now();
+        let results: Vec<Result<String>> = std::thread::scope(|s| {
+            let threads: Vec<_> = (0..streams)
+                .map(|_| {
+                    s.spawn(|| {
+                        self.run(
+                            &["exec", "-i", "qv-sleeper", "wc", "-c"],
+                            Some(vec![0u8; per_stream]),
+                            secs(600),
+                        )
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|t| t.join().expect("thread"))
+                .collect()
+        });
+        for r in results {
+            ensure!(
+                r?.trim() == per_stream.to_string(),
+                "a concurrent stream lost bytes"
+            );
+        }
+        println!(
+            "[ok] {streams} concurrent host→guest streams of {} MiB, all bytes delivered: {}; {}",
+            per_stream / MIB,
+            rate(streams * per_stream, t.elapsed()),
+            cpu.lap(t.elapsed())?
+        );
+        Ok(())
+    }
+
+    /// `GET /_ping` on a fresh vsock connection each: connect, framed HTTP
+    /// round trip through the agent's proxy to dockerd, close.
+    pub fn ping_latency(&self, rounds: usize) -> Result<()> {
+        let mut samples = Vec::with_capacity(rounds);
+        for _ in 0..rounds {
+            let t = Instant::now();
+            let mut s = UnixStream::connect(&self.socket)?;
+            s.set_read_timeout(Some(secs(30)))?;
+            s.set_write_timeout(Some(secs(30)))?;
+            s.write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")?;
+            let mut reply = String::new();
+            s.read_to_string(&mut reply)?;
+            ensure!(
+                reply.starts_with("HTTP/1.1 200") && reply.ends_with("OK"),
+                "{reply:?}"
+            );
+            samples.push(t.elapsed());
+        }
+        println!(
+            "[ok] {rounds} Docker GET /_ping, fresh connection each: {}",
+            crate::percentiles(&mut samples)
+        );
+        Ok(())
+    }
+
     pub fn cleanup(&self) -> Result<()> {
         self.run(
             &["rm", "-f", "qv-sleeper", "qv-ticker", "qv-forever"],
@@ -239,8 +337,72 @@ impl Docker {
     }
 }
 
+/// CPU time of this process (the vsock back-end and the Docker proxy) and
+/// of QEMU (the emulated guest), between laps.
+struct Cpu {
+    qemu_pid: u32,
+    last: std::cell::Cell<(f64, f64)>,
+}
+
+impl Cpu {
+    fn start(qemu_pid: u32) -> Result<Self> {
+        let now = (own_cpu(), process_cpu(qemu_pid)?);
+        Ok(Self {
+            qemu_pid,
+            last: std::cell::Cell::new(now),
+        })
+    }
+
+    fn lap(&self, wall: Duration) -> Result<String> {
+        let now = (own_cpu(), process_cpu(self.qemu_pid)?);
+        let (own, qemu) = (now.0 - self.last.get().0, now.1 - self.last.get().1);
+        self.last.set(now);
+        let wall = wall.as_secs_f64();
+        Ok(format!(
+            "CPU: back-end+proxy {:.0}%, QEMU {:.0}%",
+            own / wall * 100.0,
+            qemu / wall * 100.0
+        ))
+    }
+}
+
+fn own_cpu() -> f64 {
+    // SAFETY: getrusage writes one `rusage`.
+    let usage = unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        libc::getrusage(libc::RUSAGE_SELF, &raw mut usage);
+        usage
+    };
+    let secs = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
+    secs(usage.ru_utime) + secs(usage.ru_stime)
+}
+
+/// `ps -o cputime` of `pid`, `[[dd-]hh:]mm:ss.cc`, in seconds.
+fn process_cpu(pid: u32) -> Result<f64> {
+    let out = Command::new("ps")
+        .args(["-o", "cputime=", "-p", &pid.to_string()])
+        .output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut secs = 0.0;
+    for part in text.trim().split(':') {
+        secs = secs * 60.0
+            + part
+                .parse::<f64>()
+                .with_context(|| format!("ps cputime {text:?}"))?;
+    }
+    Ok(secs)
+}
+
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
+}
+
+fn rate(bytes: usize, elapsed: Duration) -> String {
+    format!(
+        "{:.1} MiB/s ({:.2}s)",
+        bytes as f64 / MIB as f64 / elapsed.as_secs_f64(),
+        elapsed.as_secs_f64()
+    )
 }
 
 fn collect(
@@ -250,6 +412,25 @@ fn collect(
         let mut out = Vec::new();
         pipe.read_to_end(&mut out).map(|_| out)
     })
+}
+
+/// Counts the child's stdout until it exits, killing it after `budget`.
+fn drain_count(mut child: std::process::Child, budget: Duration) -> Result<usize> {
+    let mut stdout = child.stdout.take().expect("piped");
+    let counter = std::thread::spawn(move || -> std::io::Result<usize> {
+        let mut buf = vec![0u8; MIB];
+        let mut total = 0;
+        loop {
+            match stdout.read(&mut buf)? {
+                0 => return Ok(total),
+                n => total += n,
+            }
+        }
+    });
+    let status = wait_bounded(&mut child, budget).context("docker exec")?;
+    let total = counter.join().expect("counter")?;
+    ensure!(status.success(), "docker exec exited {status}");
+    Ok(total)
 }
 
 fn wait_bounded(
