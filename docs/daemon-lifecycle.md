@@ -15,6 +15,8 @@ start_runtime_services   Serve DNS and SSH; publish the host resolver and start 
 mark_ready               Admit Machine operations and publish host READY
 ```
 
+Before the first stage, `main` raises the soft `RLIMIT_NOFILE` to the hard limit, capped on macOS at `kern.maxfilesperproc` (`fd_limit.rs`). launchd and login shells start the daemon at 256, which Docker clients and their vsock streams exhaust. A failed raise logs a warning and startup continues.
+
 `mark_ready` publishes Machine admission and host `READY` before starting the retained optional System VM task. System asset downloads, guest boot, Docker readiness, sandbox replay, and container networking run independently of the Machine host. Docker and Kubernetes endpoints bind before System admission opens. A failed System startup preserves the Runtime and guest for diagnostics, reports its cause, and leaves Machine management and HTTPS available. Restart the daemon after fixing an ordinary System startup failure. A successful storage recovery retries System initialization in the same daemon.
 
 A host-stage failure publishes `SetupStatus.phase = FAILED`, includes the cause in `error`, allows 200 ms for connected status streams, and exits. Host readiness requires removal of the legacy shared `tls/ca-key.pem`; System VM disablement and storage protection do not bypass this security barrier. Local CA preparation and login-session authorization remain independent of both host and System readiness.
