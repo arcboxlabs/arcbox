@@ -725,6 +725,7 @@ dependencies = [
  "arcbox-vhost-user",
  "arcbox-virtio-core",
  "arcbox-virtio-fs",
+ "arcbox-virtio-vsock",
  "arcbox-vmm",
  "hyper-util",
  "libc",
