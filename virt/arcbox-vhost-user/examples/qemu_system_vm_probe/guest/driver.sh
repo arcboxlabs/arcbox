@@ -57,14 +57,24 @@ say "runtime-read bytes=$n start=$t0 end=$t1"
 $bb sync; say "sync rc=$?"
 for m in /arcbox /Users /private /Users; do $bb sync -f $m; say "syncfs $m rc=$?"; done
 
+# Tars directory $1 and writes to /run/p-$2 how many 4096-byte files the
+# archive holds and tar's exit status. A file the walk missed lowers the
+# count; a failed read makes tar exit non-zero.
+tarred() {
+  n=$({ $bb tar cf - -C "$1" .; echo $? > /run/p-$2.rc; } |
+    $bb tar tvf - | $bb awk '$3 == 4096 {n++} END {print n+0}')
+  echo "files=$n rc=$(cat /run/p-$2.rc)" > /run/p-$2
+}
+
 drop
-t0=$(up); n=$($bb tar cf - -C "$U" . | $bb wc -c); t1=$(up)
-say "users-tar1 bytes=$n start=$t0 end=$t1"
+t0=$(up); tarred "$U" u; t1=$(up)
+say "users-tar1 $(cat /run/p-u) start=$t0 end=$t1"
 drop
 t0=$(up)
-for d in 0 1 2 3; do $bb tar cf - -C "$P/d$d" . | $bb wc -c > /run/p-tar$d & done
+for d in 0 1 2 3; do tarred "$P/d$d" p$d & done
 wait
 t1=$(up)
-say "private-tar4 bytes=$($bb cat /run/p-tar* | $bb awk '{s+=$1} END {print s}') start=$t0 end=$t1"
+say "private-tar4 $($bb cat /run/p-p0 /run/p-p1 /run/p-p2 /run/p-p3 | $bb awk -F'[= ]' \
+  '{n+=$2; if ($4 != 0) rc=$4} END {print "files=" n " rc=" rc+0}') start=$t0 end=$t1"
 $bb sync; say "done"
 $bb poweroff -f
