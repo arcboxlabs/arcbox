@@ -14,6 +14,7 @@
 //! still ArcBox's ([`SignaturePolicy::Development`]); a pinned build never
 //! does.
 
+mod download;
 mod install;
 mod lockfile;
 mod signature;
@@ -27,6 +28,7 @@ use arcbox_constants::env;
 
 use crate::error::{ImageError, Result};
 
+pub use download::{QemuProgress, Retry};
 pub use signature::{QEMU_IDENTIFIER, SignaturePolicy};
 
 /// The QEMU executable inside an installed build.
