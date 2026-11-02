@@ -175,10 +175,13 @@ impl VmManager {
         use crate::agent_client::AgentClient;
 
         let (backend, fd) = self.connect_vsock_using(id, expected, connect)?;
-        if cfg!(target_os = "macos") && backend == arcbox_vmm::VmBackend::Hv {
-            AgentClient::from_fd_blocking(cid, fd)
-        } else {
-            AgentClient::from_fd_async(cid, fd)
+        match backend {
+            arcbox_vmm::VmBackend::Hv if cfg!(target_os = "macos") => {
+                AgentClient::from_fd_blocking(cid, fd)
+            }
+            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Vz => {
+                AgentClient::from_fd_async(cid, fd)
+            }
         }
     }
 

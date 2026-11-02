@@ -202,7 +202,10 @@ impl VmManager {
             // the host capability. Gating here (rather than baking it into the
             // config) keeps it correct after `set_backend` switches HV<->VZ.
             enable_rosetta: entry.config.rosetta
-                && matches!(entry.config.backend, arcbox_vmm::VmBackend::Vz),
+                && match entry.config.backend {
+                    arcbox_vmm::VmBackend::Vz => true,
+                    arcbox_vmm::VmBackend::Hv => false,
+                },
             nested_virt: entry.config.nested_virt,
             serial_console: true,
             virtio_console: true,

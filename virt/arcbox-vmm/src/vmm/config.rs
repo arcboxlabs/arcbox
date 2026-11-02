@@ -197,6 +197,22 @@ impl VmBackend {
     }
 }
 
+impl TryFrom<u8> for VmBackend {
+    type Error = u8;
+
+    /// Decodes `backend as u8`, returning an unknown value as the error
+    /// rather than reading it as some other backend.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        const HV: u8 = VmBackend::Hv as u8;
+        const VZ: u8 = VmBackend::Vz as u8;
+        match value {
+            HV => Ok(Self::Hv),
+            VZ => Ok(Self::Vz),
+            unknown => Err(unknown),
+        }
+    }
+}
+
 /// VMM state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmmState {

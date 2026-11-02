@@ -45,6 +45,19 @@ fn test_vmm_requires_guest_cid_when_vsock_enabled() {
 }
 
 #[test]
+fn every_backend_decodes_from_its_discriminant() {
+    for backend in [VmBackend::Hv, VmBackend::Vz] {
+        // Exhaustive on purpose: a new backend fails to compile here until it
+        // joins the list above, then fails below until `TryFrom<u8>` decodes it.
+        match backend {
+            VmBackend::Hv | VmBackend::Vz => {}
+        }
+        assert_eq!(VmBackend::try_from(backend as u8), Ok(backend));
+    }
+    assert_eq!(VmBackend::try_from(u8::MAX), Err(u8::MAX));
+}
+
+#[test]
 fn test_vmm_state_transitions() {
     let config = VmmConfig {
         guest_cid: Some(3),
