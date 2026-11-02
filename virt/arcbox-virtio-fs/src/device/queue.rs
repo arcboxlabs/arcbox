@@ -1,9 +1,12 @@
 use arcbox_virtio_core::error::{Result, VirtioError};
 
 use super::VirtioFs;
+use super::chain::{refuse_too_long, request_unique};
+use crate::protocol::MAX_REQUEST_SIZE;
 
 type WriteBuffers = Vec<(usize, usize)>;
-type PendingRequest = (u16, Vec<u8>, WriteBuffers);
+/// A request to answer, or the ready reply refusing one that was too long.
+type PendingRequest = (u16, std::result::Result<Vec<u8>, Vec<u8>>, WriteBuffers);
 type ResponseItem = (u16, std::result::Result<Vec<u8>, VirtioError>, WriteBuffers);
 
 impl VirtioFs {
@@ -25,6 +28,7 @@ impl VirtioFs {
             let mut requests: Vec<PendingRequest> = Vec::new();
             while let Some((head_idx, chain)) = queue.pop_avail() {
                 let mut request_data = Vec::new();
+                let mut request_len = 0u64;
                 let mut write_buffers = Vec::new();
 
                 for desc in chain {
@@ -39,7 +43,12 @@ impl VirtioFs {
                     if desc.is_write_only() {
                         write_buffers.push((start, desc.len as usize));
                     } else {
-                        request_data.extend_from_slice(&memory[start..end]);
+                        // The guest's lengths are only copied up to the
+                        // longest FUSE request; a longer chain is refused.
+                        request_len += u64::from(desc.len);
+                        let room = MAX_REQUEST_SIZE - request_data.len();
+                        let n = room.min(desc.len as usize);
+                        request_data.extend_from_slice(&memory[start..start + n]);
                     }
                 }
 
@@ -49,7 +58,12 @@ impl VirtioFs {
                     ));
                 }
 
-                requests.push((head_idx, request_data, write_buffers));
+                let request = if request_len > MAX_REQUEST_SIZE as u64 {
+                    Err(refuse_too_long(request_len, request_unique(&request_data)))
+                } else {
+                    Ok(request_data)
+                };
+                requests.push((head_idx, request, write_buffers));
             }
             requests
         };
@@ -68,15 +82,17 @@ impl VirtioFs {
         // bytes). If any control request is present, fall back to sequential
         // processing because pre-computing handler results for normal requests
         // around a DESTROY would violate avail ring ordering.
-        let has_control = pending_requests.iter().any(|(_, data, _)| {
-            if data.len() >= 8 {
+        let has_control = pending_requests.iter().any(|(_, data, _)| match data {
+            Ok(data) if data.len() >= 8 => {
                 let op = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
                 op == Self::FUSE_INIT || op == Self::FUSE_DESTROY
-            } else {
-                true // malformed → force sequential for proper error handling
             }
+            Ok(_) => true, // malformed → force sequential for proper error handling
+            Err(_) => false,
         });
-        let all_valid = pending_requests.iter().all(|(_, data, _)| data.len() >= 40);
+        let all_valid = pending_requests
+            .iter()
+            .all(|(_, data, _)| !matches!(data, Ok(data) if data.len() < 40));
         let can_parallel = !has_control
             && all_valid
             && pending_requests.len() > 1
@@ -90,7 +106,10 @@ impl VirtioFs {
             pending_requests
                 .into_par_iter()
                 .map(|(head_idx, data, bufs)| {
-                    let response = handler_ref.handle_request(&data);
+                    let response = match data {
+                        Ok(data) => handler_ref.handle_request(&data),
+                        Err(refused) => Ok(refused),
+                    };
                     (head_idx, response, bufs)
                 })
                 .collect()
@@ -98,8 +117,11 @@ impl VirtioFs {
             // Sequential: control ops present, malformed headers, or single request.
             pending_requests
                 .into_iter()
-                .map(|(head_idx, request_data, write_buffers)| {
-                    let response = self.process_request(&request_data);
+                .map(|(head_idx, request, write_buffers)| {
+                    let response = match request {
+                        Ok(request) => self.process_request(&request),
+                        Err(refused) => Ok(refused),
+                    };
                     (head_idx, response, write_buffers)
                 })
                 .collect()

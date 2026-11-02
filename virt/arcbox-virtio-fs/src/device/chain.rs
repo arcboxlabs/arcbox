@@ -22,9 +22,7 @@ impl VirtioFs {
             .map(|d| u64::from(d.len))
             .sum();
         if len > MAX_REQUEST_SIZE as u64 {
-            tracing::warn!(len, "virtio-fs request longer than any FUSE request");
-            return FuseResponse::error(request_unique(&gather(mem, chain, 16)), libc::EINVAL)
-                .into_data();
+            return refuse_too_long(len, request_unique(&gather(mem, chain, 16)));
         }
         let request = gather(mem, chain, MAX_REQUEST_SIZE);
         self.process_request(&request).unwrap_or_else(|e| {
@@ -47,6 +45,13 @@ fn gather(mem: &GuestMemWriter, chain: &DescChain, limit: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The reply to a chain whose readable descriptors add up to `len` bytes,
+/// more than [`MAX_REQUEST_SIZE`].
+pub(super) fn refuse_too_long(len: u64, unique: u64) -> Vec<u8> {
+    tracing::warn!(len, "virtio-fs request longer than any FUSE request");
+    FuseResponse::error(unique, libc::EINVAL).into_data()
 }
 
 /// The `unique` of a FUSE request, or 0 when its header is cut short.

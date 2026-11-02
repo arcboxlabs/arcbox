@@ -2,8 +2,6 @@ use arcbox_virtio_core::error::{Result, VirtioError};
 use arcbox_virtio_core::queue::VirtQueue;
 use arcbox_virtio_core::{QueueConfig, VirtioDevice, VirtioDeviceId};
 
-use crate::request::FuseResponse;
-
 use super::VirtioFs;
 
 impl VirtioDevice for VirtioFs {
@@ -129,31 +127,15 @@ impl VirtioDevice for VirtioFs {
 
         let mut completions = Vec::new();
         while let Some(chain) = queue.pop_avail() {
-            // Collect request data (read-only descriptors) and response buffer
-            // locations (write-only descriptors, kept as GPA + len).
-            let mut request_data = Vec::new();
-            let mut write_bufs: Vec<(u64, usize)> = Vec::new();
-            for desc in &chain.descriptors {
-                if desc.is_write() {
-                    write_bufs.push((desc.addr, desc.len as usize));
-                } else if let Some(data) = queue.mem().slice(desc.addr as usize, desc.len as usize)
-                {
-                    request_data.extend_from_slice(data);
-                }
-            }
-
-            let response = match self.process_request(&request_data) {
-                Ok(resp) => resp,
-                Err(e) => {
-                    tracing::warn!("VirtioFS FUSE request error: {e}");
-                    let unique = if request_data.len() >= 16 {
-                        u64::from_le_bytes(request_data[8..16].try_into().unwrap())
-                    } else {
-                        0
-                    };
-                    FuseResponse::error(unique, libc::EIO).into_data()
-                }
-            };
+            // Response buffer locations: the write-only descriptors, kept as
+            // GPA + len.
+            let write_bufs: Vec<(u64, usize)> = chain
+                .descriptors
+                .iter()
+                .filter(|d| d.is_write())
+                .map(|d| (d.addr, d.len as usize))
+                .collect();
+            let response = self.answer_chain(queue.mem(), &chain);
 
             // Write response into the write-only descriptors.
             let mut resp_offset = 0;
