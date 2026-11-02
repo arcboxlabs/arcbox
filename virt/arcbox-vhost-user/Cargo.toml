@@ -9,14 +9,14 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+arcbox-fs.workspace = true
 arcbox-virtio-core = { workspace = true }
+arcbox-virtio-fs.workspace = true
 libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-arcbox-fs = { workspace = true }
-arcbox-virtio-fs = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 

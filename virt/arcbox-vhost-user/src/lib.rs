@@ -59,16 +59,8 @@
 //! and either call [`Vring::process_avail`] (pop, handle, publish, re-arm
 //! EVENT_IDX, interrupt once) or drive [`Vring::queue_mut`] directly.
 //!
-//! **virtio-fs** (one back-end per share — `arcbox`, `users`, `private`):
-//! queue 0 is hiprio, queues 1.. are requests (`num-request-queues` on the
-//! QEMU side must match [`VhostUserDevice::num_queues`] − 1). Wrap
-//! `arcbox_virtio_fs::VirtioFs::with_handler(config, Arc::new(FsServer))`
-//! and, per chain, gather the readable descriptors, call
-//! `VirtioFs::process_request`, and scatter the reply into the writable
-//! descriptors — `examples/qemu_fs_probe.rs` does exactly this. The tag is
-//! QEMU's (`tag=` on the device), not the back-end's. There is no DAX
-//! window: leave the `DaxMapper` unset; the guest's `dax=always` remount
-//! fails and must be tolerated.
+//! **virtio-fs** is [`fs`]: one [`fs::FsShare`] per tag (`arcbox`, `users`,
+//! `private` for the System VM), each spawned on its own socketpair.
 //!
 //! **vsock** (one back-end, ports dialled from the host): two queues, RX and
 //! TX — QEMU keeps the event queue (`vhost-vsock-common.c`: `vhost_vqs[2]`),
@@ -93,6 +85,7 @@ pub mod connection;
 mod device;
 mod error;
 mod event_loop;
+pub mod fs;
 mod memory;
 pub mod protocol;
 mod vring;
