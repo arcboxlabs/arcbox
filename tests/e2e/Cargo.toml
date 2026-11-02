@@ -38,3 +38,9 @@ xshell = "0.2.7"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arcbox-fs.workspace = true
+arcbox-vhost-user.workspace = true
+arcbox-virtio-core.workspace = true
+arcbox-virtio-fs.workspace = true

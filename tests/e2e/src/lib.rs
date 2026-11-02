@@ -6,6 +6,8 @@ pub mod docker;
 pub mod http;
 pub mod metrics;
 pub mod net_fixtures;
+#[cfg(target_os = "macos")]
+pub mod qemu;
 pub mod sandbox;
 pub mod sandbox_bench;
 pub mod scenario;
