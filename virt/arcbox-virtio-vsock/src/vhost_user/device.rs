@@ -249,3 +249,54 @@ pub(super) fn lock(
 ) -> MutexGuard<'_, VsockConnectionManager> {
     connections.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::manager::host_socketpair;
+
+    const CID: u64 = 0x0102_0304_0506_0708;
+
+    fn device() -> (VsockDevice, Arc<Mutex<VsockConnectionManager>>) {
+        let connections = Arc::new(Mutex::new(VsockConnectionManager::new()));
+        (VsockDevice::new(CID, Arc::clone(&connections)), connections)
+    }
+
+    #[test]
+    fn config_space_is_the_little_endian_cid() {
+        let (device, _) = device();
+        let mut whole = [0u8; 8];
+        device.read_config(0, &mut whole).unwrap();
+        assert_eq!(whole, [8, 7, 6, 5, 4, 3, 2, 1]);
+        // QEMU may read the two halves separately.
+        let mut high = [0u8; 4];
+        device.read_config(4, &mut high).unwrap();
+        assert_eq!(high, [4, 3, 2, 1]);
+        assert!(device.read_config(6, &mut high).is_err());
+        assert!(device.read_config(8, &mut [0u8; 1]).is_err());
+    }
+
+    #[test]
+    fn reset_ends_every_host_connection() {
+        let (mut device, connections) = device();
+        let mut hosts = Vec::new();
+        for port in [1024, 2375] {
+            let (host, internal) = host_socketpair().unwrap();
+            lock(&connections).allocate(port, CID, internal);
+            let host = UnixStream::from(host);
+            // Before the reset: macOS refuses `setsockopt` once the peer
+            // has gone.
+            host.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            hosts.push(host);
+        }
+        device.reset();
+        assert!(lock(&connections).is_empty());
+        for mut host in hosts {
+            assert_eq!(host.read(&mut [0u8; 8]).unwrap(), 0, "host end reads EOF");
+        }
+    }
+}
