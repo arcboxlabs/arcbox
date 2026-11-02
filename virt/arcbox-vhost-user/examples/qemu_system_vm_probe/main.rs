@@ -36,6 +36,9 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+#[cfg(target_os = "macos")]
+mod report;
+
 #[cfg(not(target_os = "macos"))]
 fn main() {
     eprintln!("qemu_system_vm_probe runs on macOS only");
@@ -347,24 +350,17 @@ mod probe {
             .map(|b| Ok::<_, Error>((b.tag().to_owned(), b.join()?)))
             .collect::<Result<_, _>>()?;
         vsock.join()?;
-        let console = std::fs::read_to_string(work_path.join("console.log")).unwrap_or_default();
-        for line in console.lines().filter(|l| l.contains("PROBE ")) {
-            println!("{line}");
-        }
-        for (tag, s) in &stats {
-            println!(
-                "{tag}: {} requests, busy {:.2}s of {:.1}s, deepest batch {}",
-                s.requests,
-                s.busy.as_secs_f64(),
-                elapsed.as_secs_f64(),
-                s.max_batch
-            );
-        }
-        if status.is_some_and(|s| s.success()) && console.contains("PROBE done") {
+        let outcome = crate::report::Outcome {
+            status,
+            elapsed,
+            stats,
+        };
+        let failures = crate::report::report(&args, &work_path, &outcome);
+        if failures == 0 {
             Ok(())
         } else {
             let keep = work.keep();
-            Err(format!("the guest did not finish; logs in {}", keep.display()).into())
+            Err(format!("{failures} check(s) failed; logs in {}", keep.display()).into())
         }
     }
 }
