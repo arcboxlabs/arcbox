@@ -216,9 +216,36 @@ impl<D: VhostUserDevice> State<D> {
                 self.vring(addr.index)?.set_addr(addr)?;
                 Ok(None)
             }
+            Request::SetVringBase => {
+                let state = VringState::decode(payload)?;
+                self.vring(state.index)?.set_base(state.num)?;
+                Ok(None)
+            }
+            Request::GetVringBase => {
+                let state = VringState::decode(payload)?;
+                let (base, _kick) = self.vring(state.index)?.stop();
+                let reply = VringState {
+                    index: state.index,
+                    num: u32::from(base),
+                };
+                Ok(Some(reply.encode().to_vec()))
+            }
             Request::SetVringKick => {
                 let (index, fd) = vring_fd(payload, msg.fds)?;
                 self.vring(index)?.start(fd)?;
+                Ok(None)
+            }
+            Request::SetVringCall => {
+                let (index, fd) = vring_fd(payload, msg.fds)?;
+                self.vring(index)?.set_call(fd)?;
+                Ok(None)
+            }
+            Request::SetVringErr => {
+                // QEMU builds without eventfd hand over the *read* end of the
+                // error pipe (`event_notifier_get_fd`), so it cannot be
+                // written; the back-end reports failures by closing instead.
+                let (index, _fd) = vring_fd(payload, msg.fds)?;
+                self.vring(index)?;
                 Ok(None)
             }
             Request::SetVringEnable => {
@@ -249,10 +276,6 @@ impl<D: VhostUserDevice> State<D> {
                 self.device.write_config(header.offset, data)?;
                 Ok(None)
             }
-            Request::SetVringBase
-            | Request::GetVringBase
-            | Request::SetVringCall
-            | Request::SetVringErr => Err(Error::Unsupported(format!("{request:?}"))),
             // Each of these belongs to a feature this back-end never offers.
             Request::SetLogBase
             | Request::SetLogFd

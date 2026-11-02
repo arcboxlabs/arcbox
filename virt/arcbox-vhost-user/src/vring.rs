@@ -1,17 +1,71 @@
-//! Per-queue state.
+//! Per-queue state and the device-facing queue API.
 //!
 //! A [`Vring`] collects what the front-end configured (`SET_VRING_NUM`,
-//! `_ADDR`, `_KICK`, `_ENABLE`) and, once the ring is started, owns the
-//! [`SplitQueue`] that walks it.
+//! `_ADDR`, `_BASE`, `_KICK`, `_CALL`, `_ENABLE`) and, once the ring is
+//! started, owns the [`SplitQueue`] the device processes it through. The
+//! `SplitQueue` is the single owner of the avail cursor: `GET_VRING_BASE`
+//! reports it, `SET_VRING_BASE` seeds it.
+//!
+//! Notifications on macOS are pipes, not eventfds: QEMU hands over the read
+//! end of a pipe as the kick descriptor and the write end as the call
+//! descriptor (`event_notifier_get_wfd`), writes 8 bytes per kick, and drains
+//! whatever the back-end writes to the call pipe. Both are drained or written
+//! non-blocking; a full call pipe already means an interrupt is pending.
 
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
-use arcbox_virtio_core::{QueueConfig, SplitQueue};
+use arcbox_virtio_core::{DescChain, GuestMemWriter, QueueConfig, SplitQueue};
 
 use crate::error::{Error, Result};
 use crate::memory::GuestMemory;
 use crate::protocol::VringAddr;
+
+/// Raises a queue's call notifier, making QEMU interrupt the guest.
+///
+/// Cheap to clone and usable from any thread. A clone always writes to the
+/// descriptor the front-end installed last: QEMU swaps it on every MSI-X
+/// vector mask and unmask, and an interrupt written to a replaced descriptor
+/// is lost.
+#[derive(Debug, Clone, Default)]
+pub struct CallNotifier {
+    fd: Arc<RwLock<Option<OwnedFd>>>,
+}
+
+impl CallNotifier {
+    fn replace(&self, fd: Option<OwnedFd>) -> std::io::Result<()> {
+        if let Some(fd) = &fd {
+            set_nonblocking(fd)?;
+        }
+        *self.fd.write().unwrap_or_else(PoisonError::into_inner) = fd;
+        Ok(())
+    }
+
+    /// Asks the front-end to interrupt the guest for this queue; a no-op
+    /// while no call descriptor is installed.
+    pub fn notify(&self) {
+        let guard = self.fd.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(fd) = guard.as_ref() else { return };
+        let value = 1u64.to_ne_bytes();
+        loop {
+            // SAFETY: writes 8 bytes from a live buffer to a descriptor we own.
+            let n = unsafe { libc::write(fd.as_raw_fd(), value.as_ptr().cast(), value.len()) };
+            if n >= 0 {
+                return;
+            }
+            let err = std::io::Error::last_os_error();
+            match err.kind() {
+                std::io::ErrorKind::Interrupted => {}
+                // Full pipe: an interrupt is already pending.
+                std::io::ErrorKind::WouldBlock => return,
+                _ => {
+                    tracing::debug!("vhost-user call notifier write failed: {err}");
+                    return;
+                }
+            }
+        }
+    }
+}
 
 /// One virtqueue as the front-end configured it.
 pub struct Vring {
@@ -21,6 +75,7 @@ pub struct Vring {
     addr: Option<VringAddr>,
     base: u16,
     kick: Option<OwnedFd>,
+    call: CallNotifier,
     started: bool,
     enabled: bool,
     event_idx: bool,
@@ -37,6 +92,7 @@ impl Vring {
             addr: None,
             base: 0,
             kick: None,
+            call: CallNotifier::default(),
             started: false,
             enabled: false,
             event_idx: false,
@@ -58,6 +114,95 @@ impl Vring {
         self.queue.is_some() && self.enabled
     }
 
+    /// The queue, while the ring is running.
+    pub fn queue_mut(&mut self) -> Option<&mut SplitQueue> {
+        if self.enabled {
+            self.queue.as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// The ring's guest-physical layout, while it is running — for devices
+    /// that drive their own `SplitQueue` (the HV vsock injection path takes a
+    /// `QueueConfig`). Such a device owns the avail cursor then, and must
+    /// report it back through [`Self::set_last_avail_idx`] before it returns.
+    #[must_use]
+    pub fn queue_config(&self) -> Option<QueueConfig> {
+        let queue = self.queue.as_ref().filter(|_| self.enabled)?;
+        let addr = self.addr.as_ref()?;
+        let memory = self.memory.as_ref()?;
+        let (desc, avail, used) = translate(memory, addr, queue.size()).ok()?;
+        Some(QueueConfig {
+            desc_addr: desc,
+            avail_addr: avail,
+            used_addr: used,
+            size: queue.size(),
+            ready: true,
+            gpa_base: memory.gpa_base(),
+        })
+    }
+
+    /// Seeds the avail cursor of the running queue (see [`Self::queue_config`]).
+    pub fn set_last_avail_idx(&mut self, idx: u16) {
+        if let Some(queue) = self.queue.as_mut() {
+            queue.set_last_avail_idx(idx);
+        }
+    }
+
+    /// Guest memory, while the ring is running. Stays mapped until the
+    /// connection ends; drop it in [`crate::VhostUserDevice::reset`].
+    #[must_use]
+    pub fn memory(&self) -> Option<Arc<GuestMemWriter>> {
+        self.memory
+            .as_ref()
+            .filter(|_| self.is_running())
+            .map(|m| m.writer())
+    }
+
+    /// The call notifier, for devices that interrupt from their own code
+    /// path. It follows every later `SET_VRING_CALL`, so it may be kept.
+    #[must_use]
+    pub fn call_notifier(&self) -> CallNotifier {
+        self.call.clone()
+    }
+
+    /// Interrupts the guest for this queue (no-op without a call descriptor).
+    pub fn signal_used(&self) {
+        self.call.notify();
+    }
+
+    /// Consumes every available chain: `handle` gets the guest memory and the
+    /// chain and returns how many bytes it wrote into the chain's writable
+    /// descriptors. Publishes each completion, re-arms EVENT_IDX
+    /// notifications (draining again if the guest posted more meanwhile), and
+    /// interrupts the guest once at the end if it asked for it. Returns the
+    /// number of chains consumed.
+    pub fn process_avail<F>(&mut self, mut handle: F) -> usize
+    where
+        F: FnMut(&GuestMemWriter, &DescChain) -> u32,
+    {
+        let Some(queue) = self.queue_mut() else {
+            return 0;
+        };
+        let mut consumed = 0;
+        let mut notify = false;
+        loop {
+            while let Some(chain) = queue.pop_avail() {
+                let written = handle(queue.mem(), &chain);
+                notify |= queue.push_used(chain.head_idx, written);
+                consumed += 1;
+            }
+            if !queue.enable_notification() {
+                break;
+            }
+        }
+        if notify {
+            self.signal_used();
+        }
+        consumed
+    }
+
     // ---- control plane (front-end messages) -------------------------------
 
     pub(crate) fn set_size(&mut self, size: u32) -> Result<()> {
@@ -76,6 +221,19 @@ impl Vring {
         self.rebuild()
     }
 
+    pub(crate) fn set_base(&mut self, base: u32) -> Result<()> {
+        self.base = u16::try_from(base).map_err(|_| {
+            Error::Unsupported(format!(
+                "queue {} base {base:#x} (packed rings are not supported)",
+                self.index
+            ))
+        })?;
+        if let Some(queue) = self.queue.as_mut() {
+            queue.set_last_avail_idx(self.base);
+        }
+        Ok(())
+    }
+
     /// Installs a kick descriptor and starts the ring. Returns the previous
     /// kick descriptor.
     pub(crate) fn start(&mut self, kick: Option<OwnedFd>) -> Result<Option<OwnedFd>> {
@@ -86,6 +244,21 @@ impl Vring {
         self.started = true;
         self.rebuild()?;
         Ok(old)
+    }
+
+    /// Stops the ring (`GET_VRING_BASE`) and returns the avail cursor and the
+    /// kick descriptor.
+    pub(crate) fn stop(&mut self) -> (u16, Option<OwnedFd>) {
+        if let Some(queue) = self.queue.take() {
+            self.base = queue.last_avail_idx();
+        }
+        self.started = false;
+        (self.base, self.kick.take())
+    }
+
+    pub(crate) fn set_call(&self, call: Option<OwnedFd>) -> Result<()> {
+        self.call.replace(call)?;
+        Ok(())
     }
 
     pub(crate) const fn set_enabled(&mut self, enabled: bool) {
@@ -104,10 +277,17 @@ impl Vring {
         self.rebuild()
     }
 
-    /// Back to the state right after connection setup.
+    /// Back to the state right after connection setup. Notifier clones the
+    /// device holds stay attached and fire again once QEMU installs a new
+    /// call descriptor.
     pub(crate) fn reset(&mut self) -> Option<OwnedFd> {
         let kick = self.kick.take();
-        *self = Self::new(self.index, self.max_size);
+        let call = std::mem::take(&mut self.call);
+        let _ = call.replace(None);
+        *self = Self {
+            call,
+            ..Self::new(self.index, self.max_size)
+        };
         kick
     }
 
@@ -200,4 +380,57 @@ fn translate(memory: &GuestMemory, addr: &VringAddr, size: u16) -> Result<(u64, 
         })?;
     }
     Ok(gpas.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::FromRawFd;
+
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two descriptors into `fds`.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: fresh descriptors, sole owner.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn pending(fd: &OwnedFd) -> usize {
+        let mut n: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int.
+        assert_eq!(
+            unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &raw mut n) },
+            0
+        );
+        n as usize
+    }
+
+    #[test]
+    fn a_kept_notifier_follows_call_descriptor_changes() {
+        let mut vring = Vring::new(0, 8);
+        let kept = vring.call_notifier();
+        kept.notify(); // nothing installed yet: no-op
+
+        let (masked_rd, masked_wr) = pipe();
+        vring.set_call(Some(masked_wr)).unwrap();
+        kept.notify();
+        assert_eq!(pending(&masked_rd), 8);
+
+        // QEMU unmasks the vector: the same clone must now hit the new pipe.
+        let (guest_rd, guest_wr) = pipe();
+        vring.set_call(Some(guest_wr)).unwrap();
+        kept.notify();
+        assert_eq!(pending(&guest_rd), 8);
+        assert_eq!(pending(&masked_rd), 8);
+
+        // A reset detaches the descriptor but keeps the clone attached.
+        let _ = vring.reset();
+        kept.notify();
+        assert_eq!(pending(&guest_rd), 8);
+        let (again_rd, again_wr) = pipe();
+        vring.set_call(Some(again_wr)).unwrap();
+        kept.notify();
+        assert_eq!(pending(&again_rd), 8);
+    }
 }
