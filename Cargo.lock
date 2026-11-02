@@ -1225,6 +1225,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-vhost-user"
+version = "0.10.5"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-virtio"
 version = "0.10.5"
 dependencies = [
