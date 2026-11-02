@@ -19,7 +19,8 @@
 //! The data directory becomes the `arcbox` share, as `~/.arcbox` is for the
 //! daemon; use a scratch directory. The Docker checks need `--gvproxy` (the
 //! guest's NIC, for `docker pull`) and `docker` on `PATH`. Exit status 0
-//! means every check passed.
+//! means every check passed. Results are recorded in
+//! `docs/experiments/2026-11-02-vhost-user-vsock.md`.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
