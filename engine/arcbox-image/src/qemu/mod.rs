@@ -21,6 +21,7 @@ mod signature;
 mod tests;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arcbox_constants::env;
 
@@ -38,17 +39,22 @@ pub const QEMU_EXECUTABLE: &str = "bin/qemu-system-aarch64";
 /// `abctl` never extract or publish into the root at the same time. A build
 /// is published by renaming a complete, checked directory into place, so
 /// `<root>/<version>` either holds all of it or does not exist.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QemuRuntime {
     root: PathBuf,
     artifact: QemuArtifact,
+    verifier: Arc<dyn signature::Verify>,
 }
 
 impl QemuRuntime {
-    /// A runtime that installs `artifact` under `root`.
+    /// A runtime that checks signatures with `codesign`.
     #[must_use]
-    pub const fn new(root: PathBuf, artifact: QemuArtifact) -> Self {
-        Self { root, artifact }
+    pub fn new(root: PathBuf, artifact: QemuArtifact) -> Self {
+        Self {
+            root,
+            artifact,
+            verifier: Arc::new(signature::Codesign),
+        }
     }
 
     /// The build this runtime installs.
@@ -58,8 +64,8 @@ impl QemuRuntime {
     }
 
     /// The installed build's executable, or `None` when this build is not
-    /// installed. Reads the install marker only: the build was checked when
-    /// it was installed.
+    /// installed. Reads the install marker only: signatures are checked when
+    /// a build is installed.
     #[must_use]
     pub fn installed_executable(&self) -> Option<PathBuf> {
         install::installed(&self.root, &self.artifact)
@@ -74,7 +80,12 @@ impl QemuRuntime {
         tokio::task::spawn_blocking(move || {
             let _lock = install::lock(&runtime.root)?;
             install::check_sha256(&archive, &runtime.artifact)?;
-            install::install(&runtime.root, &runtime.artifact, &archive)
+            install::install(
+                &runtime.root,
+                &runtime.artifact,
+                &archive,
+                runtime.verifier.as_ref(),
+            )
         })
         .await
         .map_err(|error| ImageError::config(format!("QEMU import task failed: {error}")))?
