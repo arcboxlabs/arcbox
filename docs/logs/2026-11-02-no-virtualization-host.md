@@ -41,8 +41,10 @@ downloaded boot assets before failing.
   policy.
 - System startup checks the host before asset preparation. On a host
   without virtualization it publishes `system_runtime = FAILED` with the
-  reason, logs a warning, and ends without waiting for a storage recovery.
-  The daemon keeps running with host `READY`.
+  reason and logs a warning, not an error. Like any other System failure it
+  then waits for a storage recovery to retry: on a Mac the retry fails again
+  at the cached probe, while a Linux host can pass it once the KVM module
+  loads. The daemon keeps running with host `READY`.
 - `SetSystemVmBackend` and `SetSystemVmResources` check the host before
   anything else: before recording the backend, writing `config.toml` or
   resolving boot assets. Machine start needs no such check, since create
