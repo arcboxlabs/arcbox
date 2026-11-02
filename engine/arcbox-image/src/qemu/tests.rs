@@ -193,6 +193,9 @@ async fn import_installs_the_pinned_archive_with_its_licenses() {
     let dir = tempfile::tempdir().unwrap();
     let (archive, root) = (dir.path().join("qemu.tar.gz"), dir.path().join("qemu"));
     let sha256 = write_archive(&archive, &entries("0.1.0"), None);
+    std::fs::create_dir_all(root.join("0.0.9/bin")).unwrap();
+    std::fs::create_dir_all(root.join(".downloads")).unwrap();
+    std::fs::write(root.join(".downloads/stale.part"), b"x").unwrap();
     let (runtime, recorder) = runtime(&root, &sha256);
 
     let executable = runtime.import(&archive).await.unwrap();
@@ -202,6 +205,8 @@ async fn import_installs_the_pinned_archive_with_its_licenses() {
         std::fs::read(root.join("0.1.0/licenses/qemu/COPYING")).unwrap(),
         b"GPL-2.0"
     );
+    // Older versions and leftovers go; the pinned build is all that runs.
+    assert_eq!(names(&root), [".lock", "0.1.0"]);
 
     let mut calls = recorder.calls.lock().unwrap().clone();
     calls.sort();
@@ -314,5 +319,36 @@ fn codesign_parses_the_developer_id_requirement_and_rejects_other_signers() {
             .verify(apple_signed, Some(&requirement))
             .unwrap_err();
         assert!(error.contains("failed to satisfy"), "{error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn quarantine_is_cleared_throughout_the_build() {
+    const QUARANTINE: &str = "com.apple.quarantine";
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("licenses/qemu");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("COPYING"), b"GPL-2.0").unwrap();
+    for path in [
+        dir.path().join("licenses"),
+        nested.clone(),
+        nested.join("COPYING"),
+    ] {
+        xattr::set(&path, QUARANTINE, b"0083;00000000;Safari;").unwrap();
+    }
+
+    install::clear_quarantine(dir.path()).unwrap();
+    for path in [
+        dir.path().join("licenses"),
+        nested.clone(),
+        nested.join("COPYING"),
+    ] {
+        assert_eq!(
+            xattr::get(&path, QUARANTINE).unwrap(),
+            None,
+            "{}",
+            path.display()
+        );
     }
 }

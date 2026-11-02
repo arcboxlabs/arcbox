@@ -73,8 +73,8 @@ impl QemuRuntime {
 
     /// Installs this build from a local copy of its archive, for a Mac that
     /// cannot reach the CDN. The archive must match the pinned SHA-256 and is
-    /// read in place. Replaces an installed copy of the build. Returns the
-    /// executable.
+    /// read in place; quarantine is removed from what it installs. Replaces
+    /// an installed copy of the build. Returns the executable.
     pub async fn import(&self, archive: &Path) -> Result<PathBuf> {
         let (runtime, archive) = (self.clone(), archive.to_owned());
         tokio::task::spawn_blocking(move || {
