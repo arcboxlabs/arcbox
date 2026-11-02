@@ -69,6 +69,7 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [0010 — vhost-user back-ends use ArcBox's own protocol layer, kqueue loop and `SplitQueue`](adr/0010-vhost-user-protocol-layer-is-arcbox-own.md) (2026-11-02)
 - [0009 — Host work must drain before machine teardown](adr/0009-host-work-drains-before-machine-teardown.md) (2026-10-09; supersedes ADR 0003 decision 5)
 - [0008 — The local CA covers concrete names under `.local`](adr/0008-local-ca-covers-local-domains.md) (2026-10-08)
 - [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
@@ -88,6 +89,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-11-02 — Can the daemon serve the System VM's virtio-fs and vsock to QEMU TCG over vhost-user on macOS?](experiments/2026-11-02-vhost-user-on-macos.md) — probe `virt/arcbox-vhost-user/examples/qemu_fs_probe.rs`
 - [2026-10-31 — Can a Hypervisor.framework VM be checkpointed in one process and resumed in another?](experiments/2026-10-31-hv-checkpoint-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
 - [2026-10-31 — Can a multi-vCPU HV VM with a virtio-blk device under load be checkpointed and resumed?](experiments/2026-10-31-hv-checkpoint-blk-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)
 - [2026-10-31 — Can the production HV VMM checkpoint a Linux guest in the middle of block I/O and resume it?](experiments/2026-10-31-hv-checkpoint-linux-spike.md) — [checkpoint probe](../tests/bench/hv-checkpoint/README.md)

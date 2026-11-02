@@ -65,8 +65,8 @@
 //! `arcbox_virtio_fs::VirtioFs::with_handler(config, Arc::new(FsServer))`
 //! and, per chain, gather the readable descriptors, call
 //! `VirtioFs::process_request`, and scatter the reply into the writable
-//! descriptors. The tag is QEMU's (`tag=` on the device), not the
-//! back-end's. There is no DAX
+//! descriptors — `examples/qemu_fs_probe.rs` does exactly this. The tag is
+//! QEMU's (`tag=` on the device), not the back-end's. There is no DAX
 //! window: leave the `DaxMapper` unset; the guest's `dax=always` remount
 //! fails and must be tolerated.
 //!
