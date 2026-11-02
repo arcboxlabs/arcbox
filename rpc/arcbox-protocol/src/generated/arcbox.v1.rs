@@ -1423,11 +1423,13 @@ pub struct SetupStatus {
     /// Whether this Mac provides hardware virtualization: Virtualization.framework
     /// or Hypervisor.framework can create a VM. Probed once at daemon start and
     /// fixed for the daemon's life. False on a macOS virtual machine (cloud Macs,
-    /// CI runners); there neither HV nor VZ can run, so no backend is effective,
-    /// system_runtime is FAILED with the cause in its reason, and every machine
-    /// start fails. The host phase still reaches READY and the daemon keeps
-    /// running. Absent from a daemon that predates the field: check presence
-    /// before reading false as unavailable.
+    /// CI runners); there neither HV nor VZ can run, so no backend is effective
+    /// and system_runtime is FAILED with the cause in its reason. Requests that
+    /// would boot a VM (SetSystemVmBackend, SetSystemVmResources, StartMachine)
+    /// fail with UNIMPLEMENTED carrying that cause before they change or
+    /// download anything. The host phase still reaches READY and the daemon
+    /// keeps running. Absent from a daemon that predates the field: check
+    /// presence before reading false as unavailable.
     #[prost(bool, optional, tag = "13")]
     pub hardware_virtualization_available: ::core::option::Option<bool>,
     /// The backend the System VM runs on, or boots with next: the configured

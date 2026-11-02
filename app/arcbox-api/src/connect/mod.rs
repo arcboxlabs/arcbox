@@ -416,6 +416,84 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// Every request that would boot a VM is refused with the host's reason,
+    /// and the System VM ones before they record a backend, write the config
+    /// or download boot assets. Runs only on such a host (a Linux container
+    /// without `/dev/kvm`, a macOS VM).
+    #[tokio::test]
+    async fn vm_starts_are_refused_up_front_without_hardware_virtualization() {
+        use arcbox_connect::v1::{self as pb, MachineService as _, SystemService as _};
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+        // Bounded so a missing check fails here instead of booting a VM.
+        const LIMIT: Duration = Duration::from_secs(10);
+
+        let host = arcbox_engine::host_virtualization();
+        if host.available {
+            return;
+        }
+        let (directory, runtime) = storage_runtime();
+        let runtime_handle = Arc::clone(runtime.ready().unwrap());
+        let system = SystemServiceImpl::new(
+            Arc::new(SetupState::new()),
+            Arc::default(),
+            runtime.clone(),
+            Arc::default(),
+        );
+        let machines = MachineServiceImpl::new(runtime, Arc::default());
+        let mut errors = Vec::new();
+        for backend in [pb::SystemVmBackend::Hv, pb::SystemVmBackend::Vz] {
+            let request = pb::SetSystemVmBackendRequest {
+                backend: backend.into(),
+                ..Default::default()
+            };
+            let bytes = bytes::Bytes::from(request.encode_to_vec());
+            let view = pb::SetSystemVmBackendRequest::decode_view(&bytes).unwrap();
+            let call = system.set_system_vm_backend(
+                RequestContext::new(Default::default()),
+                connectrpc::ServiceRequest::from_parts(&view, &bytes),
+            );
+            errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+        }
+        // Unchanged limits would otherwise succeed without a restart.
+        let bytes = bytes::Bytes::from(pb::SetSystemVmResourcesRequest::default().encode_to_vec());
+        let view = pb::SetSystemVmResourcesRequest::decode_view(&bytes).unwrap();
+        let call = system.set_system_vm_resources(
+            RequestContext::new(Default::default()),
+            connectrpc::ServiceRequest::from_parts(&view, &bytes),
+        );
+        errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+        // A created machine gets as far as the VMM, which refuses before it
+        // touches a hypervisor.
+        runtime_handle
+            .machine_manager()
+            .create(arcbox_engine::machine::MachineConfig {
+                name: "probe".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let request = pb::StartMachineRequest {
+            id: "probe".into(),
+            ..Default::default()
+        };
+        let bytes = bytes::Bytes::from(request.encode_to_vec());
+        let view = pb::StartMachineRequest::decode_view(&bytes).unwrap();
+        let call = machines.start(
+            RequestContext::new(Default::default()),
+            connectrpc::ServiceRequest::from_parts(&view, &bytes),
+        );
+        errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+
+        for error in errors {
+            let error = error.expect("refused");
+            assert_eq!(error.code, connectrpc::ErrorCode::Unimplemented);
+            assert_eq!(error.message.as_deref(), Some(host.reason));
+        }
+        assert!(!directory.join("boot").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn storage_admission_rejects_reserved_and_held_writes_but_preserves_reads() {
         let (directory, shared) = storage_runtime();

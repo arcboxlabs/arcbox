@@ -43,6 +43,16 @@ downloaded boot assets before failing.
   without virtualization it publishes `system_runtime = FAILED` with the
   reason, logs a warning, and ends without waiting for a storage recovery.
   The daemon keeps running with host `READY`.
+- `SetSystemVmBackend` and `SetSystemVmResources` check the host before
+  anything else: before recording the backend, writing `config.toml` or
+  resolving boot assets. Machine start needs no such check, since create
+  already fetched the image and made the disk, and it fails at
+  `Vmm::initialize`. Every RPC answers `PlatformUnsupported` with
+  `UNIMPLEMENTED` and the host's reason as the whole message, and
+  `abctl machine start` prints it. Not `FAILED_PRECONDITION`: that code
+  means a state the client can change (stop the machine, switch HV to VZ
+  for sandboxes), and `abctl` renders it as "not in a valid state"; no
+  client action gives this host a hypervisor.
 - `SetupStatus` gains `hardware_virtualization_available` (presence-tracked)
   and `effective_backend`; `SystemVmBackend` gains `QEMU`, which
   `SetSystemVmBackend` rejects with `UNIMPLEMENTED`. `abctl daemon status`
@@ -69,17 +79,23 @@ LaunchAgent with the Desktop daemon's restart policy.
   `systemRuntime.state: FAILED` with the reason above, and
   `hardwareVirtualizationAvailable: false` (`effectiveBackend` is omitted as
   `UNSPECIFIED`).
-- `SetSystemVmBackend(QEMU)` returns `unimplemented`. `SetSystemVmBackend(VZ)`
-  fails after one start attempt in 0.27 s, logging `VM cannot start on this
-  host; not retrying`; master took 3.5 s across three retries.
-- Starting an alpine 3.24 machine fails in 0.01 s with `INTERNAL` carrying
-  the same reason; `abctl machine start` prints its generic message and
-  shows the reason under `--debug`.
+- `SetSystemVmBackend(QEMU)` returns `unimplemented`. Before the up-front
+  check, `SetSystemVmBackend(VZ)` downloaded 26 MB of boot assets, created
+  the System VM disks and failed with `INTERNAL` after one start attempt in
+  0.27 s (master: 3.5 s across three retries), and `abctl machine start`
+  printed only "Re-run with --debug for details".
+- With it, `abctl system backend vz`, `abctl system backend hv` and
+  `abctl system resources --cpus 2 --memory 2048` each fail in 0.01 s with
+  `unimplemented` (HTTP 501) and the host's reason, shown without
+  `--debug`; the data directory has no `boot/` and no `config.toml` was
+  written. `abctl machine start` on an alpine 3.24 machine prints
+  `Error: Could not start machine 'probe': this Mac does not provide
+  hardware virtualization (…)` and the machine stays `Created`.
 
 ## Follow-ups
 
 - The QEMU download progress fields are left to the download task, which
   publishes them.
-- `SetSystemVmBackend` and `SetSystemVmResources` on such a host still
-  resolve boot assets and create the System VM disks before the start
-  fails, and return `INTERNAL`. Machine start returns `INTERNAL` too.
+- Machine create on such a host still downloads the boot assets and the
+  distro image and creates the data disk, for a machine that cannot start
+  until a backend that needs no hardware virtualization (QEMU TCG) exists.
