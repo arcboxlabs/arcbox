@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::{
     FUSE_ASYNC_READ, FUSE_BIG_WRITES, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION,
+    MAX_REQUEST_SIZE,
 };
 use arcbox_virtio_core::queue::flags;
 use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
@@ -456,4 +457,88 @@ fn test_fs_with_handler() {
     fs.process_request(&request).unwrap();
 
     assert_eq!(handler.call_count.load(Ordering::SeqCst), 1);
+}
+
+/// HV's queue path refuses a chain longer than any FUSE request without
+/// copying it or calling the handler: every descriptor may repeat one large
+/// range of guest memory, which would make one request a huge allocation.
+#[test]
+fn hv_queue_refuses_requests_longer_than_a_full_write() {
+    use arcbox_virtio_core::QueueConfig;
+
+    struct Counting(Arc<AtomicUsize>);
+    impl FuseRequestHandler for Counting {
+        fn handle_request(&self, request: &[u8]) -> Result<Vec<u8>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let unique = u64::from_le_bytes(request[8..16].try_into().unwrap());
+            Ok(FuseResponse::new(unique, vec![]).into_data())
+        }
+    }
+
+    // A FUSE_GETATTR (opcode 3, unique 9) of the root in a 56-byte
+    // descriptor, padded to `len` bytes by a second readable one; returns
+    // the reply's error and how many requests reached the handler.
+    let getattr = |len: usize| -> (i32, usize) {
+        const DESC: usize = 0x1000;
+        const AVAIL: usize = 0x2000;
+        const USED: usize = 0x3000;
+        const HEADER: usize = 0x4000;
+        const PADDING: usize = 0x5000;
+        const REPLY: usize = 0x3_8000;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let config = FsConfig {
+            shared_dir: "/tmp".to_string(),
+            ..Default::default()
+        };
+        let mut fs = VirtioFs::with_handler(config, Arc::new(Counting(Arc::clone(&calls))));
+        let mut init = vec![0u8; 56];
+        init[4..8].copy_from_slice(&VirtioFs::FUSE_INIT.to_le_bytes());
+        init[40..44].copy_from_slice(&FUSE_KERNEL_VERSION.to_le_bytes());
+        init[44..48].copy_from_slice(&FUSE_KERNEL_MINOR_VERSION.to_le_bytes());
+        fs.process_request(&init).unwrap();
+
+        let mut mem = vec![0u8; 0x4_0000];
+        mem[HEADER..HEADER + 4].copy_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+        mem[HEADER + 4..HEADER + 8].copy_from_slice(&3u32.to_le_bytes());
+        mem[HEADER + 8..HEADER + 16].copy_from_slice(&9u64.to_le_bytes());
+        mem[HEADER + 16..HEADER + 24].copy_from_slice(&1u64.to_le_bytes());
+        let descs: [(usize, usize, u16, u16); 3] = [
+            (HEADER, 56, flags::NEXT, 1),
+            (PADDING, len - 56, flags::NEXT, 2),
+            (REPLY, 256, flags::WRITE, 0),
+        ];
+        for (i, (addr, size, flags, next)) in descs.into_iter().enumerate() {
+            let d = DESC + i * 16;
+            mem[d..d + 8].copy_from_slice(&(addr as u64).to_le_bytes());
+            mem[d + 8..d + 12].copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+            mem[d + 12..d + 14].copy_from_slice(&flags.to_le_bytes());
+            mem[d + 14..d + 16].copy_from_slice(&next.to_le_bytes());
+        }
+        mem[AVAIL + 2..AVAIL + 4].copy_from_slice(&1u16.to_le_bytes());
+        let queue = QueueConfig {
+            desc_addr: DESC as u64,
+            avail_addr: AVAIL as u64,
+            used_addr: USED as u64,
+            size: 4,
+            ready: true,
+            gpa_base: 0,
+        };
+
+        let completions = VirtioDevice::process_queue(&mut fs, 1, &mut mem, &queue).unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(
+            mem[REPLY + 8..REPLY + 16],
+            9u64.to_le_bytes(),
+            "unique echoed"
+        );
+        let error = i32::from_le_bytes(mem[REPLY + 4..REPLY + 8].try_into().unwrap());
+        (error, calls.load(Ordering::SeqCst))
+    };
+
+    assert_eq!(
+        getattr(MAX_REQUEST_SIZE),
+        (0, 1),
+        "a full-size request is served"
+    );
+    assert_eq!(getattr(MAX_REQUEST_SIZE + 1), (-libc::EINVAL, 0));
 }
