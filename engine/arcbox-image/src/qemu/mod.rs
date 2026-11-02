@@ -14,16 +14,72 @@
 //! still ArcBox's ([`SignaturePolicy::Development`]); a pinned build never
 //! does.
 
+mod install;
 mod lockfile;
 mod signature;
 #[cfg(test)]
 mod tests;
+
+use std::path::{Path, PathBuf};
 
 use arcbox_constants::env;
 
 use crate::error::{ImageError, Result};
 
 pub use signature::{QEMU_IDENTIFIER, SignaturePolicy};
+
+/// The QEMU executable inside an installed build.
+pub const QEMU_EXECUTABLE: &str = "bin/qemu-system-aarch64";
+
+/// One QEMU build and the root it installs under,
+/// `<data_dir>/runtime/qemu`.
+///
+/// Installing takes an exclusive lock on `<root>/.lock`, so the daemon and
+/// `abctl` never extract or publish into the root at the same time. A build
+/// is published by renaming a complete, checked directory into place, so
+/// `<root>/<version>` either holds all of it or does not exist.
+#[derive(Debug, Clone)]
+pub struct QemuRuntime {
+    root: PathBuf,
+    artifact: QemuArtifact,
+}
+
+impl QemuRuntime {
+    /// A runtime that installs `artifact` under `root`.
+    #[must_use]
+    pub const fn new(root: PathBuf, artifact: QemuArtifact) -> Self {
+        Self { root, artifact }
+    }
+
+    /// The build this runtime installs.
+    #[must_use]
+    pub const fn artifact(&self) -> &QemuArtifact {
+        &self.artifact
+    }
+
+    /// The installed build's executable, or `None` when this build is not
+    /// installed. Reads the install marker only: the build was checked when
+    /// it was installed.
+    #[must_use]
+    pub fn installed_executable(&self) -> Option<PathBuf> {
+        install::installed(&self.root, &self.artifact)
+    }
+
+    /// Installs this build from a local copy of its archive, for a Mac that
+    /// cannot reach the CDN. The archive must match the pinned SHA-256 and is
+    /// read in place. Replaces an installed copy of the build. Returns the
+    /// executable.
+    pub async fn import(&self, archive: &Path) -> Result<PathBuf> {
+        let (runtime, archive) = (self.clone(), archive.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let _lock = install::lock(&runtime.root)?;
+            install::check_sha256(&archive, &runtime.artifact)?;
+            install::install(&runtime.root, &runtime.artifact, &archive)
+        })
+        .await
+        .map_err(|error| ImageError::config(format!("QEMU import task failed: {error}")))?
+    }
+}
 
 /// One QEMU build: where its archive is and what it must contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
