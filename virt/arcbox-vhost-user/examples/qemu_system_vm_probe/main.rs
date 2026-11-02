@@ -68,8 +68,8 @@ mod probe {
     use arcbox_constants::virtiofs::{
         MOUNT_PRIVATE, MOUNT_USERS, TAG_ARCBOX, TAG_PRIVATE, TAG_USERS,
     };
-    use arcbox_vhost_user::Backend;
-    use arcbox_vhost_user::fs::{FsShare, FsStats, QUEUE_SIZE, REQUEST_QUEUES};
+    use arcbox_vhost_user::fs::{FsBackend, FsShare, FsStats, QUEUE_SIZE, REQUEST_QUEUES};
+    use arcbox_vhost_user::{Backend, BackendHandle};
 
     use crate::support::{VsockConfigOnly, chardev_pair};
 
@@ -273,6 +273,38 @@ mod probe {
         Ok(qemu)
     }
 
+    /// Waits for QEMU, killing it at `timeout`, then joins the back-ends.
+    fn finish(
+        mut child: std::process::Child,
+        started: Instant,
+        timeout: Duration,
+        shares: Vec<FsBackend>,
+        vsock: BackendHandle<VsockConfigOnly>,
+    ) -> Result<crate::report::Outcome, Error> {
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break Some(status);
+            }
+            if started.elapsed() > timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let elapsed = started.elapsed();
+        let stats: Vec<(String, FsStats)> = shares
+            .into_iter()
+            .map(|b| Ok::<_, Error>((b.tag().to_owned(), b.join()?)))
+            .collect::<Result<_, _>>()?;
+        vsock.join()?;
+        Ok(crate::report::Outcome {
+            status,
+            elapsed,
+            stats,
+        })
+    }
+
     pub fn run() -> Result<(), Error> {
         let args = parse_args()?;
         let work = tempfile::tempdir()?;
@@ -331,29 +363,16 @@ mod probe {
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(work_path.join("qemu.log"))?);
         let started = Instant::now();
-        let mut child = qemu.spawn()?;
+        let child = qemu.spawn()?;
         drop(theirs);
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break Some(status);
+        // Errors from here on keep the work directory, as failed checks do: a
+        // back-end that fails on the protocol is when its logs matter most.
+        let outcome = match finish(child, started, args.timeout, shares, vsock) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let keep = work.keep();
+                return Err(format!("{e}; logs in {}", keep.display()).into());
             }
-            if started.elapsed() > args.timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        };
-        let elapsed = started.elapsed();
-        let stats: Vec<(String, FsStats)> = shares
-            .into_iter()
-            .map(|b| Ok::<_, Error>((b.tag().to_owned(), b.join()?)))
-            .collect::<Result<_, _>>()?;
-        vsock.join()?;
-        let outcome = crate::report::Outcome {
-            status,
-            elapsed,
-            stats,
         };
         let failures = crate::report::report(&args, &work_path, &outcome);
         if failures == 0 {
