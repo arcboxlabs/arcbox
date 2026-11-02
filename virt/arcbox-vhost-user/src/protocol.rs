@@ -15,6 +15,11 @@ pub const HEADER_SIZE: usize = 12;
 pub const MAX_PAYLOAD: usize = 4096;
 /// Most file descriptors one message carries (`SET_MEM_TABLE`, one per region).
 pub const MAX_FDS: usize = 8;
+/// Most memory regions `SET_MEM_TABLE` carries without
+/// `CONFIGURE_MEM_SLOTS` (QEMU's `VHOST_MEMORY_BASELINE_NREGIONS`).
+pub const MAX_MEM_REGIONS: usize = 8;
+/// Largest device config space access (QEMU's `VHOST_USER_MAX_CONFIG_SIZE`).
+pub const MAX_CONFIG_SIZE: usize = 256;
 
 /// Protocol version carried in the low two bits of `flags`.
 const VERSION: u32 = 0x1;
@@ -27,6 +32,11 @@ const FLAG_NEED_REPLY: u32 = 1 << 3;
 /// Virtio feature bit the back-end sets in `GET_FEATURES` to say it speaks the
 /// protocol-feature extension (`GET/SET_PROTOCOL_FEATURES`, `SET_VRING_ENABLE`).
 pub const VHOST_USER_F_PROTOCOL_FEATURES: u64 = 1 << 30;
+
+/// `SET_VRING_KICK`/`CALL`/`ERR` payload: bits 0..8 are the queue index.
+const VRING_INDEX_MASK: u64 = 0xff;
+/// `SET_VRING_KICK`/`CALL`/`ERR` payload: no file descriptor accompanies it.
+const VRING_NOFD_MASK: u64 = 1 << 8;
 
 /// Front-end → back-end request codes this back-end recognizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,8 +241,208 @@ pub fn decode_u64(payload: &[u8]) -> Result<u64> {
     Ok(u64::from_ne_bytes(bytes))
 }
 
+/// `struct vhost_vring_state`: `SET_VRING_NUM`, `SET_VRING_BASE`,
+/// `GET_VRING_BASE`, `SET_VRING_ENABLE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VringState {
+    /// Queue index.
+    pub index: u32,
+    /// Size, base index, or enable flag, depending on the request.
+    pub num: u32,
+}
+
+impl VringState {
+    /// Wire size.
+    pub const SIZE: usize = 8;
+
+    /// Decodes the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        expect_len(payload, Self::SIZE, "vring state")?;
+        Ok(Self {
+            index: read_u32(payload, 0),
+            num: read_u32(payload, 4),
+        })
+    }
+
+    /// Encodes the payload.
+    #[must_use]
+    pub fn encode(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[..4].copy_from_slice(&self.index.to_ne_bytes());
+        out[4..].copy_from_slice(&self.num.to_ne_bytes());
+        out
+    }
+}
+
+/// `struct vhost_vring_addr`: the ring addresses `SET_VRING_ADDR` carries, in
+/// the front-end's virtual address space (not guest physical addresses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VringAddr {
+    /// Queue index.
+    pub index: u32,
+    /// `VHOST_VRING_F_LOG` (dirty logging); this back-end does not log.
+    pub flags: u32,
+    /// Front-end virtual address of the descriptor table.
+    pub desc_user_addr: u64,
+    /// Front-end virtual address of the used ring.
+    pub used_user_addr: u64,
+    /// Front-end virtual address of the available ring.
+    pub avail_user_addr: u64,
+    /// Guest physical address for used-ring dirty logging (unused).
+    pub log_guest_addr: u64,
+}
+
+impl VringAddr {
+    /// Wire size.
+    pub const SIZE: usize = 40;
+
+    /// Decodes the payload.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        expect_len(payload, Self::SIZE, "vring address")?;
+        Ok(Self {
+            index: read_u32(payload, 0),
+            flags: read_u32(payload, 4),
+            desc_user_addr: read_u64(payload, 8),
+            used_user_addr: read_u64(payload, 16),
+            avail_user_addr: read_u64(payload, 24),
+            log_guest_addr: read_u64(payload, 32),
+        })
+    }
+}
+
+/// One `SET_MEM_TABLE` region; the matching file descriptor travels in the
+/// same position of the message's `SCM_RIGHTS` array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRegion {
+    /// Guest physical address of the region.
+    pub guest_phys_addr: u64,
+    /// Region length in bytes.
+    pub memory_size: u64,
+    /// Where the front-end mapped the region (used to translate ring addresses).
+    pub userspace_addr: u64,
+    /// Offset of the region within its file descriptor.
+    pub mmap_offset: u64,
+}
+
+impl MemoryRegion {
+    /// Wire size.
+    pub const SIZE: usize = 32;
+
+    /// Decodes one region.
+    fn decode(bytes: &[u8]) -> Self {
+        Self {
+            guest_phys_addr: read_u64(bytes, 0),
+            memory_size: read_u64(bytes, 8),
+            userspace_addr: read_u64(bytes, 16),
+            mmap_offset: read_u64(bytes, 24),
+        }
+    }
+}
+
+/// Decodes a `SET_MEM_TABLE` payload: `u32 nregions`, `u32 padding`, then
+/// `nregions` regions.
+pub fn decode_mem_table(payload: &[u8]) -> Result<Vec<MemoryRegion>> {
+    if payload.len() < 8 {
+        return Err(Error::Protocol(format!(
+            "memory table payload of {} bytes is shorter than its header",
+            payload.len()
+        )));
+    }
+    let count = read_u32(payload, 0) as usize;
+    if count == 0 || count > MAX_MEM_REGIONS {
+        return Err(Error::Protocol(format!(
+            "memory table with {count} regions (supported: 1..={MAX_MEM_REGIONS})"
+        )));
+    }
+    expect_len(payload, 8 + count * MemoryRegion::SIZE, "memory table")?;
+    Ok(payload[8..]
+        .chunks_exact(MemoryRegion::SIZE)
+        .map(MemoryRegion::decode)
+        .collect())
+}
+
+/// The queue index and whether a file descriptor accompanies a
+/// `SET_VRING_KICK`/`CALL`/`ERR` payload.
+pub fn decode_vring_fd(payload: &[u8]) -> Result<(u32, bool)> {
+    let value = decode_u64(payload)?;
+    if value & !(VRING_INDEX_MASK | VRING_NOFD_MASK) != 0 {
+        return Err(Error::Protocol(format!(
+            "vring fd payload {value:#x} sets reserved bits"
+        )));
+    }
+    Ok((
+        (value & VRING_INDEX_MASK) as u32,
+        value & VRING_NOFD_MASK == 0,
+    ))
+}
+
+/// `struct vhost_user_config` header: `GET_CONFIG`/`SET_CONFIG`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigHeader {
+    /// Offset into the device config space.
+    pub offset: u32,
+    /// Bytes to read or write.
+    pub size: u32,
+    /// `VHOST_SET_CONFIG_TYPE_*` (front-end-initiated or migration).
+    pub flags: u32,
+}
+
+impl ConfigHeader {
+    /// Wire size of the header part.
+    pub const SIZE: usize = 12;
+
+    /// Decodes the payload into the header and the `size` bytes after it.
+    pub fn decode(payload: &[u8]) -> Result<(Self, &[u8])> {
+        if payload.len() < Self::SIZE {
+            return Err(Error::Protocol(format!(
+                "config payload of {} bytes is shorter than its header",
+                payload.len()
+            )));
+        }
+        let header = Self {
+            offset: read_u32(payload, 0),
+            size: read_u32(payload, 4),
+            flags: read_u32(payload, 8),
+        };
+        let size = header.size as usize;
+        if size > MAX_CONFIG_SIZE {
+            return Err(Error::Protocol(format!(
+                "config access of {size} bytes exceeds {MAX_CONFIG_SIZE}"
+            )));
+        }
+        expect_len(payload, Self::SIZE + size, "config")?;
+        Ok((header, &payload[Self::SIZE..]))
+    }
+
+    /// Encodes the header followed by `data`.
+    #[must_use]
+    pub fn encode_with(&self, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::SIZE + data.len());
+        out.extend_from_slice(&self.offset.to_ne_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_ne_bytes());
+        out.extend_from_slice(&self.flags.to_ne_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+}
+
+fn expect_len(payload: &[u8], expected: usize, what: &str) -> Result<()> {
+    if payload.len() == expected {
+        Ok(())
+    } else {
+        Err(Error::Protocol(format!(
+            "{what} payload is {} bytes, expected {expected}",
+            payload.len()
+        )))
+    }
+}
+
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("4-byte slice"))
+}
+
+fn read_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("8-byte slice"))
 }
 
 #[cfg(test)]
@@ -264,5 +474,68 @@ mod tests {
         assert_eq!(read_u32(&header, 4), VERSION | FLAG_REPLY);
         assert_eq!(read_u32(&header, 8), 3);
         assert_eq!(&reply[HEADER_SIZE..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn mem_table_size_must_match_region_count() {
+        let mut payload = vec![0u8; 8 + 2 * MemoryRegion::SIZE];
+        payload[..4].copy_from_slice(&2u32.to_ne_bytes());
+        // Second region: distinct values per field so a field mix-up shows.
+        let r = 8 + MemoryRegion::SIZE;
+        payload[r..r + 8].copy_from_slice(&0x4000_0000u64.to_ne_bytes());
+        payload[r + 8..r + 16].copy_from_slice(&0x1000u64.to_ne_bytes());
+        payload[r + 16..r + 24].copy_from_slice(&0x7f00_0000u64.to_ne_bytes());
+        payload[r + 24..r + 32].copy_from_slice(&0x2000u64.to_ne_bytes());
+        let regions = decode_mem_table(&payload).unwrap();
+        assert_eq!(
+            regions[1],
+            MemoryRegion {
+                guest_phys_addr: 0x4000_0000,
+                memory_size: 0x1000,
+                userspace_addr: 0x7f00_0000,
+                mmap_offset: 0x2000,
+            }
+        );
+
+        // Count says 3 but only two regions follow.
+        payload[..4].copy_from_slice(&3u32.to_ne_bytes());
+        assert!(decode_mem_table(&payload).is_err());
+        // Zero and too many regions.
+        payload[..4].copy_from_slice(&0u32.to_ne_bytes());
+        assert!(decode_mem_table(&payload).is_err());
+        payload[..4].copy_from_slice(&9u32.to_ne_bytes());
+        assert!(decode_mem_table(&payload).is_err());
+    }
+
+    #[test]
+    fn vring_fd_payload_splits_index_and_nofd() {
+        assert_eq!(decode_vring_fd(&3u64.to_ne_bytes()).unwrap(), (3, true));
+        assert_eq!(
+            decode_vring_fd(&(VRING_NOFD_MASK | 1).to_ne_bytes()).unwrap(),
+            (1, false)
+        );
+        assert!(decode_vring_fd(&(1u64 << 9).to_ne_bytes()).is_err());
+    }
+
+    #[test]
+    fn config_payload_carries_exactly_size_bytes() {
+        let header = ConfigHeader {
+            offset: 4,
+            size: 8,
+            flags: 0,
+        };
+        let encoded = header.encode_with(&[7u8; 8]);
+        let (decoded, data) = ConfigHeader::decode(&encoded).unwrap();
+        assert_eq!(decoded, header);
+        assert_eq!(data, &[7u8; 8]);
+        assert!(ConfigHeader::decode(&encoded[..encoded.len() - 1]).is_err());
+
+        let oversized = ConfigHeader {
+            offset: 0,
+            size: MAX_CONFIG_SIZE as u32 + 1,
+            flags: 0,
+        }
+        .encode_with(&[0u8; MAX_CONFIG_SIZE + 1]);
+        assert!(ConfigHeader::decode(&oversized).is_err());
     }
 }
