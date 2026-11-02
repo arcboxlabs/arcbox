@@ -16,14 +16,20 @@
 //!   from `-object memory-backend-shm,share=on`) into one reservation so a
 //!   single `GuestMemWriter` — and so `arcbox_virtio_core::SplitQueue` —
 //!   covers guest RAM.
+//! - [`Backend`]: answers front-end messages on the calling (or a spawned)
+//!   thread and drives a [`VhostUserDevice`].
 
 #![cfg(target_os = "macos")]
 
+mod backend;
 pub mod connection;
+mod device;
 mod error;
 mod memory;
 pub mod protocol;
 
+pub use backend::{Backend, BackendHandle};
+pub use device::VhostUserDevice;
 pub use error::{Error, Result};
 pub use memory::GuestMemory;
 pub use protocol::ProtocolFeatures;
