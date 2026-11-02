@@ -12,12 +12,18 @@
 //! - [`protocol`]: the wire format; [`connection`]: framed messages with
 //!   `SCM_RIGHTS` descriptors (marked close-on-exec — macOS has no
 //!   `MSG_CMSG_CLOEXEC`).
+//! - [`GuestMemory`]: maps the `SET_MEM_TABLE` regions (POSIX shared memory
+//!   from `-object memory-backend-shm,share=on`) into one reservation so a
+//!   single `GuestMemWriter` — and so `arcbox_virtio_core::SplitQueue` —
+//!   covers guest RAM.
 
 #![cfg(target_os = "macos")]
 
 pub mod connection;
 mod error;
+mod memory;
 pub mod protocol;
 
 pub use error::{Error, Result};
+pub use memory::GuestMemory;
 pub use protocol::ProtocolFeatures;
