@@ -1,18 +1,25 @@
 //! Serving one vhost-user connection: the calling thread answers front-end
-//! messages.
+//! messages and configures the device's vrings.
 
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use arcbox_virtio_core::virtio_bindings::virtio_config::VIRTIO_F_RING_PACKED;
-use arcbox_virtio_core::virtio_bindings::virtio_ring::VIRTIO_RING_F_INDIRECT_DESC;
+use arcbox_virtio_core::virtio_bindings::virtio_ring::{
+    VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC,
+};
 
 use crate::connection::{Connection, Message};
-use crate::device::VhostUserDevice;
+use crate::device::{VhostUserDevice, Vrings};
 use crate::error::{Error, Result};
+use crate::memory::GuestMemory;
 use crate::protocol::{
-    ConfigHeader, ProtocolFeatures, Request, VHOST_USER_F_PROTOCOL_FEATURES, decode_u64,
+    ConfigHeader, ProtocolFeatures, Request, VHOST_USER_F_PROTOCOL_FEATURES, VringAddr, VringState,
+    decode_mem_table, decode_u64, decode_vring_fd,
 };
+use crate::vring::Vring;
 
 /// Ring layouts `SplitQueue` does not walk; never offered to the front-end.
 const UNSUPPORTED_RING_FEATURES: u64 =
@@ -59,12 +66,15 @@ impl<D: VhostUserDevice> Backend<D> {
         let offered_features =
             (device.features() & !UNSUPPORTED_RING_FEATURES) | VHOST_USER_F_PROTOCOL_FEATURES;
         let offered_protocol = BASE_PROTOCOL_FEATURES | device.protocol_features();
+        let vrings = Vrings::new(num_queues, device.max_queue_size());
         let mut state = State {
             device,
+            vrings,
             offered_features,
             offered_protocol,
             acked_features: 0,
             acked_protocol: ProtocolFeatures::empty(),
+            mappings: Vec::new(),
         };
 
         let conn = Connection::new(stream);
@@ -73,6 +83,7 @@ impl<D: VhostUserDevice> Backend<D> {
             tracing::warn!("{name}: vhost-user connection failed: {e}");
         }
         state.reset();
+        state.mappings.clear();
         tracing::info!("{name}: vhost-user front-end disconnected");
         result.map(|()| state.device)
     }
@@ -116,10 +127,15 @@ impl<D: VhostUserDevice> BackendHandle<D> {
 
 struct State<D> {
     device: D,
+    vrings: Vrings,
     offered_features: u64,
     offered_protocol: ProtocolFeatures,
     acked_features: u64,
     acked_protocol: ProtocolFeatures,
+    /// Every guest memory table mapped on this connection. Mappings outlive
+    /// table changes so no handle a device took can dangle; an identical
+    /// table (every device restart re-sends one) reuses its mapping.
+    mappings: Vec<Arc<GuestMemory>>,
 }
 
 impl<D: VhostUserDevice> State<D> {
@@ -136,6 +152,16 @@ impl<D: VhostUserDevice> State<D> {
                     )));
                 }
                 self.acked_features = features;
+                let event_idx = features & (1u64 << VIRTIO_RING_F_EVENT_IDX) != 0;
+                // Without the protocol-feature extension there is no
+                // SET_VRING_ENABLE, and rings start enabled.
+                let enable_all = features & VHOST_USER_F_PROTOCOL_FEATURES == 0;
+                for vring in self.vrings.iter_mut() {
+                    vring.set_event_idx(event_idx);
+                    if enable_all {
+                        vring.set_enabled(true);
+                    }
+                }
                 self.device
                     .set_features(features & !VHOST_USER_F_PROTOCOL_FEATURES);
                 Ok(None)
@@ -160,9 +186,56 @@ impl<D: VhostUserDevice> State<D> {
                 self.acked_protocol = acked;
                 Ok(None)
             }
-            Request::GetQueueNum => Ok(Some(
-                (self.device.num_queues() as u64).to_ne_bytes().to_vec(),
-            )),
+            Request::GetQueueNum => Ok(Some((self.vrings.len() as u64).to_ne_bytes().to_vec())),
+            Request::SetMemTable => {
+                let regions = decode_mem_table(payload)?;
+                let memory = match self.mappings.iter().find(|m| m.same_layout(&regions)) {
+                    Some(existing) => {
+                        tracing::debug!("vhost-user memory table unchanged; reusing its mapping");
+                        Arc::clone(existing)
+                    }
+                    None => {
+                        let mapped = Arc::new(GuestMemory::map(&regions, &msg.fds)?);
+                        tracing::info!("vhost-user guest memory mapped: {mapped:?}");
+                        self.mappings.push(Arc::clone(&mapped));
+                        mapped
+                    }
+                };
+                for vring in self.vrings.iter_mut() {
+                    vring.set_memory(Arc::clone(&memory))?;
+                }
+                Ok(None)
+            }
+            Request::SetVringNum => {
+                let state = VringState::decode(payload)?;
+                self.vring(state.index)?.set_size(state.num)?;
+                Ok(None)
+            }
+            Request::SetVringAddr => {
+                let addr = VringAddr::decode(payload)?;
+                self.vring(addr.index)?.set_addr(addr)?;
+                Ok(None)
+            }
+            Request::SetVringKick => {
+                let (index, fd) = vring_fd(payload, msg.fds)?;
+                self.vring(index)?.start(fd)?;
+                Ok(None)
+            }
+            Request::SetVringEnable => {
+                if self.acked_features & VHOST_USER_F_PROTOCOL_FEATURES == 0 {
+                    return Err(Error::Protocol(
+                        "SET_VRING_ENABLE without VHOST_USER_F_PROTOCOL_FEATURES".into(),
+                    ));
+                }
+                let state = VringState::decode(payload)?;
+                let enable = match state.num {
+                    0 => false,
+                    1 => true,
+                    n => return Err(Error::Protocol(format!("SET_VRING_ENABLE value {n}"))),
+                };
+                self.vring(state.index)?.set_enabled(enable);
+                Ok(None)
+            }
             Request::GetConfig => {
                 self.require_protocol(ProtocolFeatures::CONFIG, "GET_CONFIG")?;
                 let (header, _) = ConfigHeader::decode(payload)?;
@@ -176,15 +249,10 @@ impl<D: VhostUserDevice> State<D> {
                 self.device.write_config(header.offset, data)?;
                 Ok(None)
             }
-            Request::SetMemTable
-            | Request::SetVringNum
-            | Request::SetVringAddr
-            | Request::SetVringBase
+            Request::SetVringBase
             | Request::GetVringBase
-            | Request::SetVringKick
             | Request::SetVringCall
-            | Request::SetVringErr
-            | Request::SetVringEnable => Err(Error::Unsupported(format!("{request:?}"))),
+            | Request::SetVringErr => Err(Error::Unsupported(format!("{request:?}"))),
             // Each of these belongs to a feature this back-end never offers.
             Request::SetLogBase
             | Request::SetLogFd
@@ -199,6 +267,13 @@ impl<D: VhostUserDevice> State<D> {
         }
     }
 
+    fn vring(&mut self, index: u32) -> Result<&mut Vring> {
+        u16::try_from(index)
+            .ok()
+            .and_then(|i| self.vrings.get_mut(i))
+            .ok_or_else(|| Error::Protocol(format!("queue index {index} out of range")))
+    }
+
     fn require_protocol(&self, feature: ProtocolFeatures, what: &str) -> Result<()> {
         if self.acked_protocol.contains(feature) {
             Ok(())
@@ -209,11 +284,15 @@ impl<D: VhostUserDevice> State<D> {
         }
     }
 
-    /// Forgets the virtio features. Protocol features survive: QEMU
-    /// negotiates them once per connection and keeps relying on them
-    /// (`REPLY_ACK` above all — it blocks for the ack of the
-    /// `SET_VRING_CALL` it sends right after a guest-driven `RESET_DEVICE`).
+    /// Stops every ring and forgets the virtio features; mappings stay until
+    /// the connection ends. Protocol features survive: QEMU negotiates them
+    /// once per connection and keeps relying on them (`REPLY_ACK` above all —
+    /// it blocks for the ack of the `SET_VRING_CALL` it sends right after a
+    /// guest-driven `RESET_DEVICE`).
     fn reset(&mut self) {
+        for vring in self.vrings.iter_mut() {
+            vring.reset();
+        }
         self.acked_features = 0;
         self.device.reset();
     }
@@ -248,4 +327,16 @@ fn control_loop<D: VhostUserDevice>(
         }
     }
     Ok(())
+}
+
+fn vring_fd(payload: &[u8], mut fds: Vec<OwnedFd>) -> Result<(u32, Option<OwnedFd>)> {
+    let (index, has_fd) = decode_vring_fd(payload)?;
+    let expected = usize::from(has_fd);
+    if fds.len() != expected {
+        return Err(Error::Protocol(format!(
+            "queue {index} notifier message carries {} descriptors, expected {expected}",
+            fds.len()
+        )));
+    }
+    Ok((index, fds.pop()))
 }
