@@ -6,7 +6,7 @@
 //! reconfigured while the device is processing it and `GET_VRING_BASE`
 //! reports a cursor no handler is still moving.
 
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -111,7 +111,7 @@ impl<D: VhostUserDevice> Backend<D> {
         let worker_result = worker.join();
 
         let mut guard = lock(&shared);
-        guard.reset();
+        guard.reset(&kq);
         guard.mappings.clear();
         drop(guard);
         let device = Arc::into_inner(shared)
@@ -208,7 +208,7 @@ impl<D: VhostUserDevice> State<D> {
             }
             Request::SetOwner => Ok(None),
             Request::ResetOwner | Request::ResetDevice => {
-                self.reset();
+                self.reset(kq);
                 Ok(None)
             }
             Request::GetProtocolFeatures => {
@@ -264,7 +264,8 @@ impl<D: VhostUserDevice> State<D> {
             }
             Request::GetVringBase => {
                 let state = VringState::decode(payload)?;
-                let (base, _kick) = self.vring(state.index)?.stop();
+                let (base, kick) = self.vring(state.index)?.stop();
+                unwatch(kq, kick);
                 let reply = VringState {
                     index: state.index,
                     num: u32::from(base),
@@ -274,7 +275,10 @@ impl<D: VhostUserDevice> State<D> {
             Request::SetVringKick => {
                 let (index, fd) = vring_fd(payload, msg.fds)?;
                 let vring = self.vring(index)?;
-                vring.start(fd)?;
+                unwatch(kq, vring.start(fd)?);
+                if let Some(kick) = vring.kick_fd() {
+                    kq.add_read(kick.as_raw_fd(), Event::Kick(index as u16))?;
+                }
                 trigger(kq, vring);
                 Ok(None)
             }
@@ -357,9 +361,9 @@ impl<D: VhostUserDevice> State<D> {
     /// once per connection and keeps relying on them (`REPLY_ACK` above all —
     /// it blocks for the ack of the `SET_VRING_CALL` it sends right after a
     /// guest-driven `RESET_DEVICE`).
-    fn reset(&mut self) {
+    fn reset(&mut self, kq: &Kqueue) {
         for vring in self.vrings.iter_mut() {
-            vring.reset();
+            unwatch(kq, vring.reset());
         }
         self.acked_features = 0;
         self.device.reset();
@@ -436,10 +440,15 @@ fn run_worker<D: VhostUserDevice>(
             let mut guard = lock(state);
             let State { device, vrings, .. } = &mut *guard;
             let result = match event {
-                Event::Trigger(queue) => {
+                Event::Kick(queue) | Event::Trigger(queue) => {
                     let Some(vring) = vrings.get_mut(queue) else {
                         continue;
                     };
+                    if matches!(event, Event::Kick(_)) && !vring.drain_kick() {
+                        if let Some(fd) = vring.kick_fd() {
+                            let _ = kq.delete(fd.as_raw_fd());
+                        }
+                    }
                     if !vring.is_running() {
                         continue;
                     }
@@ -469,6 +478,12 @@ fn vring_fd(payload: &[u8], mut fds: Vec<OwnedFd>) -> Result<(u32, Option<OwnedF
 fn trigger(kq: &Kqueue, vring: &Vring) {
     if vring.is_running() {
         let _ = kq.trigger_queue(vring.index());
+    }
+}
+
+fn unwatch(kq: &Kqueue, kick: Option<OwnedFd>) {
+    if let Some(fd) = kick {
+        let _ = kq.delete(fd.as_raw_fd());
     }
 }
 
