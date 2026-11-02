@@ -1232,10 +1232,13 @@ dependencies = [
 name = "arcbox-vhost-user"
 version = "0.10.5"
 dependencies = [
+ "arcbox-constants",
  "arcbox-fs",
+ "arcbox-storage",
  "arcbox-virtio-core",
  "arcbox-virtio-fs",
  "libc",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
