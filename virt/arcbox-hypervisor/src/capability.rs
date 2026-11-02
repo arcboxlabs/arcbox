@@ -10,8 +10,10 @@
 /// Whether this host can run a VM at all, and the platform's own reason
 /// when it cannot.
 ///
-/// A host without it cannot gain it while the process lives, so a start
-/// that fails for this reason must not be retried.
+/// A Mac without it cannot gain it while the process lives; a Linux host
+/// gains it only once the KVM module loads. Either way an immediate retry
+/// meets the same host, so a start that fails for this reason is not
+/// retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostVirtualization {
     /// True when at least one of this platform's hypervisors can create a

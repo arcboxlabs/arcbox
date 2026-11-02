@@ -340,8 +340,9 @@ impl LifecycleShared {
                     return Ok(());
                 }
                 Err(e) if e.is_platform_unsupported() => {
-                    // Fixed for the life of the process: a retry would only
-                    // delay the failure the caller has to report.
+                    // A property of the host: a retry seconds later meets the
+                    // same host and would only delay the failure the caller
+                    // has to report.
                     tracing::warn!(error = %e, "VM cannot start on this host; not retrying");
                     return Err(e);
                 }

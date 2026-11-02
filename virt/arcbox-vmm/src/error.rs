@@ -48,9 +48,9 @@ pub enum VmmError {
 
     /// The host provides no hardware virtualization, so no VM can start.
     ///
-    /// A property of the host that holds for the life of the process
-    /// (see [`arcbox_hypervisor::host_virtualization`]): retrying cannot
-    /// clear it.
+    /// A property of the host, not of this VM (see
+    /// [`arcbox_hypervisor::host_virtualization`]): an immediate retry
+    /// cannot clear it.
     #[error("{0}")]
     PlatformUnsupported(&'static str),
 }

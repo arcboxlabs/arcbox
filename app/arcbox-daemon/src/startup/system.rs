@@ -18,9 +18,11 @@ pub(super) async fn run(
     supervise(&ctx, &runtime, || initialize(&ctx, &runtime, assets)).await
 }
 
-/// This Mac cannot run the System VM, and nothing the daemon or a retry does
-/// will change that. A property of the host, not a fault, so it is reported
-/// in the System status rather than as an error event.
+/// This host cannot run the System VM. A property of the host, not a fault,
+/// so it is reported in the System status rather than as an error event.
+/// Startup still waits for a storage recovery like after any other failure:
+/// a Mac fails again at the probe, while a Linux host can pass it once the
+/// KVM module loads.
 #[derive(Debug)]
 struct NoHardwareVirtualization(&'static str);
 
@@ -80,11 +82,11 @@ async fn supervise<F: Future<Output = Result<SystemServiceHandles>>>(
                     tracing::warn!(%error, "System VM unavailable on this host; Machine host remains available");
                     ctx.setup_state
                         .set_system_runtime(State::Failed, &error.to_string());
-                    return Ok(());
+                } else {
+                    tracing::error!(%error, "System startup failed; Machine host remains available");
+                    ctx.setup_state
+                        .set_system_runtime(State::Failed, &format!("{error:#}"));
                 }
-                tracing::error!(%error, "System startup failed; Machine host remains available");
-                ctx.setup_state
-                    .set_system_runtime(State::Failed, &format!("{error:#}"));
             }
         }
         if !wait_for_recovery(ctx, runtime, previous_operation, recovery_updates).await {
@@ -252,23 +254,15 @@ mod tests {
             .unwrap();
     }
 
-    /// Unlike any other failure, a host without virtualization ends System
-    /// supervision at once: no storage recovery can make the VM bootable.
+    /// A host without virtualization reports the bare reason, and supervision
+    /// stays retryable: on Linux the KVM module can load after startup.
     #[tokio::test]
-    async fn host_without_virtualization_fails_system_once_and_keeps_host_ready() {
+    async fn host_without_virtualization_reports_its_reason_and_keeps_waiting() {
         let (_directory, ctx, runtime) = fixture(true).await;
-        let mut attempts = 0;
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            supervise(&ctx, &runtime, || {
-                attempts += 1;
-                async { Err(NoHardwareVirtualization("no hypervisor here").into()) }
-            }),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(attempts, 1);
+        let mut task = pin!(supervise(&ctx, &runtime, || async {
+            Err(NoHardwareVirtualization("no hypervisor here").into())
+        }));
+        assert!(matches!(futures::poll!(&mut task), Poll::Pending));
         let status = ctx.setup_state.current();
         assert_eq!(status.system_runtime.state, State::Failed);
         assert_eq!(
@@ -277,6 +271,11 @@ mod tests {
         );
         assert_eq!(status.phase, SetupPhase::Ready);
         assert!(ctx.host_runtime.get().is_some());
+        ctx.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
