@@ -1351,6 +1351,7 @@ dependencies = [
 name = "arcbox-virtio-vsock"
 version = "0.10.5"
 dependencies = [
+ "arcbox-vhost-user",
  "arcbox-virtio-core",
  "libc",
  "tempfile",

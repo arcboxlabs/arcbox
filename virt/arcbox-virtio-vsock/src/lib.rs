@@ -4,7 +4,8 @@
 //! network configuration.
 //!
 //! On Darwin, the native VZ framework handles vsock. This implementation
-//! is primarily used for the custom HV backend (Hypervisor.framework).
+//! serves the custom HV backend (Hypervisor.framework) and, over
+//! vhost-user, the QEMU backend.
 //!
 //! ## Module layout
 //!
@@ -16,6 +17,8 @@
 //! - `host`: `HostVsockBackend` (Unix Hypervisor.framework path)
 //! - `device`: `VsockConfig`, `VirtioVsock` device, `VirtioDevice` impl
 //! - `manager`: connection manager (`VsockConnectionManager`, `RxOps`, …)
+//! - `vhost_user` (macOS): the device served to QEMU over vhost-user, and
+//!   `VhostUserVsock`, the handle a QEMU backend dials guest ports through
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]
@@ -42,6 +45,8 @@ mod host;
 pub mod manager;
 mod protocol;
 mod tcp;
+#[cfg(target_os = "macos")]
+pub mod vhost_user;
 
 pub use addr::{VsockAddr, VsockHostConnections};
 pub use backend::{LoopbackBackend, VsockBackend};

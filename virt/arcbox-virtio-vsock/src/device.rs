@@ -223,6 +223,12 @@ impl VirtioVsock {
         self.ctx = Some(ctx);
     }
 
+    /// Drops the bound `DeviceCtx` and its guest memory handle, for a caller
+    /// whose guest memory can be replaced between injection rounds.
+    pub fn unbind_ctx(&mut self) {
+        self.ctx = None;
+    }
+
     /// Binds a trait-object view of the host-side connection manager.
     /// Required by `process_queue(1, ...)` (TX path). Tests set this
     /// directly with a mock; production callers use

@@ -1,4 +1,6 @@
-//! Host-side vsock connection manager for the HV (Hypervisor.framework) backend.
+//! Host-side vsock connection manager for the backends whose vsock device
+//! runs in ArcBox's own process: HV (Hypervisor.framework) and vhost-user
+//! (QEMU).
 //!
 //! Implements a connection state machine inspired by vhost-device-vsock's
 //! `VsockConnection`. Each connection tracks:
@@ -184,6 +186,15 @@ impl VsockConnectionManager {
         }
     }
 
+    /// Removes every connection, closing each internal fd so the daemon side
+    /// reads EOF. Host ports keep counting up.
+    pub fn remove_all(&mut self) {
+        let ids: Vec<_> = self.connections.keys().copied().collect();
+        for id in ids {
+            self.remove(&id);
+        }
+    }
+
     /// Returns IDs of connections that have pending RX ops but are NOT
     /// already in the `backend_rxq`. Used after TX processing to pick up
     /// newly-enqueued ops (e.g., CreditUpdate after guest OP_CREDIT_REQUEST).
@@ -197,13 +208,11 @@ impl VsockConnectionManager {
     }
 
     /// Returns the number of active connections.
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.connections.len()
     }
 
     /// Returns `true` if there are no active connections.
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.connections.is_empty()
     }
