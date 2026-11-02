@@ -722,6 +722,7 @@ dependencies = [
  "arcbox-local-ca",
  "arcbox-protocol",
  "arcbox-storage",
+ "arcbox-transport",
  "arcbox-vhost-user",
  "arcbox-virtio-core",
  "arcbox-virtio-fs",
