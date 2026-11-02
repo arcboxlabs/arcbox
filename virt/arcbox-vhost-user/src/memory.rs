@@ -111,6 +111,17 @@ impl GuestMemory {
                     "memory region {r:?} is not aligned to the {page}-byte host page"
                 )));
             }
+            // A page past the end of its object maps fine and then raises
+            // SIGBUS on first access, killing the back-end's process.
+            let backing = std::fs::File::from(fds[i].try_clone()?).metadata()?.len();
+            if r.mmap_offset
+                .checked_add(r.memory_size)
+                .is_none_or(|region_end| region_end > backing)
+            {
+                return Err(Error::Protocol(format!(
+                    "memory region {r:?} extends past its {backing}-byte backing object"
+                )));
+            }
             end = r_end;
         }
         let span = end - gpa_base;
@@ -320,6 +331,9 @@ mod tests {
         // Zero-sized and wrapping regions.
         assert!(GuestMemory::map(&[region(0, 0, 0)], &[fd()]).is_err());
         assert!(GuestMemory::map(&[region(u64::MAX - page + 1, 2 * page, 0)], &[fd()]).is_err());
+        // Regions past the end of their four-page backing file.
+        assert!(GuestMemory::map(&[region(0, 2 * page, 3 * page)], &[fd()]).is_err());
+        assert!(GuestMemory::map(&[region(0, 8 * page, 0)], &[fd()]).is_err());
         // Descriptor count mismatch.
         assert!(GuestMemory::map(&[region(0, page, 0)], &[]).is_err());
         // Span beyond the cap.
