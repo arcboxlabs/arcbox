@@ -1229,6 +1229,7 @@ name = "arcbox-vhost-user"
 version = "0.10.5"
 dependencies = [
  "libc",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]

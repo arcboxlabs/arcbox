@@ -9,10 +9,13 @@
 //!
 //! ## Pieces
 //!
-//! - [`protocol`]: the wire format.
+//! - [`protocol`]: the wire format; [`connection`]: framed messages with
+//!   `SCM_RIGHTS` descriptors (marked close-on-exec — macOS has no
+//!   `MSG_CMSG_CLOEXEC`).
 
 #![cfg(target_os = "macos")]
 
+pub mod connection;
 mod error;
 pub mod protocol;
 
