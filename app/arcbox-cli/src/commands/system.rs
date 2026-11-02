@@ -55,10 +55,11 @@ impl From<BackendArg> for SystemVmBackend {
 }
 
 /// Human label for a wire backend value.
-fn label(backend: SystemVmBackend) -> &'static str {
+pub(super) fn label(backend: SystemVmBackend) -> &'static str {
     match backend {
         SystemVmBackend::Hv => "hv (Hypervisor.framework + FEX)",
         SystemVmBackend::Vz => "vz (Virtualization.framework)",
+        SystemVmBackend::Qemu => "qemu (TCG emulation)",
         SystemVmBackend::Unspecified => "unspecified",
     }
 }

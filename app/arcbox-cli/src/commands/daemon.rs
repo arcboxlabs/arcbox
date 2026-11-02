@@ -288,6 +288,24 @@ fn render_startup_status(status: &pb::SetupStatus) -> String {
     if !status.error.is_empty() {
         output.push(format!("Host error: {}", status.error));
     }
+    if let Some(available) = status.hardware_virtualization_available {
+        let available = if available {
+            "available"
+        } else {
+            "unavailable"
+        };
+        output.push(format!("Hardware virtualization: {available}"));
+    }
+    if let Some(backend) = status
+        .effective_backend
+        .as_known()
+        .filter(|backend| *backend != pb::SystemVmBackend::Unspecified)
+    {
+        output.push(format!(
+            "System VM backend: {}",
+            super::system::label(backend)
+        ));
+    }
     let Some(system) = status.system_runtime.as_option() else {
         output.push("System runtime: unknown".into());
         return output.join("\n");
@@ -632,6 +650,16 @@ mod tests {
         assert!(rendered.contains("guest storage unavailable"));
         status.system_runtime = None.into();
         assert!(render_startup_status(&status).contains("System runtime: unknown"));
+    }
+
+    /// An older daemon sends no virtualization probe; that must not read as
+    /// "unavailable".
+    #[test]
+    fn status_reports_virtualization_only_when_the_daemon_probed_it() {
+        let mut status = pb::SetupStatus::default();
+        assert!(!render_startup_status(&status).contains("Hardware virtualization"));
+        status.hardware_virtualization_available = Some(false);
+        assert!(render_startup_status(&status).contains("Hardware virtualization: unavailable"));
     }
 
     fn flock_nb(file: &fs::File) -> bool {

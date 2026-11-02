@@ -624,6 +624,15 @@ impl Runtime {
         self.vm_lifecycle.backend()
     }
 
+    /// The backend the System VM can boot with on this host: the configured
+    /// one when the host provides hardware virtualization, otherwise none.
+    #[must_use]
+    pub fn effective_system_vm_backend(&self) -> Option<arcbox_vmm::VmBackend> {
+        arcbox_engine::host_virtualization()
+            .available
+            .then(|| self.system_vm_backend())
+    }
+
     /// Whether this host can run sandboxes on the System VM's *current*
     /// backend, and why not when it cannot.
     ///

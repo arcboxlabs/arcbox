@@ -207,7 +207,13 @@ fn sentry_environment() -> Option<String> {
 }
 
 async fn run(args: DaemonArgs) -> Result<()> {
-    let handles = context::StartupHandles::new(Arc::new(SetupState::new()));
+    let setup_state = Arc::new(SetupState::new());
+    let host = arcbox_engine::host_virtualization();
+    if !host.available {
+        tracing::warn!(reason = host.reason, "Hardware virtualization unavailable");
+    }
+    setup_state.set_hardware_virtualization_available(host.available);
+    let handles = context::StartupHandles::new(setup_state);
 
     // The signal watcher must be armed for the whole startup window: the
     // pipeline boots the VM, and without a handler the default SIGTERM
