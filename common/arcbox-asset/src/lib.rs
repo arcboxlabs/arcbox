@@ -1,9 +1,9 @@
 //! Generic asset download, verification, and caching primitives.
 //!
-//! This crate provides the building blocks used by `arcbox-boot` (VM boot
-//! assets) and `arcbox-docker-tools` (Docker CLI binaries) for downloading
-//! files from the network, verifying SHA-256 checksums, and writing them
-//! atomically to a local cache.
+//! This crate provides the building blocks used by `arcbox-docker-tools`
+//! (Docker CLI binaries) and `arcbox-image` (the on-demand QEMU runtime) for
+//! downloading files from the network, resuming interrupted transfers,
+//! verifying SHA-256 checksums, and writing them atomically to a local cache.
 //!
 //! # Feature flags
 //!
