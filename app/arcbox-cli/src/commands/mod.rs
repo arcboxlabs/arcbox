@@ -80,6 +80,7 @@ pub mod machine;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod migrate;
+pub mod qemu;
 pub mod sandbox;
 pub mod setup;
 pub mod ssh;
@@ -172,6 +173,10 @@ pub enum Commands {
 
     /// Manage boot assets (kernel/rootfs)
     Boot(boot::BootArgs),
+
+    /// Manage the QEMU build that emulates the System VM without hardware virtualization
+    #[command(subcommand)]
+    Qemu(qemu::QemuCommands),
 
     /// Manage Docker data disk
     #[command(subcommand)]
@@ -332,6 +337,7 @@ mod tests {
                 false,
             ),
             (&["migrate", "from", "orbstack", "--dry-run"], false, false),
+            (&["qemu", "import", "qemu.tar.gz"], false, false),
         ];
 
         #[cfg(target_os = "macos")]
