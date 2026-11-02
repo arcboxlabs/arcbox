@@ -49,7 +49,8 @@ pub trait VhostUserDevice: Send + 'static {
     }
 
     /// The front-end reset the device or went away. Drop all per-connection
-    /// state.
+    /// state, including any guest memory handle taken from a [`Vring`]: the
+    /// back-end unmaps guest memory after this returns.
     fn reset(&mut self) {}
 }
 

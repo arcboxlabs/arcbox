@@ -16,7 +16,8 @@
 //!   from `-object memory-backend-shm,share=on`) into one reservation so a
 //!   single `GuestMemWriter` — and so `arcbox_virtio_core::SplitQueue` —
 //!   covers guest RAM.
-//! - [`Vring`]: per-queue state; once started it owns the `SplitQueue`.
+//! - [`Vring`]: per-queue state; once started it owns the `SplitQueue`, the
+//!   one owner of the avail cursor `GET_VRING_BASE` reports.
 //! - [`Backend`]: answers front-end messages on the calling (or a spawned)
 //!   thread and drives a [`VhostUserDevice`].
 
@@ -35,4 +36,4 @@ pub use device::{VhostUserDevice, Vrings};
 pub use error::{Error, Result};
 pub use memory::GuestMemory;
 pub use protocol::ProtocolFeatures;
-pub use vring::Vring;
+pub use vring::{CallNotifier, Vring};
