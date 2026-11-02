@@ -906,15 +906,18 @@ dependencies = [
 name = "arcbox-image"
 version = "0.10.5"
 dependencies = [
+ "arcbox-asset",
  "arcbox-boot",
  "arcbox-constants",
  "arcbox-error",
  "dirs",
+ "flate2",
  "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

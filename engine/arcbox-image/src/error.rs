@@ -17,6 +17,15 @@ pub enum ImageError {
     #[error(transparent)]
     Common(#[from] CommonError),
 
+    /// Download or checksum failure.
+    #[error(transparent)]
+    Asset(#[from] arcbox_asset::AssetError),
+
+    /// A QEMU build failed a check it must pass before it is installed: its
+    /// archive's layout, metadata or code signatures.
+    #[error("rejected QEMU build: {0}")]
+    QemuBuild(String),
+
     /// Published-image registry error (index/manifest fetch, reference
     /// parsing, name validation).
     #[error("image error: {0}")]

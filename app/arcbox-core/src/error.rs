@@ -192,7 +192,9 @@ impl From<arcbox_engine::EngineError> for CoreError {
 impl From<arcbox_image::ImageError> for CoreError {
     fn from(err: arcbox_image::ImageError) -> Self {
         match err {
-            cancelled @ arcbox_image::ImageError::Cancelled => Self::Image(cancelled.to_string()),
+            message @ (arcbox_image::ImageError::Cancelled
+            | arcbox_image::ImageError::Asset(_)
+            | arcbox_image::ImageError::QemuBuild(_)) => Self::Image(message.to_string()),
             arcbox_image::ImageError::Common(c) => Self::Common(c),
             arcbox_image::ImageError::Image(msg) => Self::Image(msg),
         }
