@@ -133,11 +133,20 @@ Host                          Guest
   │←── OP_RW (TX queue) ───────│  process_queue() writes to host fd
 ```
 
-Port mapping:
+Ports and host descriptors:
 - Guest agent listens on port 1024
-- Host uses ephemeral port 50000 + guest_port
-- `vsock_host_fds` keyed by guest port
-- `vsock_connected_ports` tracks established connections
+- Each host-initiated connection takes the next host port from a counter in
+  `VsockConnectionManager` that starts at 50000 and only increases;
+  connections are keyed by (host port, guest port)
+- The daemon end of each connection's socketpair is moved out of the low
+  descriptor range (`duplicate_client_vsock_fd`, `darwin_hv/vsock.rs`): the
+  search starts at 1024 + host port mod 1024, wraps to 1024, then takes any
+  free number. Under a soft `RLIMIT_NOFILE` below 2048, both values shrink to
+  the upper half of the limit. A closed number comes back only about 1024
+  connections later, which keeps a retry from reusing the kqueue registration
+  of the connection it replaces. The count of connections is bounded only by
+  the soft limit, which the daemon raises at startup
+  ([daemon lifecycle](../daemon-lifecycle.md))
 
 On OP_RST: close host fd (causes daemon's read to return EOF, triggering
 retry). On INTERRUPT_ACK: deassert GIC SPI so subsequent `set_spi(true)`
