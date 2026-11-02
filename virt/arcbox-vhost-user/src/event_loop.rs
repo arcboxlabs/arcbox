@@ -2,24 +2,32 @@
 //!
 //! One kqueue per connection watches every vring kick descriptor, one
 //! `EVFILT_USER` trigger per queue (so the control thread can ask the worker
-//! to look at a ring it just started or enabled) and a stop trigger. kevent
+//! to look at a ring it just started or enabled), a stop trigger, and
+//! whatever descriptors the device registers through [`Registrar`]. kevent
 //! registrations are thread-safe, which lets the control thread add and remove
 //! kick descriptors while the worker waits.
 //!
 //! The event `udata` carries a tagged token: the top two bits say who the
-//! event is for, the rest is the queue index.
+//! event is for, the rest is the queue index or the device's own token.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TAG_SHIFT: u32 = 62;
+const TAG_DEVICE: u64 = 0;
 const TAG_KICK: u64 = 1;
 const TAG_TRIGGER: u64 = 2;
 const TAG_STOP: u64 = 3;
 const TOKEN_MASK: u64 = (1 << TAG_SHIFT) - 1;
 
 /// `EVFILT_USER` ident of the stop trigger; queue triggers use the queue
-/// index.
+/// index, device wakers count up from [`FIRST_WAKER_IDENT`].
 const STOP_IDENT: usize = 0x1_0000;
+const FIRST_WAKER_IDENT: usize = 0x1_0001;
+
+/// Largest token a device may register (the top two bits are reserved).
+pub const MAX_DEVICE_TOKEN: u64 = TOKEN_MASK;
 
 /// What a kqueue event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +38,8 @@ pub enum Event {
     Trigger(u16),
     /// The back-end is shutting down.
     Stop,
+    /// A descriptor or waker the device registered.
+    Device(u64),
 }
 
 impl Event {
@@ -38,6 +48,7 @@ impl Event {
             Self::Kick(q) => (TAG_KICK << TAG_SHIFT) | q as u64,
             Self::Trigger(q) => (TAG_TRIGGER << TAG_SHIFT) | q as u64,
             Self::Stop => TAG_STOP << TAG_SHIFT,
+            Self::Device(token) => (TAG_DEVICE << TAG_SHIFT) | (token & TOKEN_MASK),
         }
     }
 
@@ -46,15 +57,28 @@ impl Event {
         match udata >> TAG_SHIFT {
             TAG_KICK => Self::Kick(value as u16),
             TAG_TRIGGER => Self::Trigger(value as u16),
-            _ => Self::Stop,
+            TAG_STOP => Self::Stop,
+            _ => Self::Device(value),
         }
     }
+}
+
+/// How a device wants a descriptor watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// Report the descriptor for as long as it is ready (the default for
+    /// handlers that drain to `EAGAIN`).
+    Level,
+    /// Report it once per readiness change (`EV_CLEAR`); use when a handler
+    /// may stop before draining, e.g. because the guest has no RX buffers.
+    Edge,
 }
 
 /// A kqueue descriptor.
 #[derive(Debug)]
 pub struct Kqueue {
     fd: OwnedFd,
+    next_waker: AtomicUsize,
 }
 
 impl Kqueue {
@@ -68,7 +92,10 @@ impl Kqueue {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         // SAFETY: F_SETFD on an owned descriptor.
         unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            next_waker: AtomicUsize::new(FIRST_WAKER_IDENT),
+        })
     }
 
     fn change(
@@ -109,11 +136,41 @@ impl Kqueue {
         }
     }
 
-    pub(crate) fn add_read(&self, fd: RawFd, event: Event) -> std::io::Result<()> {
+    pub(crate) fn add_read(
+        &self,
+        fd: RawFd,
+        event: Event,
+        trigger: Trigger,
+    ) -> std::io::Result<()> {
+        let clear = if trigger == Trigger::Edge {
+            libc::EV_CLEAR
+        } else {
+            0
+        };
         self.change(
             fd as usize,
             libc::EVFILT_READ,
-            libc::EV_ADD,
+            libc::EV_ADD | clear,
+            0,
+            event.encode(),
+        )
+    }
+
+    pub(crate) fn add_write(
+        &self,
+        fd: RawFd,
+        event: Event,
+        trigger: Trigger,
+    ) -> std::io::Result<()> {
+        let clear = if trigger == Trigger::Edge {
+            libc::EV_CLEAR
+        } else {
+            0
+        };
+        self.change(
+            fd as usize,
+            libc::EVFILT_WRITE,
+            libc::EV_ADD | clear,
             0,
             event.encode(),
         )
@@ -198,9 +255,108 @@ impl Kqueue {
     }
 }
 
+/// Lets a device add its own descriptors and wakers to the back-end's event
+/// loop. Cheap to clone, usable from any thread.
+#[derive(Debug, Clone)]
+pub struct Registrar {
+    kq: Arc<Kqueue>,
+}
+
+impl Registrar {
+    pub(crate) const fn new(kq: Arc<Kqueue>) -> Self {
+        Self { kq }
+    }
+
+    /// Delivers `token` to [`crate::VhostUserDevice::handle_event`] whenever
+    /// `fd` is readable. The device keeps owning `fd` and must call
+    /// [`Self::unwatch`] (or close it) when it is done.
+    pub fn watch_readable(
+        &self,
+        fd: BorrowedFd<'_>,
+        token: u64,
+        trigger: Trigger,
+    ) -> std::io::Result<()> {
+        check_token(token)?;
+        self.kq
+            .add_read(fd.as_raw_fd(), Event::Device(token), trigger)
+    }
+
+    /// Delivers `token` whenever `fd` is writable.
+    pub fn watch_writable(
+        &self,
+        fd: BorrowedFd<'_>,
+        token: u64,
+        trigger: Trigger,
+    ) -> std::io::Result<()> {
+        check_token(token)?;
+        self.kq
+            .add_write(fd.as_raw_fd(), Event::Device(token), trigger)
+    }
+
+    /// Stops watching `fd`. Closing a descriptor also drops its registrations.
+    pub fn unwatch(&self, fd: BorrowedFd<'_>) -> std::io::Result<()> {
+        self.kq.delete(fd.as_raw_fd())
+    }
+
+    /// A handle any thread can use to deliver `token` to the worker, e.g. a
+    /// producer that queued host→guest data. Wakes coalesce until handled.
+    pub fn waker(&self, token: u64) -> std::io::Result<Waker> {
+        check_token(token)?;
+        let ident = self.kq.next_waker.fetch_add(1, Ordering::Relaxed);
+        self.kq.add_user(ident, Event::Device(token))?;
+        Ok(Waker {
+            kq: Arc::clone(&self.kq),
+            ident,
+            token,
+        })
+    }
+}
+
+/// Wakes the back-end's worker with a device token (see [`Registrar::waker`]).
+#[derive(Debug, Clone)]
+pub struct Waker {
+    kq: Arc<Kqueue>,
+    ident: usize,
+    token: u64,
+}
+
+impl Waker {
+    /// Delivers the token. Safe to call from any thread, any number of times.
+    pub fn wake(&self) -> std::io::Result<()> {
+        self.kq.trigger_user(self.ident, Event::Device(self.token))
+    }
+}
+
+fn check_token(token: u64) -> std::io::Result<()> {
+    if token > MAX_DEVICE_TOKEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("device token {token:#x} exceeds {MAX_DEVICE_TOKEN:#x}"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
     use super::*;
+
+    fn wait(kq: &Kqueue) -> Vec<Event> {
+        let mut buf = [libc::kevent {
+            ident: 0,
+            filter: 0,
+            flags: 0,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        }; 8];
+        let mut out = Vec::new();
+        kq.wait(&mut buf, &mut out).unwrap();
+        out
+    }
 
     #[test]
     fn tokens_round_trip_through_udata() {
@@ -209,8 +365,35 @@ mod tests {
             Event::Kick(u16::MAX),
             Event::Trigger(7),
             Event::Stop,
+            Event::Device(0),
+            Event::Device(MAX_DEVICE_TOKEN),
         ] {
             assert_eq!(Event::decode(event.encode()), event);
         }
+    }
+
+    #[test]
+    fn device_descriptors_and_wakers_deliver_their_tokens() {
+        let kq = Arc::new(Kqueue::new().unwrap());
+        let registrar = Registrar::new(Arc::clone(&kq));
+        let (mut a, b) = UnixStream::pair().unwrap();
+        registrar
+            .watch_readable(std::os::fd::AsFd::as_fd(&b), 42, Trigger::Level)
+            .unwrap();
+        a.write_all(b"x").unwrap();
+        assert_eq!(wait(&kq), vec![Event::Device(42)]);
+
+        registrar.unwatch(std::os::fd::AsFd::as_fd(&b)).unwrap();
+        let waker = registrar.waker(7).unwrap();
+        let from_thread = waker.clone();
+        std::thread::spawn(move || from_thread.wake().unwrap())
+            .join()
+            .unwrap();
+        waker.wake().unwrap();
+        // Two wakes before the worker looked coalesce into one event, and the
+        // unwatched socket (still readable) reports nothing.
+        assert_eq!(wait(&kq), vec![Event::Device(7)]);
+
+        assert!(registrar.waker(MAX_DEVICE_TOKEN + 1).is_err());
     }
 }
