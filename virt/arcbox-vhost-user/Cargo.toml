@@ -1,0 +1,17 @@
+[package]
+name = "arcbox-vhost-user"
+description = "vhost-user back-end framework for ArcBox devices served to QEMU on macOS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

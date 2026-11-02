@@ -29,6 +29,7 @@ pub const RULES: &[Rule] = &[
             "arcbox-route",
             "arcbox-hv",
             "ifbridge",
+            "arcbox-vhost-user",
         ]),
         reason: "charter D4 — macOS-only backends are reached only through the \
                  platform seam, never directly",
