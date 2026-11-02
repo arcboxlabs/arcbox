@@ -11,7 +11,7 @@ impl PassthroughFs {
         let path = self.inode_path(inode)?;
 
         let mut opts = OpenOptions::new();
-        Self::apply_flags(&mut opts, flags);
+        self.apply_flags(&mut opts, flags);
 
         let file = opts.open(&path).map_err(FsError::io)?;
         let handle = self.alloc_handle();

@@ -325,6 +325,66 @@ fn test_open_read_write() {
     fs.release(handle).unwrap();
 }
 
+/// FUSE carries the guest's Linux open flags. Read as macOS flags, Linux
+/// `O_APPEND` is `O_TRUNC`, and every append-open truncated the file.
+#[test]
+fn guest_append_open_keeps_the_file() {
+    use crate::fuse::open_flags::{O_APPEND, O_WRONLY};
+    let (temp, fs) = setup_test_fs();
+    let path = temp.path().join("log");
+    std::fs::write(&path, "kept\n").unwrap();
+    let (inode, _) = fs
+        .lookup(PassthroughFs::ROOT_INODE, OsStr::new("log"))
+        .unwrap();
+
+    let handle = fs.open(inode, O_WRONLY | O_APPEND).unwrap();
+    fs.write(handle, 0, b"more\n", 0).unwrap();
+    fs.release(handle).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\nmore\n");
+}
+
+/// Under writeback caching the guest kernel reads pages back through a
+/// write-only handle and writes whole pages back at their own offset, even
+/// for a file opened `O_APPEND`.
+#[test]
+fn writeback_handles_read_back_and_write_in_place() {
+    use crate::fuse::open_flags::{O_APPEND, O_WRONLY};
+    let (temp, fs) = setup_test_fs();
+    let path = temp.path().join("log");
+    std::fs::write(&path, "0123456789").unwrap();
+    let (inode, _) = fs
+        .lookup(PassthroughFs::ROOT_INODE, OsStr::new("log"))
+        .unwrap();
+    fs.set_writeback_cache(true);
+
+    let handle = fs.open(inode, O_WRONLY | O_APPEND).unwrap();
+    assert_eq!(fs.read(handle, 0, 4).unwrap(), b"0123");
+    fs.write(handle, 2, b"ab", 0).unwrap();
+    fs.release(handle).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "01ab456789");
+}
+
+/// Linux `O_TRUNC` is the host's `O_CREAT` on macOS; a guest truncating open
+/// must still truncate, writeback or not.
+#[test]
+fn guest_truncating_open_empties_the_file() {
+    use crate::fuse::open_flags::{O_TRUNC, O_WRONLY};
+    let (temp, fs) = setup_test_fs();
+    let path = temp.path().join("log");
+    std::fs::write(&path, "0123456789").unwrap();
+    let (inode, _) = fs
+        .lookup(PassthroughFs::ROOT_INODE, OsStr::new("log"))
+        .unwrap();
+    fs.set_writeback_cache(true);
+
+    let handle = fs.open(inode, O_WRONLY | O_TRUNC).unwrap();
+    fs.release(handle).unwrap();
+
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}
+
 #[test]
 fn test_fsync() {
     let (temp, fs) = setup_test_fs();

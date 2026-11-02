@@ -29,7 +29,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub use types::{DirEntry, FileType, PassthroughConfig};
 use types::{DirHandleData, HandleData, InodeData};
@@ -54,6 +54,8 @@ pub struct PassthroughFs {
     next_handle: AtomicU64,
     /// Negative cache for non-existent paths.
     negative_cache: Option<NegativeCache>,
+    /// Whether the session negotiated `FUSE_WRITEBACK_CACHE`.
+    writeback_cache: AtomicBool,
     /// Configuration.
     #[allow(dead_code)]
     config: PassthroughConfig,
@@ -127,6 +129,7 @@ impl PassthroughFs {
             dir_handles: RwLock::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             negative_cache,
+            writeback_cache: AtomicBool::new(false),
             config,
         })
     }
@@ -249,28 +252,32 @@ impl PassthroughFs {
         }
     }
 
-    /// Applies POSIX open flags to `OpenOptions`.
-    fn apply_flags(opts: &mut OpenOptions, flags: u32) {
-        let access_mode = flags & libc::O_ACCMODE as u32;
-        match access_mode {
-            x if x == libc::O_RDONLY as u32 => {
-                opts.read(true);
-            }
-            x if x == libc::O_WRONLY as u32 => {
-                opts.write(true);
-            }
-            x if x == libc::O_RDWR as u32 => {
-                opts.read(true).write(true);
-            }
-            _ => {
-                opts.read(true);
-            }
-        }
+    /// Records whether the FUSE session negotiated `FUSE_WRITEBACK_CACHE`,
+    /// which changes how guest open flags map onto host files.
+    pub fn set_writeback_cache(&self, enabled: bool) {
+        self.writeback_cache.store(enabled, Ordering::Relaxed);
+    }
 
-        if flags & libc::O_APPEND as u32 != 0 {
+    /// Applies a guest's (Linux) open flags to `OpenOptions`.
+    ///
+    /// With writeback caching the guest kernel owns the page cache: it reads
+    /// pages back through write-only handles to complete partial writes, and
+    /// computes append offsets itself, writing back whole pages at their
+    /// offset. A write-only open becomes read-write and `O_APPEND` is
+    /// dropped, as virtiofsd does; a host `O_APPEND` would move each
+    /// page write-back to the end of the file.
+    fn apply_flags(&self, opts: &mut OpenOptions, flags: u32) {
+        use crate::fuse::open_flags::{O_ACCMODE, O_APPEND, O_RDWR, O_TRUNC, O_WRONLY};
+        let writeback = self.writeback_cache.load(Ordering::Relaxed);
+        match flags & O_ACCMODE {
+            O_WRONLY if !writeback => opts.write(true),
+            O_WRONLY | O_RDWR => opts.read(true).write(true),
+            _ => opts.read(true),
+        };
+        if flags & O_APPEND != 0 && !writeback {
             opts.append(true);
         }
-        if flags & libc::O_TRUNC as u32 != 0 {
+        if flags & O_TRUNC != 0 {
             opts.truncate(true);
         }
     }

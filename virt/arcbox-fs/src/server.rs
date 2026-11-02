@@ -181,6 +181,9 @@ impl FuseRequestHandler for FsServer {
     }
 
     fn on_init(&self, session: &FuseSession) {
+        if let Some(fs) = &self.fs {
+            fs.set_writeback_cache(session.flags() & crate::fuse::FUSE_WRITEBACK_CACHE != 0);
+        }
         tracing::info!(
             "FsServer received FUSE_INIT: version {}.{}, max_readahead={}, max_write={}",
             session.major(),

@@ -18,7 +18,7 @@ impl PassthroughFs {
 
         // Build open options from flags
         let mut opts = OpenOptions::new();
-        Self::apply_flags(&mut opts, flags);
+        self.apply_flags(&mut opts, flags);
         opts.create(true);
         opts.mode(mode & 0o7777);
 
