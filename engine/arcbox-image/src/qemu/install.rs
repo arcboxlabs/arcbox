@@ -23,6 +23,7 @@ use crate::error::{ImageError, Result};
 use crate::remote_image::StagingGuard;
 
 const LOCK: &str = ".lock";
+pub(super) const DOWNLOADS: &str = ".downloads";
 /// Written last into a staged build: an install without it is incomplete.
 const MARKER: &str = ".archive-sha256";
 
@@ -33,7 +34,7 @@ pub(super) fn lock(root: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn open_lock(root: &Path) -> Result<File> {
+pub(super) fn open_lock(root: &Path) -> Result<File> {
     std::fs::create_dir_all(root)?;
     Ok(File::options()
         .create(true)

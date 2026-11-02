@@ -6,7 +6,7 @@ use sha2::Digest as _;
 use super::lockfile::{ArchPin, QemuPin};
 use super::*;
 
-const SHA: &str = "53657969b7ffcc5eb68969e1f7377475758d13ce6452fcdbda5fc2a53da092aa";
+pub(super) const SHA: &str = "53657969b7ffcc5eb68969e1f7377475758d13ce6452fcdbda5fc2a53da092aa";
 
 fn pin(sha256: &str) -> QemuPin {
     QemuPin {
@@ -98,7 +98,7 @@ fn only_a_development_daemon_honours_the_override() {
 }
 
 #[derive(Default)]
-struct Recorder {
+pub(super) struct Recorder {
     calls: Mutex<Vec<(String, Option<String>)>>,
 }
 
@@ -116,9 +116,9 @@ impl signature::Verify for Recorder {
     }
 }
 
-type Entries = Vec<(&'static str, Vec<u8>)>;
+pub(super) type Entries = Vec<(&'static str, Vec<u8>)>;
 
-fn entries(version: &str) -> Entries {
+pub(super) fn entries(version: &str) -> Entries {
     let info = format!(
         r#"{{"version":"{version}","arch":"arm64","executable":"bin/qemu-system-aarch64"}}"#
     );
@@ -132,7 +132,7 @@ fn entries(version: &str) -> Entries {
 
 /// Writes a `.tar.gz` of `entries`, plus a symlink when `link` is set, and
 /// returns its SHA-256.
-fn write_archive(path: &Path, entries: &Entries, link: Option<(&str, &str)>) -> String {
+pub(super) fn write_archive(path: &Path, entries: &Entries, link: Option<(&str, &str)>) -> String {
     let file = std::fs::File::create(path).unwrap();
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         file,
@@ -163,12 +163,16 @@ fn write_archive(path: &Path, entries: &Entries, link: Option<(&str, &str)>) -> 
 }
 
 fn runtime(root: &Path, sha256: &str) -> (QemuRuntime, Arc<Recorder>) {
+    runtime_at(root, sha256, "http://127.0.0.1:9/qemu")
+}
+
+pub(super) fn runtime_at(root: &Path, sha256: &str, cdn: &str) -> (QemuRuntime, Arc<Recorder>) {
     let recorder = Arc::new(Recorder::default());
     let artifact = QemuArtifact {
         version: "0.1.0".to_owned(),
         arch: "arm64".to_owned(),
         sha256: sha256.to_owned(),
-        cdn: "http://127.0.0.1:9/qemu".to_owned(),
+        cdn: cdn.to_owned(),
         signature: SignaturePolicy::DeveloperId,
     };
     let runtime = QemuRuntime {
@@ -179,7 +183,7 @@ fn runtime(root: &Path, sha256: &str) -> (QemuRuntime, Arc<Recorder>) {
     (runtime, recorder)
 }
 
-fn names(root: &Path) -> Vec<String> {
+pub(super) fn names(root: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
