@@ -62,9 +62,14 @@ impl<D: VhostUserDevice> Backend<D> {
 
     /// Serves `stream` on the calling thread until the front-end disconnects
     /// (or [`BackendHandle::stop`] shuts the socket down), then resets the
-    /// device and hands it back.
+    /// device and hands it back. The socket is shut down however this
+    /// returns, so a front-end never waits on a back-end that gave up.
     pub fn serve(self, stream: UnixStream) -> Result<D> {
         let Self { name, mut device } = self;
+        let conn = Connection::new(stream);
+        // However this call ends, the front-end sees the socket close: a
+        // `BackendHandle` holds a clone of it, so dropping ours is not EOF.
+        let _hang_up = HangUp(conn.stream());
         let num_queues = device.num_queues();
         if num_queues == 0 || num_queues > MAX_QUEUES {
             return Err(Error::Device(format!(
@@ -97,14 +102,13 @@ impl<D: VhostUserDevice> Backend<D> {
         let worker = {
             let state = Arc::clone(&shared);
             let kq = Arc::clone(&kq);
-            let socket = stream.try_clone()?;
+            let socket = conn.stream().try_clone()?;
             let name = name.clone();
             std::thread::Builder::new()
                 .name(format!("{name}-vq"))
                 .spawn(move || run_worker(&name, &state, &kq, &socket))?
         };
 
-        let conn = Connection::new(stream);
         let result = control_loop(&name, &conn, &shared, &kq);
         if let Err(e) = &result {
             tracing::warn!("{name}: vhost-user connection failed: {e}");
@@ -415,15 +419,15 @@ fn run_worker<D: VhostUserDevice>(
 ) {
     // Ends the connection if the data plane dies, so the front-end sees the
     // back-end go away instead of a device that silently stops.
-    struct HangUp<'a>(&'a UnixStream);
-    impl Drop for HangUp<'_> {
+    struct HangUpOnPanic<'a>(&'a UnixStream);
+    impl Drop for HangUpOnPanic<'_> {
         fn drop(&mut self) {
             if std::thread::panicking() {
                 let _ = self.0.shutdown(std::net::Shutdown::Both);
             }
         }
     }
-    let _hang_up = HangUp(socket);
+    let _hang_up = HangUpOnPanic(socket);
 
     // SAFETY: an all-zero kevent is a valid value.
     let mut buf: [libc::kevent; EVENT_BATCH] = unsafe { std::mem::zeroed() };
@@ -463,6 +467,15 @@ fn run_worker<D: VhostUserDevice>(
                 tracing::warn!("{name}: {event:?}: {e}");
             }
         }
+    }
+}
+
+/// Shuts the front-end connection down when dropped.
+struct HangUp<'a>(&'a UnixStream);
+
+impl Drop for HangUp<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
     }
 }
 
