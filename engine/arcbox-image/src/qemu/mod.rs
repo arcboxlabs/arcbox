@@ -110,17 +110,20 @@ pub struct QemuArtifact {
 }
 
 impl QemuArtifact {
-    /// The build this daemon runs on `arch`: the development override when
+    /// The build this daemon runs on this Mac: the development override when
     /// `development` and the override is set, else the `assets.lock` pin.
     /// `None` when neither names one, as before a build is published or on
     /// an architecture with none.
     ///
     /// # Errors
     /// Returns a configuration error for an incomplete or malformed override.
-    pub fn select(arch: &str, development: bool) -> Result<Option<Self>> {
-        select(arch, development, lockfile::pin(), |key| {
-            std::env::var(key).ok()
-        })
+    pub fn select(development: bool) -> Result<Option<Self>> {
+        select(
+            arcbox_asset::current_arch(),
+            development,
+            lockfile::pin(),
+            |key| std::env::var(key).ok(),
+        )
     }
 
     /// File name of the archive, e.g. `qemu-darwin-arm64-v0.1.0.tar.gz`.
