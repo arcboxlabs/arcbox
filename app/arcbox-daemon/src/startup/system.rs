@@ -18,6 +18,20 @@ pub(super) async fn run(
     supervise(&ctx, &runtime, || initialize(&ctx, &runtime, assets)).await
 }
 
+/// This Mac cannot run the System VM, and nothing the daemon or a retry does
+/// will change that. A property of the host, not a fault, so it is reported
+/// in the System status rather than as an error event.
+#[derive(Debug)]
+struct NoHardwareVirtualization(&'static str);
+
+impl std::fmt::Display for NoHardwareVirtualization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "System VM cannot start: {}", self.0)
+    }
+}
+
+impl std::error::Error for NoHardwareVirtualization {}
+
 async fn supervise<F: Future<Output = Result<SystemServiceHandles>>>(
     ctx: &DaemonContext,
     runtime: &Arc<Runtime>,
@@ -60,6 +74,12 @@ async fn supervise<F: Future<Output = Result<SystemServiceHandles>>>(
             }
             Err(error) => {
                 if ctx.shutdown.is_cancelled() {
+                    return Ok(());
+                }
+                if error.is::<NoHardwareVirtualization>() {
+                    tracing::warn!(%error, "System VM unavailable on this host; Machine host remains available");
+                    ctx.setup_state
+                        .set_system_runtime(State::Failed, &error.to_string());
                     return Ok(());
                 }
                 tracing::error!(%error, "System startup failed; Machine host remains available");
@@ -109,6 +129,11 @@ async fn initialize(
     runtime: &Arc<Runtime>,
     assets: super::assets::PreparedAssets,
 ) -> Result<SystemServiceHandles> {
+    // Checked before any asset download or disk image work it would waste.
+    let host = arcbox_engine::host_virtualization();
+    if !host.available {
+        return Err(NoHardwareVirtualization(host.reason).into());
+    }
     assets
         .prepare_system(runtime.config(), &ctx.setup_state)
         .await?;
@@ -225,6 +250,33 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// Unlike any other failure, a host without virtualization ends System
+    /// supervision at once: no storage recovery can make the VM bootable.
+    #[tokio::test]
+    async fn host_without_virtualization_fails_system_once_and_keeps_host_ready() {
+        let (_directory, ctx, runtime) = fixture(true).await;
+        let mut attempts = 0;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            supervise(&ctx, &runtime, || {
+                attempts += 1;
+                async { Err(NoHardwareVirtualization("no hypervisor here").into()) }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempts, 1);
+        let status = ctx.setup_state.current();
+        assert_eq!(status.system_runtime.state, State::Failed);
+        assert_eq!(
+            status.system_runtime.reason,
+            "System VM cannot start: no hypervisor here"
+        );
+        assert_eq!(status.phase, SetupPhase::Ready);
+        assert!(ctx.host_runtime.get().is_some());
     }
 
     #[tokio::test]
