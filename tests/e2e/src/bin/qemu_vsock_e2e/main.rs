@@ -119,8 +119,47 @@ mod probe {
         })
     }
 
+    /// Raises the soft descriptor limit as far as the kernel allows. The
+    /// back-end runs in this process, so every open connection holds two
+    /// descriptors here, the daemon's end and the device's, and the
+    /// 512-connection step needs far more than macOS's default of 256.
+    fn raise_fd_limit() -> Result<u64> {
+        let mut per_proc: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>();
+        // SAFETY: the name is NUL-terminated and `per_proc` is a c_int of
+        // `len` bytes, which is what this sysctl writes.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut per_proc).cast(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit/setrlimit read and write one `rlimit`.
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            rl.rlim_cur = rl.rlim_max.min(per_proc as libc::rlim_t);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const rl) != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        Ok(rl.rlim_cur)
+    }
+
     pub fn run() -> Result<()> {
         let options = parse_args()?;
+        println!("[fds] soft limit raised to {}", raise_fd_limit()?);
         println!("[logs] {}", options.log_dir.display());
         let started = Instant::now();
         let vm = Vm::boot(&options)?;
@@ -144,8 +183,39 @@ mod probe {
         );
         agent::system_info(vsock)?;
         agent::latency(vsock, 200)?;
+        agent::concurrent(vsock, 512)?;
+        agent::burst(vsock, 512)?;
         agent::host_close(vsock)?;
 
+        // The guest closes first: the agent exits under an idle connection.
+        let idle = agent::idle_connection(vsock, Duration::from_secs(60))?;
+        let t = Instant::now();
+        vm.console("busybox kill $(busybox pidof arcbox-agent)")?;
+        let eof = agent::wait_eof(idle, t)?;
+        let t = Instant::now();
+        agent::wait_ready(vsock, Duration::from_secs(120))?;
+        agent::drained(vsock, Duration::from_secs(30))?;
+        println!(
+            "[ok] guest close: agent killed, host read EOF after {:.2}s, respawned agent answered {:.1}s later",
+            eof.as_secs_f64(),
+            t.elapsed().as_secs_f64()
+        );
+
+        // Guest reboot: QEMU stops the rings, resets the device and starts
+        // them again for the new driver.
+        let idle = agent::idle_connection(vsock, Duration::from_secs(120))?;
+        let t = Instant::now();
+        vm.console("busybox reboot")?;
+        let eof = agent::wait_eof(idle, t)?;
+        let t = Instant::now();
+        agent::wait_ready(vsock, Duration::from_secs(300))?;
+        println!(
+            "[ok] guest reboot: host read EOF after {:.2}s, agent answered {:.1}s after that",
+            eof.as_secs_f64(),
+            t.elapsed().as_secs_f64()
+        );
+        agent::system_info(vsock)?;
+        agent::latency(vsock, 50)?;
         agent::drained(vsock, Duration::from_secs(30))?;
         println!("[ok] no vsock connection left open");
         Ok(())
