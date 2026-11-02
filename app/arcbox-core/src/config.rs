@@ -180,6 +180,21 @@ impl Config {
             .with_unpinned_manifest_allowed(self.profile == ArcboxProfile::Development)
     }
 
+    /// The QEMU build an emulated System VM runs on and where it installs,
+    /// `<data_dir>/runtime/qemu`. `None` when this daemon pins no build for
+    /// the host.
+    pub fn qemu_runtime(&self) -> arcbox_image::Result<Option<arcbox_image::qemu::QemuRuntime>> {
+        let development = self.profile == ArcboxProfile::Development;
+        Ok(
+            arcbox_image::qemu::QemuArtifact::select(development)?.map(|artifact| {
+                arcbox_image::qemu::QemuRuntime::new(
+                    self.data_dir.join("runtime").join("qemu"),
+                    artifact,
+                )
+            }),
+        )
+    }
+
     /// Returns the path to the persistent data directory (`data/`).
     #[must_use]
     pub fn data_subdir(&self) -> PathBuf {

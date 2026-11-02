@@ -134,6 +134,10 @@ async fn initialize(
     // Checked before any asset download or disk image work it would waste.
     let host = arcbox_engine::host_virtualization();
     if !host.available {
+        // This Mac can only emulate the System VM, so it gets the pinned QEMU
+        // build, downloaded only here. The VM still cannot start until the
+        // QEMU backend lands.
+        super::qemu::ensure(ctx, runtime.config()).await?;
         return Err(NoHardwareVirtualization(host.reason).into());
     }
     assets

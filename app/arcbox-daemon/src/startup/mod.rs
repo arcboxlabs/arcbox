@@ -6,6 +6,7 @@ mod container_network_lease;
 mod host_mounts;
 mod lock;
 mod pipeline;
+mod qemu;
 mod resource_cleanup;
 mod system;
 
