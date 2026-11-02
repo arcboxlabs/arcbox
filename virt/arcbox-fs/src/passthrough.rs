@@ -258,6 +258,30 @@ impl PassthroughFs {
         self.writeback_cache.store(enabled, Ordering::Relaxed);
     }
 
+    /// Drops what a FUSE session left behind when it ends (`FUSE_DESTROY`,
+    /// or a device reset when the guest reboots): every open file and
+    /// directory handle, and every inode but the root, as virtiofsd does.
+    /// The next session starts from the root and cannot name any of them,
+    /// so they would otherwise stay open for the life of the server. Inode
+    /// and handle numbers keep counting up, so a stale one is not found
+    /// instead of naming something else.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FsError::Cache`] if a table's lock is poisoned.
+    pub fn end_session(&self) -> Result<()> {
+        fn poisoned<T>(_: T) -> FsError {
+            FsError::Cache("failed to acquire session lock".to_string())
+        }
+        self.handles.write().map_err(poisoned)?.clear();
+        self.dir_handles.write().map_err(poisoned)?.clear();
+        self.inodes
+            .write()
+            .map_err(poisoned)?
+            .retain(|&inode, _| inode == Self::ROOT_INODE);
+        Ok(())
+    }
+
     /// Applies a guest's (Linux) open flags to `OpenOptions`.
     ///
     /// With writeback caching the guest kernel owns the page cache: it reads

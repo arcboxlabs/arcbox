@@ -195,6 +195,11 @@ impl FuseRequestHandler for FsServer {
 
     fn on_destroy(&self) {
         tracing::info!("FsServer received FUSE_DESTROY");
+        if let Some(fs) = &self.fs
+            && let Err(e) = fs.end_session()
+        {
+            tracing::warn!("FsServer could not release the ended session: {e}");
+        }
     }
 }
 
@@ -303,5 +308,29 @@ mod tests {
         let server = FsServer::new(config);
         let result = server.handle_request(&[]);
         assert!(result.is_err());
+    }
+
+    /// The guest's next session starts from the root, so the ended one's
+    /// open files and inodes are released rather than kept open.
+    #[test]
+    fn destroy_releases_the_ended_session() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("f"), "x").unwrap();
+        let mut server = FsServer::new(FsConfig {
+            source: temp.path().to_string_lossy().into_owned(),
+            ..FsConfig::default()
+        });
+        server.start().unwrap();
+        let fs = Arc::clone(server.filesystem().unwrap());
+        let name = std::ffi::OsStr::new("f");
+        let (inode, _) = fs.lookup(PassthroughFs::ROOT_INODE, name).unwrap();
+        let fh = fs.open(inode, 0).unwrap();
+
+        FuseRequestHandler::on_destroy(&server);
+
+        assert!(fs.read(fh, 0, 1).is_err(), "file handle released");
+        assert!(fs.getattr(inode).is_err(), "inode forgotten");
+        let (again, _) = fs.lookup(PassthroughFs::ROOT_INODE, name).unwrap();
+        assert_ne!(again, inode, "inode numbers are not reused");
     }
 }
