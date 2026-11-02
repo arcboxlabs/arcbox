@@ -122,6 +122,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-11-02 — The daemon raises its own open-file limit, and HV vsock descriptors are no longer capped at 64](logs/2026-11-02-daemon-nofile-limit.md) — Probes: [placement](../tests/bench/nofile-limit/probe.c), [launchd daemon](../tests/bench/nofile-limit/launchd-limit.sh)
 - [2026-11-02 — The daemon downloads the pinned QEMU build on demand](logs/2026-11-02-qemu-on-demand-download.md)
 - [2026-11-02 — FsServer reads the guest's open flags as Linux flags](logs/2026-11-02-fuse-open-flags.md)
 - [2026-11-02 — A Mac without hardware virtualization no longer crash-loops the daemon](logs/2026-11-02-no-virtualization-host.md)
