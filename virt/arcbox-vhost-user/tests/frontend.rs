@@ -505,5 +505,12 @@ fn unknown_request_ends_the_connection() {
     let handle = Backend::new("test", device).spawn(back).unwrap();
     let fe = Frontend { sock: front };
     fe.send(99, 0, &[], &[]);
+    // The front-end reads EOF while the handle, which holds a clone of the
+    // socket, is still alive.
+    use std::io::Read;
+    fe.sock
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!((&fe.sock).read(&mut [0u8; 1]).unwrap(), 0);
     assert!(handle.join().is_err());
 }
