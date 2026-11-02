@@ -1,15 +1,18 @@
 //! The kqueue that drives a back-end's data plane.
 //!
-//! One kqueue per connection holds one `EVFILT_USER` trigger per queue (so
-//! the control thread can ask the worker to look at a ring it just started or
-//! enabled) and a stop trigger.
+//! One kqueue per connection watches every vring kick descriptor, one
+//! `EVFILT_USER` trigger per queue (so the control thread can ask the worker
+//! to look at a ring it just started or enabled) and a stop trigger. kevent
+//! registrations are thread-safe, which lets the control thread add and remove
+//! kick descriptors while the worker waits.
 //!
 //! The event `udata` carries a tagged token: the top two bits say who the
 //! event is for, the rest is the queue index.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const TAG_SHIFT: u32 = 62;
+const TAG_KICK: u64 = 1;
 const TAG_TRIGGER: u64 = 2;
 const TAG_STOP: u64 = 3;
 const TOKEN_MASK: u64 = (1 << TAG_SHIFT) - 1;
@@ -21,6 +24,8 @@ const STOP_IDENT: usize = 0x1_0000;
 /// What a kqueue event is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
+    /// The guest kicked this queue.
+    Kick(u16),
     /// The control thread asked the worker to look at this queue.
     Trigger(u16),
     /// The back-end is shutting down.
@@ -30,6 +35,7 @@ pub enum Event {
 impl Event {
     const fn encode(self) -> u64 {
         match self {
+            Self::Kick(q) => (TAG_KICK << TAG_SHIFT) | q as u64,
             Self::Trigger(q) => (TAG_TRIGGER << TAG_SHIFT) | q as u64,
             Self::Stop => TAG_STOP << TAG_SHIFT,
         }
@@ -38,6 +44,7 @@ impl Event {
     const fn decode(udata: u64) -> Self {
         let value = udata & TOKEN_MASK;
         match udata >> TAG_SHIFT {
+            TAG_KICK => Self::Kick(value as u16),
             TAG_TRIGGER => Self::Trigger(value as u16),
             _ => Self::Stop,
         }
@@ -100,6 +107,27 @@ impl Kqueue {
                 return Err(err);
             }
         }
+    }
+
+    pub(crate) fn add_read(&self, fd: RawFd, event: Event) -> std::io::Result<()> {
+        self.change(
+            fd as usize,
+            libc::EVFILT_READ,
+            libc::EV_ADD,
+            0,
+            event.encode(),
+        )
+    }
+
+    /// Removes the read and write registrations of `fd`; absent ones are fine.
+    pub(crate) fn delete(&self, fd: RawFd) -> std::io::Result<()> {
+        for filter in [libc::EVFILT_READ, libc::EVFILT_WRITE] {
+            match self.change(fd as usize, filter, libc::EV_DELETE, 0, 0) {
+                Err(e) if e.raw_os_error() != Some(libc::ENOENT) => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn add_user(&self, ident: usize, event: Event) -> std::io::Result<()> {
@@ -176,7 +204,12 @@ mod tests {
 
     #[test]
     fn tokens_round_trip_through_udata() {
-        for event in [Event::Trigger(7), Event::Stop] {
+        for event in [
+            Event::Kick(0),
+            Event::Kick(u16::MAX),
+            Event::Trigger(7),
+            Event::Stop,
+        ] {
             assert_eq!(Event::decode(event.encode()), event);
         }
     }

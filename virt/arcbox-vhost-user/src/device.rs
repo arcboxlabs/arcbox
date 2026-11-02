@@ -9,7 +9,7 @@ use crate::vring::Vring;
 ///
 /// Threading: the back-end calls every method with one lock held, from two
 /// threads — the control thread (front-end messages: features, config,
-/// reset) and the worker thread (queue processing).
+/// reset) and the worker thread (queue kicks).
 /// A method never runs concurrently with another, so `&mut self` needs no
 /// further synchronization; a device that wants work done elsewhere hands it
 /// to its own threads.

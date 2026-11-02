@@ -235,7 +235,7 @@ impl Vring {
     }
 
     /// Installs a kick descriptor and starts the ring. Returns the previous
-    /// kick descriptor.
+    /// kick descriptor so the caller can drop its kqueue registration.
     pub(crate) fn start(&mut self, kick: Option<OwnedFd>) -> Result<Option<OwnedFd>> {
         if let Some(fd) = &kick {
             set_nonblocking(fd)?;
@@ -247,7 +247,7 @@ impl Vring {
     }
 
     /// Stops the ring (`GET_VRING_BASE`) and returns the avail cursor and the
-    /// kick descriptor.
+    /// kick descriptor to unregister.
     pub(crate) fn stop(&mut self) -> (u16, Option<OwnedFd>) {
         if let Some(queue) = self.queue.take() {
             self.base = queue.last_avail_idx();
@@ -275,6 +275,32 @@ impl Vring {
     pub(crate) fn set_memory(&mut self, memory: Arc<GuestMemory>) -> Result<()> {
         self.memory = Some(memory);
         self.rebuild()
+    }
+
+    pub(crate) fn kick_fd(&self) -> Option<&OwnedFd> {
+        self.kick.as_ref()
+    }
+
+    /// Empties the kick pipe. Kicks only say "look at the ring"; their count
+    /// carries nothing. Returns `false` once the front-end closed its end, so
+    /// the caller stops watching a descriptor that would report EOF forever.
+    pub(crate) fn drain_kick(&self) -> bool {
+        let Some(fd) = &self.kick else { return true };
+        let mut buf = [0u8; 512];
+        loop {
+            // SAFETY: reads into a live stack buffer from a descriptor we own.
+            let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            match n {
+                0 => return false,
+                n if n < 0 => {
+                    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                        return true;
+                    }
+                }
+                n if (n as usize) < buf.len() => return true,
+                _ => {}
+            }
+        }
     }
 
     /// Back to the state right after connection setup. Notifier clones the

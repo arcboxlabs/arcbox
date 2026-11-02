@@ -19,9 +19,19 @@
 //! - [`Vring`]: per-queue state; once started it owns the `SplitQueue`, the
 //!   one owner of the avail cursor `GET_VRING_BASE` reports.
 //! - The data plane runs on one worker thread per connection that waits on a
-//!   kqueue for per-queue triggers from the control thread.
+//!   kqueue: vring kick pipes and per-queue triggers from the control thread.
 //! - [`Backend`]: answers front-end messages on the calling (or a spawned)
 //!   thread and drives a [`VhostUserDevice`].
+//!
+//! ## macOS notifier behaviour (QEMU 10.2.1, verified in source and on a Mac)
+//!
+//! QEMU builds without eventfd fall back to non-blocking pipes
+//! (`util/event_notifier-posix.c`). It sends the **read** end for
+//! `SET_VRING_KICK` and writes 8 bytes per guest kick — under TCG the
+//! ioeventfd is emulated (`memory_region_dispatch_write_eventfds`); it sends
+//! the **write** end for `SET_VRING_CALL` (`event_notifier_get_wfd`) and
+//! drains whatever the back-end writes. `SET_VRING_ERR` gets the read end,
+//! which a back-end cannot write, so it is accepted and ignored.
 
 #![cfg(target_os = "macos")]
 
