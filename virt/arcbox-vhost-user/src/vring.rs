@@ -150,8 +150,8 @@ impl Vring {
         }
     }
 
-    /// Guest memory, while the ring is running. Stays mapped until the
-    /// connection ends; drop it in [`crate::VhostUserDevice::reset`].
+    /// Guest memory, while the ring is running. The handle keeps its mapping
+    /// alive; drop it in [`crate::VhostUserDevice::reset`].
     #[must_use]
     pub fn memory(&self) -> Option<Arc<GuestMemWriter>> {
         self.memory

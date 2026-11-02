@@ -8,6 +8,9 @@
 //! covers all of them. Gaps between regions stay private anonymous memory:
 //! a descriptor the guest points into a gap reads zeros and writes scratch
 //! pages instead of faulting the host.
+//!
+//! The writer owns the reservation: it is unmapped when the last
+//! `Arc<GuestMemWriter>` goes, wherever a device or queue kept one.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
@@ -24,18 +27,55 @@ const MAX_SPAN: u64 = 1 << 40;
 
 /// Guest RAM mapped from the front-end's region descriptors.
 pub struct GuestMemory {
-    base: *mut u8,
-    span: usize,
     gpa_base: u64,
     regions: Vec<MemoryRegion>,
     writer: Arc<GuestMemWriter>,
 }
 
-// SAFETY: `base` is a process-lifetime mapping owned by this value until Drop;
-// it is only read through `GuestMemWriter`, which is itself Send + Sync.
-unsafe impl Send for GuestMemory {}
-// SAFETY: as above; no interior state changes after construction.
-unsafe impl Sync for GuestMemory {}
+/// The host address range guest RAM is mapped into; unmapped on drop,
+/// together with every region mapped inside it.
+struct Reservation {
+    base: *mut u8,
+    span: usize,
+}
+
+// SAFETY: the reservation is plain memory owned by this value; nothing reads
+// it through `Reservation` itself.
+unsafe impl Send for Reservation {}
+// SAFETY: as above; the value is never mutated after construction.
+unsafe impl Sync for Reservation {}
+
+impl Reservation {
+    fn new(span: usize) -> Result<Self> {
+        // SAFETY: an anonymous private reservation; no existing mapping is
+        // touched.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                span,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Self {
+            base: base.cast(),
+            span,
+        })
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        // SAFETY: `base..base+span` is the reservation created in `new`; the
+        // region mappings inside it go with it.
+        unsafe { libc::munmap(self.base.cast(), self.span) };
+    }
+}
 
 impl GuestMemory {
     /// Maps `regions`, each from the descriptor at the same position in `fds`.
@@ -81,38 +121,15 @@ impl GuestMemory {
         }
         let span = span as usize;
 
-        // SAFETY: an anonymous private reservation; no existing mapping is
-        // touched.
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                span,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let base = base.cast::<u8>();
-        // From here on Drop unmaps the reservation, including on error.
-        let mem = Self {
-            base,
-            span,
-            gpa_base,
-            regions: regions.to_vec(),
-            // SAFETY: `base` is valid for `span` bytes until `mem` drops, and
-            // `mem` keeps the writer's Arc alive only as long as itself.
-            writer: Arc::new(unsafe { GuestMemWriter::new(base, span, gpa_base as usize) }),
-        };
+        // Dropped (unmapping everything) on any error below.
+        let reservation = Reservation::new(span)?;
+        let base = reservation.base;
         for (r, fd) in regions.iter().zip(fds) {
             let offset = (r.guest_phys_addr - gpa_base) as usize;
             let file_offset = libc::off_t::try_from(r.mmap_offset)
                 .map_err(|_| Error::Protocol(format!("invalid memory region {r:?}")))?;
-            // SAFETY: the target range lies inside our reservation (checked
-            // above), so MAP_FIXED replaces only pages we own.
+            // SAFETY: the target range lies inside the reservation (checked
+            // above), so MAP_FIXED replaces only pages it owns.
             let mapped = unsafe {
                 libc::mmap(
                     base.add(offset).cast(),
@@ -130,10 +147,19 @@ impl GuestMemory {
                 ))));
             }
         }
-        Ok(mem)
+        // SAFETY: `base` is valid for `span` bytes until the reservation is
+        // dropped, and the writer drops it last.
+        let writer =
+            unsafe { GuestMemWriter::with_owner(base, span, gpa_base as usize, reservation) };
+        Ok(Self {
+            gpa_base,
+            regions: regions.to_vec(),
+            writer: Arc::new(writer),
+        })
     }
 
-    /// The accessor `SplitQueue` reads rings and buffers through.
+    /// The accessor `SplitQueue` reads rings and buffers through. Each clone
+    /// keeps the mapping alive.
     #[must_use]
     pub fn writer(&self) -> Arc<GuestMemWriter> {
         Arc::clone(&self.writer)
@@ -171,19 +197,11 @@ impl GuestMemory {
     }
 }
 
-impl Drop for GuestMemory {
-    fn drop(&mut self) {
-        // SAFETY: `base..base+span` is the reservation created in `map`; the
-        // region mappings inside it go with it.
-        unsafe { libc::munmap(self.base.cast(), self.span) };
-    }
-}
-
 impl std::fmt::Debug for GuestMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GuestMemory")
             .field("gpa_base", &format_args!("{:#x}", self.gpa_base))
-            .field("span", &self.span)
+            .field("span", &self.writer.len())
             .field("regions", &self.regions)
             .finish_non_exhaustive()
     }
@@ -260,6 +278,27 @@ mod tests {
         assert_eq!(mem.uva_to_gpa(0x7000_0000 + 2 * page - 8, 16), None);
         assert_eq!(mem.uva_to_gpa(0x6fff_fff0, 8), None);
         assert!(mem.same_layout(&regions));
+    }
+
+    #[test]
+    fn a_writer_keeps_guest_memory_mapped_after_the_table_is_dropped() {
+        let page = page_size();
+        let mut file = backing(page);
+        let region = MemoryRegion {
+            guest_phys_addr: 0x4000_0000,
+            memory_size: page,
+            userspace_addr: 0x7000_0000,
+            mmap_offset: 0,
+        };
+        let mem = GuestMemory::map(&[region], &[OwnedFd::from(file.try_clone().unwrap())]).unwrap();
+        let writer = mem.writer();
+        drop(mem);
+
+        writer.write_u32(0x4000_0020, 0xfeed_f00d);
+        let mut buf = [0u8; 4];
+        file.seek(SeekFrom::Start(0x20)).unwrap();
+        file.read_exact(&mut buf).unwrap();
+        assert_eq!(u32::from_le_bytes(buf), 0xfeed_f00d);
     }
 
     #[test]
