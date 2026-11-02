@@ -56,7 +56,9 @@ pub mod darwin;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-pub use capability::{NestedVirtSupport, host_nested_virt};
+pub use capability::{
+    HostVirtualization, NestedVirtSupport, host_nested_virt, host_virtualization,
+};
 pub use config::{VmConfig, VmConfigBuilder};
 pub use error::{HypervisorError, Result};
 pub use memory::{GuestAddress, MemoryRegion};

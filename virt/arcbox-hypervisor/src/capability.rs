@@ -7,6 +7,106 @@
 //! these instead. The concrete backends read the same probes when they
 //! fill in `PlatformCapabilities`, so the two never drift.
 
+/// Whether this host can run a VM at all, and the platform's own reason
+/// when it cannot.
+///
+/// A host without it cannot gain it while the process lives, so a start
+/// that fails for this reason must not be retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostVirtualization {
+    /// True when at least one of this platform's hypervisors can create a
+    /// VM.
+    pub available: bool,
+    /// Why not, when `available` is false; empty otherwise. A complete
+    /// clause, so a caller can prefix its own context.
+    pub reason: &'static str,
+}
+
+/// Probes whether this host provides hardware virtualization.
+///
+/// On macOS a host is capable when either framework says so: the two
+/// backends have no shared probe, and calling a capable Mac incapable
+/// would refuse every VM on it. Cached there, like
+/// [`host_nested_virt`]; re-probed elsewhere, where `/dev/kvm` can appear
+/// once the module loads.
+#[must_use]
+pub fn host_virtualization() -> HostVirtualization {
+    let available = virtualization_cached_or_reprobed();
+    HostVirtualization {
+        available,
+        reason: if available {
+            ""
+        } else {
+            NO_VIRTUALIZATION_REASON
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn virtualization_cached_or_reprobed() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(probe_virtualization)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn virtualization_cached_or_reprobed() -> bool {
+    probe_virtualization()
+}
+
+#[cfg(target_os = "macos")]
+const NO_VIRTUALIZATION_REASON: &str = concat!(
+    "this Mac does not provide hardware virtualization (neither ",
+    "Virtualization.framework nor Hypervisor.framework is available, ",
+    "as inside a macOS virtual machine)",
+);
+
+/// `VZVirtualMachine.isSupported`, or `kern.hv_support` for
+/// Hypervisor.framework.
+///
+/// A macOS guest answers no to both: `isSupported` is false and the sysctl
+/// does not exist (measured 2026-11-02 on a `VirtualMac2,1` under macOS
+/// 26.3.1, where `hv_vm_create` also returns `HV_UNSUPPORTED`).
+#[cfg(target_os = "macos")]
+fn probe_virtualization() -> bool {
+    arcbox_vz::is_supported() || sysctl_hv_support()
+}
+
+#[cfg(target_os = "macos")]
+fn sysctl_hv_support() -> bool {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    // SAFETY: `sysctlbyname` writes at most `len` bytes into `value`, a
+    // correctly sized `c_int` we own; an absent name fails with ENOENT
+    // without writing.
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"kern.hv_support".as_ptr(),
+            std::ptr::addr_of_mut!(value).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    ret == 0 && value == 1
+}
+
+#[cfg(target_os = "linux")]
+const NO_VIRTUALIZATION_REASON: &str =
+    "this host does not provide hardware virtualization (/dev/kvm is missing)";
+
+#[cfg(target_os = "linux")]
+fn probe_virtualization() -> bool {
+    std::path::Path::new("/dev/kvm").exists()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const NO_VIRTUALIZATION_REASON: &str = "this platform has no supported hypervisor";
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn probe_virtualization() -> bool {
+    false
+}
+
 /// Whether this host can nest a VM, and the platform's own reason when it
 /// cannot.
 ///
@@ -116,6 +216,12 @@ mod tests {
     fn an_unsupported_host_always_carries_a_reason() {
         let support = host_nested_virt();
         assert_eq!(support.supported, support.reason.is_empty());
+    }
+
+    #[test]
+    fn a_host_without_virtualization_always_carries_a_reason() {
+        let host = host_virtualization();
+        assert_eq!(host.available, host.reason.is_empty());
     }
 
     #[test]

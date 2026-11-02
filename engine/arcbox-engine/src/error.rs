@@ -97,6 +97,16 @@ impl EngineError {
     pub fn invalid_state(msg: impl Into<String>) -> Self {
         Self::Common(CommonError::invalid_state(msg))
     }
+
+    /// Whether the host lacks hardware virtualization, which no retry can
+    /// change.
+    #[must_use]
+    pub const fn is_platform_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Vmm(arcbox_vmm::VmmError::PlatformUnsupported(_))
+        )
+    }
 }
 
 // Allow automatic conversion from std::io::Error via CommonError, matching
