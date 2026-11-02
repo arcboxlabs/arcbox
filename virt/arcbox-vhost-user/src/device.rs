@@ -6,6 +6,17 @@ use crate::vring::Vring;
 
 /// A virtio device whose data plane runs in this process while QEMU owns the
 /// transport (PCI, interrupts, guest memory).
+///
+/// Threading: the back-end calls every method with one lock held, from two
+/// threads — the control thread (front-end messages: features, config,
+/// reset) and the worker thread (queue processing).
+/// A method never runs concurrently with another, so `&mut self` needs no
+/// further synchronization; a device that wants work done elsewhere hands it
+/// to its own threads.
+///
+/// A handler must finish every chain it pops before it returns: the control
+/// thread may stop a ring (`GET_VRING_BASE`) the moment the lock is released,
+/// and reports the avail cursor as everything consumed.
 pub trait VhostUserDevice: Send + 'static {
     /// Number of virtqueues (`GET_QUEUE_NUM`).
     fn num_queues(&self) -> usize;
@@ -47,6 +58,10 @@ pub trait VhostUserDevice: Send + 'static {
             "device config space is read-only".into(),
         ))
     }
+
+    /// The guest kicked `queue`, or the ring was just started or enabled.
+    /// Only called while the ring [`Vring::is_running`].
+    fn process_queue(&mut self, queue: u16, vrings: &mut Vrings) -> Result<()>;
 
     /// The front-end reset the device or went away. Drop all per-connection
     /// state, including any guest memory handle taken from a [`Vring`]: the
