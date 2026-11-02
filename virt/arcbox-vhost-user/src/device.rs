@@ -1,6 +1,7 @@
 //! The interface a device implements to be served over vhost-user.
 
 use crate::error::{Error, Result};
+use crate::event_loop::Registrar;
 use crate::protocol::ProtocolFeatures;
 use crate::vring::Vring;
 
@@ -9,10 +10,10 @@ use crate::vring::Vring;
 ///
 /// Threading: the back-end calls every method with one lock held, from two
 /// threads — the control thread (front-end messages: features, config,
-/// reset) and the worker thread (queue kicks).
+/// reset) and the worker thread (queue kicks and the device's own events).
 /// A method never runs concurrently with another, so `&mut self` needs no
 /// further synchronization; a device that wants work done elsewhere hands it
-/// to its own threads.
+/// to its own threads and wakes the worker with a [`crate::Waker`].
 ///
 /// A handler must finish every chain it pops before it returns: the control
 /// thread may stop a ring (`GET_VRING_BASE`) the moment the lock is released,
@@ -59,9 +60,23 @@ pub trait VhostUserDevice: Send + 'static {
         ))
     }
 
+    /// Called once per connection before the back-end handles the first
+    /// message; register descriptors and create wakers here. Every
+    /// registration ends with the connection.
+    fn activate(&mut self, registrar: &Registrar) -> Result<()> {
+        let _ = registrar;
+        Ok(())
+    }
+
     /// The guest kicked `queue`, or the ring was just started or enabled.
     /// Only called while the ring [`Vring::is_running`].
     fn process_queue(&mut self, queue: u16, vrings: &mut Vrings) -> Result<()>;
+
+    /// A descriptor or waker registered through the [`Registrar`] fired.
+    fn handle_event(&mut self, token: u64, vrings: &mut Vrings) -> Result<()> {
+        let _ = (token, vrings);
+        Ok(())
+    }
 
     /// The front-end reset the device or went away. Drop all per-connection
     /// state, including any guest memory handle taken from a [`Vring`]: the
@@ -69,16 +84,18 @@ pub trait VhostUserDevice: Send + 'static {
     fn reset(&mut self) {}
 }
 
-/// The device's queues.
+/// The device's queues, plus the event-loop registrar.
 #[derive(Debug)]
 pub struct Vrings {
     rings: Vec<Vring>,
+    registrar: Registrar,
 }
 
 impl Vrings {
-    pub(crate) fn new(count: usize, max_size: u16) -> Self {
+    pub(crate) fn new(count: usize, max_size: u16, registrar: Registrar) -> Self {
         Self {
             rings: (0..count).map(|i| Vring::new(i as u16, max_size)).collect(),
+            registrar,
         }
     }
 
@@ -108,5 +125,11 @@ impl Vrings {
     /// Every queue.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Vring> {
         self.rings.iter_mut()
+    }
+
+    /// Registers device descriptors and wakers with the event loop.
+    #[must_use]
+    pub const fn registrar(&self) -> &Registrar {
+        &self.registrar
     }
 }

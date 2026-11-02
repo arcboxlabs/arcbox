@@ -19,7 +19,8 @@
 //! - [`Vring`]: per-queue state; once started it owns the `SplitQueue`, the
 //!   one owner of the avail cursor `GET_VRING_BASE` reports.
 //! - The data plane runs on one worker thread per connection that waits on a
-//!   kqueue: vring kick pipes and per-queue triggers from the control thread.
+//!   kqueue: vring kick pipes, per-queue triggers from the control thread,
+//!   and anything the device registers through a [`Registrar`].
 //! - [`Backend`]: answers front-end messages on the calling (or a spawned)
 //!   thread and drives a [`VhostUserDevice`].
 //!
@@ -32,6 +33,58 @@
 //! the **write** end for `SET_VRING_CALL` (`event_notifier_get_wfd`) and
 //! drains whatever the back-end writes. `SET_VRING_ERR` gets the read end,
 //! which a back-end cannot write, so it is accepted and ignored.
+//!
+//! ## Serving a device
+//!
+//! ```text
+//! socketpair(AF_UNIX, SOCK_STREAM) → (ours, theirs)
+//! qemu ... -object memory-backend-shm,id=mem,size=<RAM>,share=on \
+//!          -machine virt,memory-backend=mem \
+//!          -chardev socket,id=fs0,fd=<theirs> \
+//!          -device vhost-user-fs-pci,chardev=fs0,tag=arcbox
+//! Backend::new("vhost-fs-arcbox", device).spawn(ours)
+//! ```
+//!
+//! QEMU connects at start-up and blocks in `vhost_dev_init` until the
+//! back-end answers, so spawn the back-end before (or right after) QEMU.
+//! Guest RAM must come from a shareable backend; ordinary RAM has no
+//! descriptor and vhost-user refuses to start. One connection serves one
+//! device; when QEMU exits the back-end resets the device and returns it.
+//!
+//! ## Writing a device
+//!
+//! Implement [`VhostUserDevice`]. Offer `VIRTIO_F_VERSION_1` plus the device
+//! bits; `VIRTIO_RING_F_EVENT_IDX` is supported. In
+//! [`VhostUserDevice::process_queue`], take the ring from [`Vrings::get_mut`]
+//! and either call [`Vring::process_avail`] (pop, handle, publish, re-arm
+//! EVENT_IDX, interrupt once) or drive [`Vring::queue_mut`] directly.
+//!
+//! **virtio-fs** (one back-end per share — `arcbox`, `users`, `private`):
+//! queue 0 is hiprio, queues 1.. are requests (`num-request-queues` on the
+//! QEMU side must match [`VhostUserDevice::num_queues`] − 1). Wrap
+//! `arcbox_virtio_fs::VirtioFs::with_handler(config, Arc::new(FsServer))`
+//! and, per chain, gather the readable descriptors, call
+//! `VirtioFs::process_request`, and scatter the reply into the writable
+//! descriptors. The tag is QEMU's (`tag=` on the device), not the
+//! back-end's. There is no DAX
+//! window: leave the `DaxMapper` unset; the guest's `dax=always` remount
+//! fails and must be tolerated.
+//!
+//! **vsock** (one back-end, ports dialled from the host): two queues, RX and
+//! TX — QEMU keeps the event queue (`vhost-vsock-common.c`: `vhost_vqs[2]`),
+//! so transport-reset events are not the back-end's. Offer
+//! [`ProtocolFeatures::CONFIG`] and return the guest CID as the 8-byte
+//! little-endian config space; `vhost-user-vsock-pci` reads it at realize
+//! time and refuses a back-end without it. Keep the HV pieces: `VsockConnectionManager` for
+//! connection state and `connect_vsock(port)` socketpairs. Replace the
+//! `vsock-io` thread and its doorbell pipe with this worker: create a
+//! [`Waker`] in `activate` for the doorbell, register each connection's
+//! socketpair end with [`Registrar::watch_readable`] (edge-triggered when RX
+//! may stall on missing guest buffers), and run RX injection from
+//! `handle_event`. The injection code takes a `QueueConfig` and a
+//! `DeviceCtx`: build them from [`Vring::queue_config`], [`Vring::memory`]
+//! and [`Vring::call_notifier`], and hand the avail cursor back with
+//! [`Vring::set_last_avail_idx`] so `GET_VRING_BASE` stays right.
 
 #![cfg(target_os = "macos")]
 
@@ -47,6 +100,7 @@ mod vring;
 pub use backend::{Backend, BackendHandle};
 pub use device::{VhostUserDevice, Vrings};
 pub use error::{Error, Result};
+pub use event_loop::{MAX_DEVICE_TOKEN, Registrar, Trigger, Waker};
 pub use memory::GuestMemory;
 pub use protocol::ProtocolFeatures;
 pub use vring::{CallNotifier, Vring};

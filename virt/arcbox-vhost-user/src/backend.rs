@@ -19,7 +19,7 @@ use arcbox_virtio_core::virtio_bindings::virtio_ring::{
 use crate::connection::{Connection, Message};
 use crate::device::{VhostUserDevice, Vrings};
 use crate::error::{Error, Result};
-use crate::event_loop::{Event, Kqueue};
+use crate::event_loop::{Event, Kqueue, Registrar, Trigger};
 use crate::memory::GuestMemory;
 use crate::protocol::{
     ConfigHeader, ProtocolFeatures, Request, VHOST_USER_F_PROTOCOL_FEATURES, VringAddr, VringState,
@@ -64,7 +64,7 @@ impl<D: VhostUserDevice> Backend<D> {
     /// (or [`BackendHandle::stop`] shuts the socket down), then resets the
     /// device and hands it back.
     pub fn serve(self, stream: UnixStream) -> Result<D> {
-        let Self { name, device } = self;
+        let Self { name, mut device } = self;
         let num_queues = device.num_queues();
         if num_queues == 0 || num_queues > MAX_QUEUES {
             return Err(Error::Device(format!(
@@ -77,11 +77,13 @@ impl<D: VhostUserDevice> Backend<D> {
         for queue in 0..num_queues {
             kq.add_user(queue, Event::Trigger(queue as u16))?;
         }
+        let registrar = Registrar::new(Arc::clone(&kq));
+        device.activate(&registrar)?;
 
         let offered_features =
             (device.features() & !UNSUPPORTED_RING_FEATURES) | VHOST_USER_F_PROTOCOL_FEATURES;
         let offered_protocol = BASE_PROTOCOL_FEATURES | device.protocol_features();
-        let vrings = Vrings::new(num_queues, device.max_queue_size());
+        let vrings = Vrings::new(num_queues, device.max_queue_size(), registrar);
         let shared = Arc::new(Mutex::new(State {
             device,
             vrings,
@@ -277,7 +279,7 @@ impl<D: VhostUserDevice> State<D> {
                 let vring = self.vring(index)?;
                 unwatch(kq, vring.start(fd)?);
                 if let Some(kick) = vring.kick_fd() {
-                    kq.add_read(kick.as_raw_fd(), Event::Kick(index as u16))?;
+                    kq.add_read(kick.as_raw_fd(), Event::Kick(index as u16), Trigger::Level)?;
                 }
                 trigger(kq, vring);
                 Ok(None)
@@ -454,6 +456,7 @@ fn run_worker<D: VhostUserDevice>(
                     }
                     device.process_queue(queue, vrings)
                 }
+                Event::Device(token) => device.handle_event(token, vrings),
                 Event::Stop => unreachable!("handled above"),
             };
             if let Err(e) = result {
