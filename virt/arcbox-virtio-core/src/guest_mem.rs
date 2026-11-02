@@ -6,7 +6,8 @@
 
 /// Raw pointer wrapper for guest physical memory access.
 ///
-/// Backed by the VM-lifetime mmap of guest RAM. Device-owned descriptor
+/// Backed by the VM-lifetime mmap of guest RAM, or by a mapping the writer
+/// owns (see [`Self::with_owner`]). Device-owned descriptor
 /// buffers are exclusive to the device per the VirtIO spec — the
 /// guest will not touch them until the used ring advances.
 ///
@@ -18,12 +19,15 @@ pub struct GuestMemWriter {
     /// GPA of the start of guest RAM. Subtracted from every GPA argument
     /// to obtain the host pointer offset within `ptr..ptr+len`.
     gpa_base: usize,
+    /// Keeps the mapping behind `ptr` alive for as long as the writer.
+    _owner: Option<Box<dyn Send + Sync>>,
 }
 
-// SAFETY: The pointer originates from a VM-lifetime mmap. The worker
-// thread writes only to descriptor buffers (device-owned) and the used
-// ring (with Release fences). No concurrent mutation from the guest is
-// possible for device-owned buffers per the VirtIO spec.
+// SAFETY: The pointer originates from a VM-lifetime mmap or one `_owner`
+// keeps alive. The worker thread writes only to descriptor buffers
+// (device-owned) and the used ring (with Release fences). No concurrent
+// mutation from the guest is possible for device-owned buffers per the
+// VirtIO spec.
 unsafe impl Send for GuestMemWriter {}
 unsafe impl Sync for GuestMemWriter {}
 
@@ -36,7 +40,32 @@ impl GuestMemWriter {
     /// # Safety
     /// `ptr` must be valid for `len` bytes for the lifetime of the VM.
     pub unsafe fn new(ptr: *mut u8, len: usize, gpa_base: usize) -> Self {
-        Self { ptr, len, gpa_base }
+        Self {
+            ptr,
+            len,
+            gpa_base,
+            _owner: None,
+        }
+    }
+
+    /// Creates a writer that owns its mapping: `owner` is dropped (and may
+    /// unmap) only when the writer is, so no clone of an `Arc` around it can
+    /// outlive the memory it points into.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for `len` bytes until `owner` is dropped.
+    pub unsafe fn with_owner(
+        ptr: *mut u8,
+        len: usize,
+        gpa_base: usize,
+        owner: impl Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            ptr,
+            len,
+            gpa_base,
+            _owner: Some(Box::new(owner)),
+        }
     }
 
     /// Translates a GPA to a host pointer offset, returning `None` if the

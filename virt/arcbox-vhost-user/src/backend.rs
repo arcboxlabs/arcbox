@@ -91,7 +91,7 @@ impl<D: VhostUserDevice> Backend<D> {
             offered_protocol,
             acked_features: 0,
             acked_protocol: ProtocolFeatures::empty(),
-            mappings: Vec::new(),
+            memory: None,
         }));
 
         let worker = {
@@ -114,7 +114,7 @@ impl<D: VhostUserDevice> Backend<D> {
 
         let mut guard = lock(&shared);
         guard.reset(&kq);
-        guard.mappings.clear();
+        guard.memory = None;
         drop(guard);
         let device = Arc::into_inner(shared)
             .expect("worker joined; no other state owner")
@@ -173,10 +173,10 @@ struct State<D> {
     offered_protocol: ProtocolFeatures,
     acked_features: u64,
     acked_protocol: ProtocolFeatures,
-    /// Every guest memory table mapped on this connection. Mappings outlive
-    /// table changes so no handle a device took can dangle; an identical
-    /// table (every device restart re-sends one) reuses its mapping.
-    mappings: Vec<Arc<GuestMemory>>,
+    /// The current guest memory table. An identical table (every device
+    /// restart re-sends one) reuses its mapping; a replaced one is unmapped
+    /// once no ring or device holds it.
+    memory: Option<Arc<GuestMemory>>,
 }
 
 impl<D: VhostUserDevice> State<D> {
@@ -231,15 +231,15 @@ impl<D: VhostUserDevice> State<D> {
             Request::GetQueueNum => Ok(Some((self.vrings.len() as u64).to_ne_bytes().to_vec())),
             Request::SetMemTable => {
                 let regions = decode_mem_table(payload)?;
-                let memory = match self.mappings.iter().find(|m| m.same_layout(&regions)) {
-                    Some(existing) => {
+                let memory = match &self.memory {
+                    Some(current) if current.same_layout(&regions) => {
                         tracing::debug!("vhost-user memory table unchanged; reusing its mapping");
-                        Arc::clone(existing)
+                        Arc::clone(current)
                     }
-                    None => {
+                    _ => {
                         let mapped = Arc::new(GuestMemory::map(&regions, &msg.fds)?);
                         tracing::info!("vhost-user guest memory mapped: {mapped:?}");
-                        self.mappings.push(Arc::clone(&mapped));
+                        self.memory = Some(Arc::clone(&mapped));
                         mapped
                     }
                 };
@@ -358,11 +358,11 @@ impl<D: VhostUserDevice> State<D> {
         }
     }
 
-    /// Stops every ring and forgets the virtio features; mappings stay until
-    /// the connection ends. Protocol features survive: QEMU negotiates them
-    /// once per connection and keeps relying on them (`REPLY_ACK` above all —
-    /// it blocks for the ack of the `SET_VRING_CALL` it sends right after a
-    /// guest-driven `RESET_DEVICE`).
+    /// Stops every ring and forgets the virtio features; the memory table
+    /// stays until the front-end replaces it. Protocol features survive: QEMU
+    /// negotiates them once per connection and keeps relying on them
+    /// (`REPLY_ACK` above all — it blocks for the ack of the `SET_VRING_CALL`
+    /// it sends right after a guest-driven `RESET_DEVICE`).
     fn reset(&mut self, kq: &Kqueue) {
         for vring in self.vrings.iter_mut() {
             unwatch(kq, vring.reset());
