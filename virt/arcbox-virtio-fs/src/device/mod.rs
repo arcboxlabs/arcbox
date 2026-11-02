@@ -1,5 +1,6 @@
 //! `VirtioFs` device — config, queue dispatch, `VirtioDevice` impl.
 
+mod chain;
 mod queue;
 mod virtio_device;
 

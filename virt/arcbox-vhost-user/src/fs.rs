@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use arcbox_fs::FsServer;
 use arcbox_virtio_core::{DescChain, GuestMemWriter, VirtioDevice};
-use arcbox_virtio_fs::{DEFAULT_MAX_WRITE, FuseResponse, VirtioFs};
+use arcbox_virtio_fs::VirtioFs;
 
 use crate::{Backend, BackendHandle, Error, Result, VhostUserDevice, Vrings};
 
@@ -33,11 +33,6 @@ pub const REQUEST_QUEUES: usize = 1;
 
 /// Largest `queue-size` the front-end may configure.
 pub const QUEUE_SIZE: u16 = 1024;
-
-/// Longest request a guest can send: a `FUSE_WRITE` of the `max_write` the
-/// session advertises, after one page of headers (the kernel's
-/// `FUSE_BUFFER_HEADER_SIZE`). A longer chain is not a FUSE request.
-const MAX_REQUEST: usize = DEFAULT_MAX_WRITE as usize + 4096;
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_RING_F_EVENT_IDX: u64 = 1 << 29;
@@ -196,28 +191,11 @@ impl VhostUserDevice for FsDevice {
     }
 }
 
-/// Gathers the request from the chain's readable descriptors, answers it,
-/// and scatters the reply into the writable ones. Returns the bytes written.
+/// Answers the request in the chain's readable descriptors (a chain longer
+/// than any FUSE request gets `EINVAL`, see [`VirtioFs::answer_chain`]) and
+/// scatters the reply into the writable ones. Returns the bytes written.
 fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u32 {
-    // Descriptor lengths are the guest's: up to 1024 of them, each up to
-    // 4 GiB and free to cover the same range, so the total is checked
-    // before anything is copied.
-    let len: u64 = chain
-        .descriptors
-        .iter()
-        .filter(|d| !d.is_write())
-        .map(|d| u64::from(d.len))
-        .sum();
-    let reply = if len > MAX_REQUEST as u64 {
-        tracing::warn!(len, "virtio-fs request longer than any FUSE request");
-        FuseResponse::error(unique(&gather(mem, chain, 16)), libc::EINVAL).into_data()
-    } else {
-        let request = gather(mem, chain, MAX_REQUEST);
-        fs.process_request(&request).unwrap_or_else(|e| {
-            tracing::warn!("virtio-fs request failed: {e}");
-            FuseResponse::error(unique(&request), libc::EIO).into_data()
-        })
-    };
+    let reply = fs.answer_chain(mem, chain);
     let mut written = 0;
     for d in chain.descriptors.iter().filter(|d| d.is_write()) {
         let rest = &reply[written..];
@@ -235,33 +213,11 @@ fn handle_chain(fs: &mut VirtioFs, mem: &GuestMemWriter, chain: &DescChain) -> u
     written as u32
 }
 
-/// Copies at most `limit` bytes from the chain's readable descriptors.
-fn gather(mem: &GuestMemWriter, chain: &DescChain, limit: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    for d in chain.descriptors.iter().filter(|d| !d.is_write()) {
-        let room = limit - out.len();
-        if room == 0 {
-            break;
-        }
-        if let Some(bytes) = mem.slice(d.addr as usize, (d.len as usize).min(room)) {
-            out.extend_from_slice(bytes);
-        }
-    }
-    out
-}
-
-/// The `unique` of a FUSE request, or 0 when its header is cut short.
-fn unique(request: &[u8]) -> u64 {
-    request
-        .get(8..16)
-        .and_then(|b| b.try_into().ok())
-        .map_or(0, u64::from_le_bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arcbox_virtio_core::VirtqDesc;
+    use arcbox_virtio_fs::MAX_REQUEST_SIZE;
 
     const WRITE: u16 = 2;
 
@@ -359,7 +315,11 @@ mod tests {
             i32::from_le_bytes(reply[4..8].try_into().unwrap())
         };
 
-        assert_eq!(getattr(MAX_REQUEST), 0, "a full-size request is served");
-        assert_eq!(getattr(MAX_REQUEST + 1), -libc::EINVAL);
+        assert_eq!(
+            getattr(MAX_REQUEST_SIZE),
+            0,
+            "a full-size request is served"
+        );
+        assert_eq!(getattr(MAX_REQUEST_SIZE + 1), -libc::EINVAL);
     }
 }
