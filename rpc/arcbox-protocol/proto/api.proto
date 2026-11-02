@@ -1194,10 +1194,52 @@ message SystemRuntimeStatus {
         VM_STARTING = 5;
         // The guest agent answered. Docker runtime readiness is still pending.
         VM_READY = 6;
+        // The System VM waits for a component the daemon installs on demand:
+        // the QEMU build that emulates it on a Mac without hardware
+        // virtualization. `download` carries the progress; `reason` names the
+        // stage, and while waiting to retry it holds the error. Followed by
+        // STARTING once the component is installed, FAILED when installing
+        // it cannot succeed. Never published while the component is already
+        // installed.
+        DOWNLOADING = 7;
     }
     State state = 1;
     // Failure cause or current startup detail. Empty when no detail applies.
     string reason = 2;
+    // Set exactly while state is DOWNLOADING.
+    ComponentDownload download = 3;
+}
+
+// Progress of a component the daemon downloads and installs on demand.
+message ComponentDownload {
+    enum Component {
+        COMPONENT_UNSPECIFIED = 0;
+        // The QEMU build that runs the System VM without hardware
+        // virtualization.
+        QEMU = 1;
+    }
+    // Stages, in order; WAITING_TO_RETRY returns to TRANSFERRING.
+    enum Stage {
+        STAGE_UNSPECIFIED = 0;
+        // Receiving the archive; downloaded_bytes advances.
+        TRANSFERRING = 1;
+        // Checking the archive against the SHA-256 compiled into the daemon.
+        VERIFYING = 2;
+        // Extracting, checking code signatures, and moving it into place.
+        INSTALLING = 3;
+        // A transfer failed and the daemon retries after a delay, resuming
+        // from downloaded_bytes. SystemRuntimeStatus.reason has the error.
+        WAITING_TO_RETRY = 4;
+    }
+    Component component = 1;
+    // Version being installed, e.g. "0.1.0".
+    string version = 2;
+    Stage stage = 3;
+    // Bytes of the archive on disk, including bytes kept from an interrupted
+    // attempt or an earlier daemon run.
+    uint64 downloaded_bytes = 4;
+    // Size of the archive; 0 until the server has reported it.
+    uint64 total_bytes = 5;
 }
 
 // Explicitly starts a storage check or recovery. Both actions stop workloads.

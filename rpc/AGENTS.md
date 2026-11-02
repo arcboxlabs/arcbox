@@ -66,7 +66,7 @@ This file is only the non-obvious operational knowledge.
 
 ## Invariants (each with a one-clause why)
 
-- `SetupStatus.phase` reports host lifecycle. `system_runtime` reports independent System admission and structured milestones. `STARTING` covers binary preparation; `VM_STARTING` and `VM_READY` delimit guest boot. Never infer Docker, Kubernetes, or sandbox readiness from host or guest boot readiness. System failure must preserve host, local HTTPS, and storage observations.
+- `SetupStatus.phase` reports host lifecycle. `system_runtime` reports independent System admission and structured milestones. `STARTING` covers binary preparation; `VM_STARTING` and `VM_READY` delimit guest boot. `DOWNLOADING` covers an on-demand component install (QEMU on a Mac without hardware virtualization); `download` is set exactly while it lasts. Never infer Docker, Kubernetes, or sandbox readiness from host or guest boot readiness. System failure must preserve host, local HTTPS, and storage observations.
 - Machine operations and System configuration/recovery use the prepared host handle. Docker, Kubernetes, sandbox, migration, and System filesystem requests use the System handle. Directory and diagnostic reads retain the early handle. Keep existing storage write guards after runtime admission.
 
 - `ReconcileGuestTrust` carries the active host certificate or explicit guest opt-out. Reject an unset desired state and non-host peers. A missing active CA sends no request; macOS untrust does not remove guest trust. Acknowledge only a completed install or removal. The host compares the installed fingerprint with the current CA. Keep this channel separate from Web authority and HTTPS observation.

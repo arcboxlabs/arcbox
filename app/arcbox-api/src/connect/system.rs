@@ -110,6 +110,20 @@ impl SetupState {
         });
     }
 
+    /// Publishes the progress of a component System startup waits for. Only
+    /// the DOWNLOADING state carries it: publishing any other state clears it.
+    pub fn set_system_runtime_download(&self, download: pb::ComponentDownload, reason: &str) {
+        self.publish(|s| {
+            s.system_runtime = pb::SystemRuntimeStatus {
+                state: pb::system_runtime_status::State::Downloading.into(),
+                reason: reason.to_owned(),
+                download: download.into(),
+                ..Default::default()
+            }
+            .into();
+        });
+    }
+
     /// Publishes whether this host provides hardware virtualization.
     pub fn set_hardware_virtualization_available(&self, available: bool) {
         self.publish(|s| s.hardware_virtualization_available = Some(available));
@@ -920,5 +934,38 @@ mod tests {
         let (snapshot, mut after) = state.subscribe();
         assert_eq!(snapshot.system_runtime.state, State::Ready);
         assert!(after.try_recv().is_err());
+    }
+
+    #[test]
+    fn download_progress_rides_only_the_downloading_state() {
+        use pb::component_download::{Component, Stage};
+        use pb::system_runtime_status::State;
+
+        let state = SetupState::new();
+        let (_, mut updates) = state.subscribe();
+        state.set_system_runtime_download(
+            pb::ComponentDownload {
+                component: Component::Qemu.into(),
+                version: "0.1.0".to_owned(),
+                stage: Stage::Transferring.into(),
+                downloaded_bytes: 1024,
+                total_bytes: 4096,
+                ..Default::default()
+            },
+            "Downloading QEMU 0.1.0",
+        );
+        let update = updates.try_recv().unwrap();
+        assert_eq!(update.system_runtime.state, State::Downloading);
+        assert_eq!(update.system_runtime.download.component, Component::Qemu);
+        assert_eq!(
+            (
+                update.system_runtime.download.downloaded_bytes,
+                update.system_runtime.download.total_bytes
+            ),
+            (1024, 4096)
+        );
+
+        state.set_system_runtime(State::Starting, "Preparing the System VM");
+        assert!(!updates.try_recv().unwrap().system_runtime.download.is_set());
     }
 }

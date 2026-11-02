@@ -1527,6 +1527,9 @@ pub struct SystemRuntimeStatus {
     /// Failure cause or current startup detail. Empty when no detail applies.
     #[prost(string, tag = "2")]
     pub reason: ::prost::alloc::string::String,
+    /// Set exactly while state is DOWNLOADING.
+    #[prost(message, optional, tag = "3")]
+    pub download: ::core::option::Option<ComponentDownload>,
 }
 /// Nested message and enum types in `SystemRuntimeStatus`.
 pub mod system_runtime_status {
@@ -1546,6 +1549,14 @@ pub mod system_runtime_status {
         VmStarting = 5,
         /// The guest agent answered. Docker runtime readiness is still pending.
         VmReady = 6,
+        /// The System VM waits for a component the daemon installs on demand:
+        /// the QEMU build that emulates it on a Mac without hardware
+        /// virtualization. `download` carries the progress; `reason` names the
+        /// stage, and while waiting to retry it holds the error. Followed by
+        /// STARTING once the component is installed, FAILED when installing
+        /// it cannot succeed. Never published while the component is already
+        /// installed.
+        Downloading = 7,
     }
     impl State {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -1561,6 +1572,7 @@ pub mod system_runtime_status {
                 Self::Failed => "FAILED",
                 Self::VmStarting => "VM_STARTING",
                 Self::VmReady => "VM_READY",
+                Self::Downloading => "DOWNLOADING",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1573,6 +1585,97 @@ pub mod system_runtime_status {
                 "FAILED" => Some(Self::Failed),
                 "VM_STARTING" => Some(Self::VmStarting),
                 "VM_READY" => Some(Self::VmReady),
+                "DOWNLOADING" => Some(Self::Downloading),
+                _ => None,
+            }
+        }
+    }
+}
+/// Progress of a component the daemon downloads and installs on demand.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ComponentDownload {
+    #[prost(enumeration = "component_download::Component", tag = "1")]
+    pub component: i32,
+    /// Version being installed, e.g. "0.1.0".
+    #[prost(string, tag = "2")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(enumeration = "component_download::Stage", tag = "3")]
+    pub stage: i32,
+    /// Bytes of the archive on disk, including bytes kept from an interrupted
+    /// attempt or an earlier daemon run.
+    #[prost(uint64, tag = "4")]
+    pub downloaded_bytes: u64,
+    /// Size of the archive; 0 until the server has reported it.
+    #[prost(uint64, tag = "5")]
+    pub total_bytes: u64,
+}
+/// Nested message and enum types in `ComponentDownload`.
+pub mod component_download {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Component {
+        Unspecified = 0,
+        /// The QEMU build that runs the System VM without hardware
+        /// virtualization.
+        Qemu = 1,
+    }
+    impl Component {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "COMPONENT_UNSPECIFIED",
+                Self::Qemu => "QEMU",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "COMPONENT_UNSPECIFIED" => Some(Self::Unspecified),
+                "QEMU" => Some(Self::Qemu),
+                _ => None,
+            }
+        }
+    }
+    /// Stages, in order; WAITING_TO_RETRY returns to TRANSFERRING.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Stage {
+        Unspecified = 0,
+        /// Receiving the archive; downloaded_bytes advances.
+        Transferring = 1,
+        /// Checking the archive against the SHA-256 compiled into the daemon.
+        Verifying = 2,
+        /// Extracting, checking code signatures, and moving it into place.
+        Installing = 3,
+        /// A transfer failed and the daemon retries after a delay, resuming
+        /// from downloaded_bytes. SystemRuntimeStatus.reason has the error.
+        WaitingToRetry = 4,
+    }
+    impl Stage {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STAGE_UNSPECIFIED",
+                Self::Transferring => "TRANSFERRING",
+                Self::Verifying => "VERIFYING",
+                Self::Installing => "INSTALLING",
+                Self::WaitingToRetry => "WAITING_TO_RETRY",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STAGE_UNSPECIFIED" => Some(Self::Unspecified),
+                "TRANSFERRING" => Some(Self::Transferring),
+                "VERIFYING" => Some(Self::Verifying),
+                "INSTALLING" => Some(Self::Installing),
+                "WAITING_TO_RETRY" => Some(Self::WaitingToRetry),
                 _ => None,
             }
         }

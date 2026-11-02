@@ -157,13 +157,13 @@ pub mod api {
 
     // System service types
     pub use super::v1::{
-        AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor,
-        EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
-        ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess,
-        LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest, PruneResponse,
-        ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
-        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, SystemRuntimeStatus,
-        WebService, system_runtime_status,
+        AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, ComponentDownload, Event,
+        EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
+        GetVersionResponse, ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation,
+        LocalHttpsAccess, LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest,
+        PruneResponse, ResolveContainerFsRequest, ResolveContainerFsResponse,
+        ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest, SystemPingResponse,
+        SystemRuntimeStatus, WebService, component_download, system_runtime_status,
     };
 
     // Volume service types
@@ -250,12 +250,13 @@ pub use v1::{
 
 // API types - System
 pub use v1::{
-    AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor, EventsRequest,
-    GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesRequest,
-    ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
-    PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
-    ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
-    SystemPingResponse, SystemRuntimeStatus, WebService, system_runtime_status,
+    AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, ComponentDownload, Event,
+    EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
+    GetVersionResponse, ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation,
+    LocalHttpsAccess, LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest, PruneResponse,
+    ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
+    ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, SystemRuntimeStatus, WebService,
+    component_download, system_runtime_status,
 };
 
 // API types - Volume

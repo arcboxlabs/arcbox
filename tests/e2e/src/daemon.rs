@@ -138,6 +138,7 @@ fn system_mark(state: system_runtime_status::State) -> &'static str {
         State::Unspecified => "SYSTEM_UNSPECIFIED",
         State::Disabled => "SYSTEM_DISABLED",
         State::Starting => "SYSTEM_STARTING",
+        State::Downloading => "SYSTEM_DOWNLOADING",
         State::Ready => "SYSTEM_READY",
         State::Failed => "SYSTEM_FAILED",
         State::VmStarting => "VM_STARTING",
@@ -548,6 +549,7 @@ mod tests {
             system_runtime: Some(arcbox_protocol::v1::SystemRuntimeStatus {
                 state: state.into(),
                 reason: "guest runtime failed".into(),
+                download: None,
             }),
             ..Default::default()
         }
