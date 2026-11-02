@@ -5,6 +5,7 @@ mod context;
 mod control_plane;
 mod disk_reclaim;
 mod dns_service;
+mod fd_limit;
 #[cfg(target_os = "macos")]
 mod guest_trust;
 #[cfg(target_os = "macos")]
@@ -170,6 +171,12 @@ fn main() -> Result<()> {
         profile = ?profile,
         "arcbox-daemon starting"
     );
+
+    // Before the runtime starts anything that holds descriptors.
+    match fd_limit::raise() {
+        Ok(limit) => tracing::info!(from = limit.from, to = limit.to, "open-file soft limit"),
+        Err(e) => tracing::warn!(error = %e, "could not raise the open-file soft limit"),
+    }
 
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
