@@ -1,9 +1,14 @@
-//! Serving one vhost-user connection: the calling thread answers front-end
-//! messages and configures the device's vrings.
+//! Serving one vhost-user connection: the control thread answers front-end
+//! messages, a worker thread runs the data plane on a kqueue.
+//!
+//! Both threads share one lock over the device and its vrings. The control
+//! thread takes it per message, the worker per event, so a ring is never
+//! reconfigured while the device is processing it and `GET_VRING_BASE`
+//! reports a cursor no handler is still moving.
 
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use arcbox_virtio_core::virtio_bindings::virtio_config::VIRTIO_F_RING_PACKED;
@@ -14,6 +19,7 @@ use arcbox_virtio_core::virtio_bindings::virtio_ring::{
 use crate::connection::{Connection, Message};
 use crate::device::{VhostUserDevice, Vrings};
 use crate::error::{Error, Result};
+use crate::event_loop::{Event, Kqueue};
 use crate::memory::GuestMemory;
 use crate::protocol::{
     ConfigHeader, ProtocolFeatures, Request, VHOST_USER_F_PROTOCOL_FEATURES, VringAddr, VringState,
@@ -35,6 +41,9 @@ const BASE_PROTOCOL_FEATURES: ProtocolFeatures = ProtocolFeatures::from_bits(
 /// Most queues a front-end can address: vring descriptor messages carry the
 /// index in eight bits.
 const MAX_QUEUES: usize = 256;
+
+/// Events the worker takes from the kqueue per wait.
+const EVENT_BATCH: usize = 64;
 
 /// A device ready to be served to one front-end connection.
 pub struct Backend<D: VhostUserDevice> {
@@ -63,11 +72,17 @@ impl<D: VhostUserDevice> Backend<D> {
             )));
         }
 
+        let kq = Arc::new(Kqueue::new()?);
+        kq.add_stop()?;
+        for queue in 0..num_queues {
+            kq.add_user(queue, Event::Trigger(queue as u16))?;
+        }
+
         let offered_features =
             (device.features() & !UNSUPPORTED_RING_FEATURES) | VHOST_USER_F_PROTOCOL_FEATURES;
         let offered_protocol = BASE_PROTOCOL_FEATURES | device.protocol_features();
         let vrings = Vrings::new(num_queues, device.max_queue_size());
-        let mut state = State {
+        let shared = Arc::new(Mutex::new(State {
             device,
             vrings,
             offered_features,
@@ -75,17 +90,41 @@ impl<D: VhostUserDevice> Backend<D> {
             acked_features: 0,
             acked_protocol: ProtocolFeatures::empty(),
             mappings: Vec::new(),
+        }));
+
+        let worker = {
+            let state = Arc::clone(&shared);
+            let kq = Arc::clone(&kq);
+            let socket = stream.try_clone()?;
+            let name = name.clone();
+            std::thread::Builder::new()
+                .name(format!("{name}-vq"))
+                .spawn(move || run_worker(&name, &state, &kq, &socket))?
         };
 
         let conn = Connection::new(stream);
-        let result = control_loop(&name, &conn, &mut state);
+        let result = control_loop(&name, &conn, &shared, &kq);
         if let Err(e) = &result {
             tracing::warn!("{name}: vhost-user connection failed: {e}");
         }
-        state.reset();
-        state.mappings.clear();
+        let _ = kq.stop();
+        let worker_result = worker.join();
+
+        let mut guard = lock(&shared);
+        guard.reset();
+        guard.mappings.clear();
+        drop(guard);
+        let device = Arc::into_inner(shared)
+            .expect("worker joined; no other state owner")
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+            .device;
+
+        if worker_result.is_err() {
+            return Err(Error::Device(format!("{name}: data-plane worker panicked")));
+        }
         tracing::info!("{name}: vhost-user front-end disconnected");
-        result.map(|()| state.device)
+        result.map(|()| device)
     }
 
     /// Serves `stream` on a new thread named after the back-end.
@@ -139,7 +178,7 @@ struct State<D> {
 }
 
 impl<D: VhostUserDevice> State<D> {
-    fn handle(&mut self, request: Request, msg: Message) -> Result<Option<Vec<u8>>> {
+    fn handle(&mut self, request: Request, msg: Message, kq: &Kqueue) -> Result<Option<Vec<u8>>> {
         let payload = msg.payload.as_slice();
         match request {
             Request::GetFeatures => Ok(Some(self.offered_features.to_ne_bytes().to_vec())),
@@ -160,6 +199,7 @@ impl<D: VhostUserDevice> State<D> {
                     vring.set_event_idx(event_idx);
                     if enable_all {
                         vring.set_enabled(true);
+                        trigger(kq, vring);
                     }
                 }
                 self.device
@@ -203,6 +243,7 @@ impl<D: VhostUserDevice> State<D> {
                 };
                 for vring in self.vrings.iter_mut() {
                     vring.set_memory(Arc::clone(&memory))?;
+                    trigger(kq, vring);
                 }
                 Ok(None)
             }
@@ -232,7 +273,9 @@ impl<D: VhostUserDevice> State<D> {
             }
             Request::SetVringKick => {
                 let (index, fd) = vring_fd(payload, msg.fds)?;
-                self.vring(index)?.start(fd)?;
+                let vring = self.vring(index)?;
+                vring.start(fd)?;
+                trigger(kq, vring);
                 Ok(None)
             }
             Request::SetVringCall => {
@@ -260,7 +303,9 @@ impl<D: VhostUserDevice> State<D> {
                     1 => true,
                     n => return Err(Error::Protocol(format!("SET_VRING_ENABLE value {n}"))),
                 };
-                self.vring(state.index)?.set_enabled(enable);
+                let vring = self.vring(state.index)?;
+                vring.set_enabled(enable);
+                trigger(kq, vring);
                 Ok(None)
             }
             Request::GetConfig => {
@@ -324,7 +369,8 @@ impl<D: VhostUserDevice> State<D> {
 fn control_loop<D: VhostUserDevice>(
     name: &str,
     conn: &Connection,
-    state: &mut State<D>,
+    state: &Mutex<State<D>>,
+    kq: &Kqueue,
 ) -> Result<()> {
     while let Some(msg) = conn.recv()? {
         let code = msg.header.request;
@@ -335,10 +381,13 @@ fn control_loop<D: VhostUserDevice>(
             msg.payload.len(),
             msg.fds.len()
         );
+        let mut guard = lock(state);
         let ack = msg.header.need_reply()
             && !request.has_reply()
-            && state.acked_protocol.contains(ProtocolFeatures::REPLY_ACK);
-        match state.handle(request, msg) {
+            && guard.acked_protocol.contains(ProtocolFeatures::REPLY_ACK);
+        let outcome = guard.handle(request, msg, kq);
+        drop(guard);
+        match outcome {
             Ok(Some(reply)) => conn.send_reply(code, &reply)?,
             Ok(None) if ack => conn.send_reply(code, &0u64.to_ne_bytes())?,
             Ok(None) => {}
@@ -352,6 +401,59 @@ fn control_loop<D: VhostUserDevice>(
     Ok(())
 }
 
+fn run_worker<D: VhostUserDevice>(
+    name: &str,
+    state: &Mutex<State<D>>,
+    kq: &Kqueue,
+    socket: &UnixStream,
+) {
+    // Ends the connection if the data plane dies, so the front-end sees the
+    // back-end go away instead of a device that silently stops.
+    struct HangUp<'a>(&'a UnixStream);
+    impl Drop for HangUp<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let _ = self.0.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+    let _hang_up = HangUp(socket);
+
+    // SAFETY: an all-zero kevent is a valid value.
+    let mut buf: [libc::kevent; EVENT_BATCH] = unsafe { std::mem::zeroed() };
+    let mut events = Vec::with_capacity(EVENT_BATCH);
+    loop {
+        events.clear();
+        if let Err(e) = kq.wait(&mut buf, &mut events) {
+            tracing::error!("{name}: kevent failed: {e}");
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+        for &event in &events {
+            if event == Event::Stop {
+                return;
+            }
+            let mut guard = lock(state);
+            let State { device, vrings, .. } = &mut *guard;
+            let result = match event {
+                Event::Trigger(queue) => {
+                    let Some(vring) = vrings.get_mut(queue) else {
+                        continue;
+                    };
+                    if !vring.is_running() {
+                        continue;
+                    }
+                    device.process_queue(queue, vrings)
+                }
+                Event::Stop => unreachable!("handled above"),
+            };
+            if let Err(e) = result {
+                tracing::warn!("{name}: {event:?}: {e}");
+            }
+        }
+    }
+}
+
 fn vring_fd(payload: &[u8], mut fds: Vec<OwnedFd>) -> Result<(u32, Option<OwnedFd>)> {
     let (index, has_fd) = decode_vring_fd(payload)?;
     let expected = usize::from(has_fd);
@@ -362,4 +464,14 @@ fn vring_fd(payload: &[u8], mut fds: Vec<OwnedFd>) -> Result<(u32, Option<OwnedF
         )));
     }
     Ok((index, fds.pop()))
+}
+
+fn trigger(kq: &Kqueue, vring: &Vring) {
+    if vring.is_running() {
+        let _ = kq.trigger_queue(vring.index());
+    }
+}
+
+fn lock<D>(state: &Mutex<State<D>>) -> MutexGuard<'_, State<D>> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }

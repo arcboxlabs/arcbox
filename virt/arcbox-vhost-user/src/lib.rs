@@ -18,6 +18,8 @@
 //!   covers guest RAM.
 //! - [`Vring`]: per-queue state; once started it owns the `SplitQueue`, the
 //!   one owner of the avail cursor `GET_VRING_BASE` reports.
+//! - The data plane runs on one worker thread per connection that waits on a
+//!   kqueue for per-queue triggers from the control thread.
 //! - [`Backend`]: answers front-end messages on the calling (or a spawned)
 //!   thread and drives a [`VhostUserDevice`].
 
@@ -27,6 +29,7 @@ mod backend;
 pub mod connection;
 mod device;
 mod error;
+mod event_loop;
 mod memory;
 pub mod protocol;
 mod vring;
