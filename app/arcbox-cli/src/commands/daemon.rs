@@ -313,6 +313,7 @@ fn render_startup_status(status: &pb::SetupStatus) -> String {
     let state = match system.state.as_known() {
         Some(State::Disabled) => "disabled",
         Some(State::Starting) => "preparing",
+        Some(State::Downloading) => "downloading",
         Some(State::VmStarting) => "starting VM",
         Some(State::VmReady) => "VM ready; waiting for Docker",
         Some(State::Ready) => "ready",
@@ -323,7 +324,35 @@ fn render_startup_status(status: &pb::SetupStatus) -> String {
     if !system.reason.is_empty() {
         output.push(format!("System detail: {}", system.reason));
     }
+    if let Some(download) = system.download.as_option() {
+        output.push(format!("System download: {}", render_download(download)));
+    }
     output.join("\n")
+}
+
+fn render_download(download: &pb::ComponentDownload) -> String {
+    use pb::component_download::{Component, Stage};
+    let component = match download.component.as_known() {
+        Some(Component::Qemu) => "QEMU",
+        Some(Component::ComponentUnspecified) | None => "component",
+    };
+    let stage = match download.stage.as_known() {
+        Some(Stage::Transferring) => "transferring",
+        Some(Stage::Verifying) => "verifying",
+        Some(Stage::Installing) => "installing",
+        Some(Stage::WaitingToRetry) => "waiting to retry",
+        Some(Stage::StageUnspecified) | None => "unknown stage",
+    };
+    let megabytes = |bytes: u64| bytes as f64 / 1_000_000.0;
+    let size = match download.total_bytes {
+        0 => format!("{:.1} MB", megabytes(download.downloaded_bytes)),
+        total => format!(
+            "{:.1} of {:.1} MB",
+            megabytes(download.downloaded_bytes),
+            megabytes(total)
+        ),
+    };
+    format!("{component} {}: {size}, {stage}", download.version)
 }
 
 fn lock_file_uptime(lock_file: &Path) -> Option<Duration> {
@@ -650,6 +679,37 @@ mod tests {
         assert!(rendered.contains("guest storage unavailable"));
         status.system_runtime = None.into();
         assert!(render_startup_status(&status).contains("System runtime: unknown"));
+    }
+
+    #[test]
+    fn status_shows_download_progress() {
+        use pb::component_download::{Component, Stage};
+        let status = pb::SetupStatus {
+            system_runtime: pb::SystemRuntimeStatus {
+                state: pb::system_runtime_status::State::Downloading.into(),
+                download: pb::ComponentDownload {
+                    component: Component::Qemu.into(),
+                    version: "0.1.0".into(),
+                    stage: Stage::Transferring.into(),
+                    downloaded_bytes: 2_100_000,
+                    total_bytes: 5_930_315,
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let rendered = render_startup_status(&status);
+        assert!(
+            rendered.contains("System runtime: downloading"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("System download: QEMU 0.1.0: 2.1 of 5.9 MB, transferring"),
+            "{rendered}"
+        );
     }
 
     /// An older daemon sends no virtualization probe; that must not read as
