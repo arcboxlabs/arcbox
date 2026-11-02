@@ -42,7 +42,13 @@ impl FuseDispatcher {
         // SAFETY: FuseReadIn may sit at an unaligned offset in the VirtIO buffer.
         let read_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReadIn) };
 
-        match self.fs.read(read_in.fh, read_in.offset, read_in.size) {
+        // Bound the guest-controlled `size`, which sizes the read buffer: the
+        // session advertises 32 pages per request and arm64 pages are at most
+        // 64 KiB, so a real read never asks for more than 2 MiB. A larger
+        // request gets a short read instead of a 4 GiB allocation.
+        const MAX_READ_SIZE: u32 = 32 * 64 * 1024;
+        let size = read_in.size.min(MAX_READ_SIZE);
+        match self.fs.read(read_in.fh, read_in.offset, size) {
             Ok(data) => response.write_bytes(ctx.unique, &data),
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }

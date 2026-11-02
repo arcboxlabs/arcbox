@@ -234,6 +234,40 @@ fn test_open_read_write_release() {
     assert_eq!(header.error, 0);
 }
 
+/// The guest's read size sizes the host buffer, so it is capped at the
+/// largest read a guest kernel sends (2 MiB); a larger one is a short read.
+#[test]
+fn oversized_read_is_capped() {
+    const CAP: usize = 2 << 20;
+    let temp = TempDir::new().unwrap();
+    std::fs::write(temp.path().join("big"), vec![7u8; CAP + 1]).unwrap();
+    let fs = Arc::new(PassthroughFs::new(temp.path()).unwrap());
+    let (inode, _) = fs
+        .lookup(PassthroughFs::ROOT_INODE, std::ffi::OsStr::new("big"))
+        .unwrap();
+    let fh = fs.open(inode, libc::O_RDONLY as u32).unwrap();
+    let dispatcher = FuseDispatcher::new(fs, DispatcherConfig::default());
+
+    let read_in = FuseReadIn {
+        fh,
+        offset: 0,
+        size: u32::MAX,
+        read_flags: 0,
+        lock_owner: 0,
+        flags: 0,
+        padding: 0,
+    };
+    let mut request = make_header(FuseOpcode::Read, inode, size_of::<FuseReadIn>());
+    // SAFETY: FuseReadIn is plain old data.
+    request.extend_from_slice(unsafe {
+        std::slice::from_raw_parts((&raw const read_in).cast::<u8>(), size_of::<FuseReadIn>())
+    });
+
+    let response = dispatcher.dispatch(&request).unwrap();
+    assert_eq!(parse_response_header(&response).error, 0);
+    assert_eq!(response.len() - FuseOutHeader::SIZE, CAP);
+}
+
 #[test]
 fn test_statfs() {
     let (_temp, dispatcher) = setup_dispatcher();
