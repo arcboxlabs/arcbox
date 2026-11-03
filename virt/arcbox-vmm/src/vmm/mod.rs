@@ -272,8 +272,7 @@ impl Vmm {
                 .as_ref()
                 .and_then(darwin_net::VmnetBridge::interface_info),
             Machine::Hv(ref hv) => hv.vmnet_interface_info(),
-            // QEMU has no bridge NIC.
-            Machine::Qemu(_) => None,
+            Machine::Qemu(ref qemu) => qemu.vmnet_interface_info(),
         }
     }
 

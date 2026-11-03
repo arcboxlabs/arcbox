@@ -2,9 +2,11 @@
 //! for Apple silicon Macs without hardware virtualization.
 //!
 //! QEMU owns the vCPUs, guest RAM and the virtio transport; the daemon keeps
-//! what it owns on every backend. NIC1 is the same frame socketpair VZ
-//! attaches (`darwin_net`); `hvc0` and `hvc1` are `virtconsole` ports whose
-//! socketpairs feed the engine's serial drain; QMP drives the lifecycle.
+//! what it owns on every backend. NIC1 and the bridge NIC are the same
+//! frame socketpairs VZ attaches (`darwin_net`), the bridge NIC's relayed to
+//! a vmnet interface the daemon runs, so QEMU needs no vmnet entitlement;
+//! `hvc0` and `hvc1` are `virtconsole` ports whose socketpairs feed the
+//! engine's serial drain; QMP drives the lifecycle.
 //! Every descriptor QEMU needs is inherited at spawn (`process`), so it
 //! opens no socket of its own.
 //!
@@ -51,6 +53,9 @@ pub struct QemuMachine {
     /// The host ends of `hvc0` and `hvc1`.
     consoles: Option<[OwnedFd; 2]>,
     net_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// The vmnet interface behind the bridge NIC, while it runs.
+    #[cfg(feature = "vmnet")]
+    vmnet_bridge: Option<darwin_net::VmnetBridge>,
     inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
     /// The virtio-fs back-ends, one per shared directory.
     shares: Vec<FsBackend>,
@@ -95,6 +100,8 @@ impl QemuMachine {
             launch: None,
             consoles: None,
             net_cancel: None,
+            #[cfg(feature = "vmnet")]
+            vmnet_bridge: None,
             inbound_listener_manager: None,
             shares: Vec::new(),
             vsock: None,
@@ -182,6 +189,16 @@ impl QemuMachine {
             None
         };
 
+        #[cfg(feature = "vmnet")]
+        let bridge_net = self.bridge_nic().map(|nic| {
+            let fd = nic.guest_fd.as_raw_fd();
+            inherited.push(nic.guest_fd);
+            self.vmnet_bridge = Some(nic.vmnet);
+            (fd, nic.mac)
+        });
+        #[cfg(not(feature = "vmnet"))]
+        let bridge_net: Option<(RawFd, String)> = None;
+
         let argv = args::qemu_args(&args::QemuArgs {
             kernel: &self.config.kernel_path,
             initrd: self.config.initrd_path.as_deref(),
@@ -192,6 +209,9 @@ impl QemuMachine {
             qmp_fd,
             console_fds,
             net_fd,
+            bridge_net: bridge_net
+                .as_ref()
+                .map(|(fd, mac)| args::BridgeNet { fd: *fd, mac }),
             disks: &self.config.block_devices,
             vsock_fd,
             shares: &shares,
@@ -207,6 +227,33 @@ impl QemuMachine {
             qmp,
         });
         Ok(())
+    }
+
+    /// The bridge NIC (NIC2), for host→container routing, when networking
+    /// is on and vmnet starts. Without it the guest boots all the same and
+    /// only the container addresses are unreachable from the host, so a
+    /// failure is reported once here and not retried.
+    #[cfg(feature = "vmnet")]
+    fn bridge_nic(&self) -> Option<darwin_net::BridgeNic> {
+        if !self.config.networking {
+            return None;
+        }
+        darwin_net::BridgeNic::new(self.config.bridge_nic_mac.as_deref())
+            .inspect_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "no bridge NIC: the host cannot reach container IPs on this run"
+                );
+            })
+            .ok()
+    }
+
+    /// The bridge NIC's vmnet interface, while it runs.
+    #[cfg(feature = "vmnet")]
+    pub fn vmnet_interface_info(&self) -> Option<arcbox_vmnet::VmnetInterfaceInfo> {
+        self.vmnet_bridge
+            .as_ref()
+            .and_then(darwin_net::VmnetBridge::interface_info)
     }
 
     /// Spawns QEMU and negotiates QMP.
@@ -314,6 +361,10 @@ impl QemuMachine {
         let _ = std::fs::remove_file(&self.pidfile);
         if let Some(cancel) = self.net_cancel.take() {
             cancel.cancel();
+        }
+        #[cfg(feature = "vmnet")]
+        if let Some(bridge) = self.vmnet_bridge.take() {
+            bridge.stop();
         }
         self.consoles = None;
         self.launch = None;

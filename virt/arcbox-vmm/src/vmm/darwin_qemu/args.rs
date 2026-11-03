@@ -27,8 +27,11 @@ const SERIAL_SLOT: u8 = FIRST_DISK_SLOT + MAX_DISKS;
 const RNG_SLOT: u8 = SERIAL_SLOT + 1;
 /// PCI slot of the vhost-user vsock device.
 const VSOCK_SLOT: u8 = RNG_SLOT + 1;
+/// PCI slot of the bridge NIC (`eth1`). Any slot after NIC1's keeps the
+/// guest's probe order, and so its interface names.
+const BRIDGE_NET_SLOT: u8 = VSOCK_SLOT + 1;
 /// PCI slot of the first vhost-user-fs share; the rest follow in order.
-const FIRST_SHARE_SLOT: u8 = VSOCK_SLOT + 1;
+const FIRST_SHARE_SLOT: u8 = BRIDGE_NET_SLOT + 1;
 /// The root bus ends at slot 0x1f.
 const LAST_SLOT: u8 = 0x1f;
 
@@ -55,6 +58,15 @@ pub(super) struct FsShare {
     pub(super) chardev_fd: RawFd,
 }
 
+/// The bridge NIC: frames of the daemon's vmnet relay over `fd`.
+#[derive(Debug, Clone)]
+pub(super) struct BridgeNet<'a> {
+    /// QEMU's end of the relay's socketpair.
+    pub(super) fd: RawFd,
+    /// The vmnet interface's MAC, which the host looks the guest up by.
+    pub(super) mac: &'a str,
+}
+
 /// What the command line names. Every fd is one QEMU inherits at that
 /// number.
 #[derive(Debug, Clone)]
@@ -71,6 +83,8 @@ pub(super) struct QemuArgs<'a> {
     pub(super) console_fds: [RawFd; 2],
     /// NIC1's frame socket; `None` boots without networking.
     pub(super) net_fd: Option<RawFd>,
+    /// NIC2; `None` when vmnet is unavailable or networking is off.
+    pub(super) bridge_net: Option<BridgeNet<'a>>,
     /// In guest order: `vda`, `vdb`, ...
     pub(super) disks: &'a [BlockDeviceConfig],
     /// QEMU's end of the vhost-user vsock back-end's socketpair.
@@ -199,6 +213,21 @@ pub(super) fn qemu_args(args: &QemuArgs<'_>) -> Result<Vec<OsString>, String> {
             format!("vhost-user-vsock-pci,chardev=vsock0,addr={VSOCK_SLOT:#04x}"),
         );
     }
+    if let Some(bridge) = &args.bridge_net {
+        flag(
+            &mut out,
+            "-netdev",
+            format!("dgram,id=net1,local.type=fd,local.str={}", bridge.fd),
+        );
+        flag(
+            &mut out,
+            "-device",
+            format!(
+                "virtio-net-pci,netdev=net1,mac={},romfile=,addr={BRIDGE_NET_SLOT:#04x}",
+                bridge.mac
+            ),
+        );
+    }
     for (index, (slot, share)) in (FIRST_SHARE_SLOT..).zip(args.shares).enumerate() {
         flag(
             &mut out,
@@ -291,6 +320,10 @@ mod tests {
             qmp_fd: 7,
             console_fds: [8, 9],
             net_fd: Some(10),
+            bridge_net: Some(BridgeNet {
+                fd: 13,
+                mac: "02:ab:cd:00:00:01",
+            }),
             disks,
             vsock_fd: Some(11),
             shares,
@@ -349,8 +382,8 @@ mod tests {
         let count = slots.len();
         assert_eq!(
             count,
-            1 + 4 + 1 + 1 + 1 + 3,
-            "net, disks, serial, rng, vsock, shares"
+            1 + 4 + 1 + 1 + 1 + 1 + 3,
+            "net, disks, serial, rng, vsock, bridge net, shares"
         );
         slots.sort_unstable();
         slots.dedup();
@@ -376,14 +409,17 @@ mod tests {
         );
         assert_eq!(
             values(&argv, "-netdev"),
-            ["dgram,id=net0,local.type=fd,local.str=10"]
+            [
+                "dgram,id=net0,local.type=fd,local.str=10",
+                "dgram,id=net1,local.type=fd,local.str=13",
+            ]
         );
         let devices = values(&argv, "-device");
         assert!(devices.contains(&"virtconsole,bus=serial0.0,nr=0,chardev=hvc0"));
         assert!(devices.contains(&"virtconsole,bus=serial0.0,nr=1,chardev=hvc1"));
         assert!(devices.contains(&"vhost-user-vsock-pci,chardev=vsock0,addr=0x08"));
         assert!(
-            devices.contains(&"vhost-user-fs-pci,chardev=fs0,tag=arcbox,queue-size=1024,num-request-queues=1,addr=0x09")
+            devices.contains(&"vhost-user-fs-pci,chardev=fs0,tag=arcbox,queue-size=1024,num-request-queues=1,addr=0x0a")
         );
     }
 
@@ -430,12 +466,43 @@ mod tests {
 
         let mut offline = system_vm(&[], &[]);
         offline.net_fd = None;
+        offline.bridge_net = None;
         let argv = render(&offline);
         assert!(values(&argv, "-netdev").is_empty());
         assert!(
             !values(&argv, "-device")
                 .iter()
                 .any(|d| d.starts_with("virtio-net"))
+        );
+    }
+
+    /// NIC1 keeps QEMU's generated MAC, which nothing looks up; NIC2 carries
+    /// vmnet's, which the host finds the guest's bridge by. It sits after
+    /// NIC1 so the guest still names it `eth1`, and a missing vmnet drops
+    /// only it.
+    #[test]
+    fn the_bridge_nic_carries_the_vmnet_mac_after_nic1() {
+        let argv = render(&system_vm(&[], &[]));
+        let nics: Vec<_> = values(&argv, "-device")
+            .into_iter()
+            .filter(|d| d.starts_with("virtio-net-pci"))
+            .collect();
+        assert_eq!(
+            nics,
+            [
+                "virtio-net-pci,netdev=net0,romfile=,addr=0x01",
+                "virtio-net-pci,netdev=net1,mac=02:ab:cd:00:00:01,romfile=,addr=0x09",
+            ]
+        );
+
+        let without_vmnet = QemuArgs {
+            bridge_net: None,
+            ..system_vm(&[], &[])
+        };
+        let argv = render(&without_vmnet);
+        assert_eq!(
+            values(&argv, "-netdev"),
+            ["dgram,id=net0,local.type=fd,local.str=10"]
         );
     }
 
