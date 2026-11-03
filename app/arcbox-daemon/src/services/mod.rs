@@ -160,7 +160,8 @@ pub async fn start_system_services(
         })
     });
 
-    let kubernetes_proxy = kubernetes_proxy.map(|proxy| proxy.start(Arc::clone(runtime)));
+    let kubernetes_proxy =
+        kubernetes_proxy.map(|proxy| proxy.start(Arc::clone(runtime), ctx.shutdown.clone()));
 
     #[cfg(target_os = "macos")]
     let route_guard = linux_vm.then(|| {
