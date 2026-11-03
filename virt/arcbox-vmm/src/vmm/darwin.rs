@@ -537,8 +537,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.inbound_listener_manager.as_mut(),
             Machine::Hv(ref mut hv) => hv.inbound_listener_manager(),
-            // No NIC yet.
-            Machine::Qemu(_) => None,
+            Machine::Qemu(ref mut qemu) => qemu.inbound_listener_manager(),
         }
     }
 
@@ -552,7 +551,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.inbound_listener_manager.take(),
             Machine::Hv(ref mut hv) => hv.take_inbound_listener_manager(),
-            Machine::Qemu(_) => None,
+            Machine::Qemu(ref mut qemu) => qemu.take_inbound_listener_manager(),
         }
     }
 

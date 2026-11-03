@@ -248,8 +248,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.shared_dns = Some(dns),
             Machine::Hv(ref mut hv) => hv.set_shared_dns(dns),
-            // No NIC yet.
-            Machine::Qemu(_) => {}
+            Machine::Qemu(ref mut qemu) => qemu.set_shared_dns(dns),
         }
     }
 
@@ -262,7 +261,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.proxy_env = Some(env),
             Machine::Hv(ref mut hv) => hv.set_proxy_env(env),
-            Machine::Qemu(_) => {}
+            Machine::Qemu(ref mut qemu) => qemu.set_proxy_env(env),
         }
     }
 

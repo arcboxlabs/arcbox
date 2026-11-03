@@ -1,9 +1,10 @@
-//! The primary NIC's socketpair and the host network stack behind it.
+//! The primary NIC's socketpair and the host network stack behind it,
+//! shared by the VZ and QEMU backends.
 //!
 //! The guest end of a `SOCK_DGRAM` socketpair carries raw Ethernet frames:
-//! VZ attaches it with `VZFileHandleNetworkDeviceAttachment`. The host end
-//! feeds the guest NAT datapath (DHCP, DNS, socket proxy, TCP bridge). The
-//! descriptor helpers serve the vmnet bridge NIC's socketpair too.
+//! VZ attaches it with `VZFileHandleNetworkDeviceAttachment`, QEMU with
+//! `-netdev dgram,local.type=fd`. The host end feeds the guest NAT datapath
+//! (DHCP, DNS, socket proxy, TCP bridge).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
