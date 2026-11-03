@@ -1824,6 +1824,38 @@ async fn aborted_bridge_query_retains_hold_until_native_connect_drains() {
     );
 }
 
+/// A VM that stopped before its start was published (a QEMU that exited at
+/// once) is stopped again rather than left `Running` in the VM registry,
+/// where it would refuse every later start.
+#[test]
+fn unpublished_start_releases_its_vm() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "early");
+    let vm_id = manager.get("early").unwrap().vm_id;
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("early")
+        .unwrap()
+        .state = MachineState::Stopped;
+    manager.vm_manager.model_vm_exit(&vm_id);
+    assert!(
+        manager
+            .publish_or_stop("early", &vm_id, &expected, 99)
+            .is_err()
+    );
+    assert_eq!(
+        manager.vm_manager.get(&vm_id).unwrap().state,
+        MachineState::Stopped
+    );
+    assert_eq!(manager.get("early").unwrap().state, MachineState::Stopped);
+    manager
+        .set_boot_backend("early", arcbox_vmm::VmBackend::Qemu)
+        .unwrap();
+}
+
 #[test]
 fn late_start_cannot_overwrite_restarted_or_stopping_machine() {
     let directory = tempdir().unwrap();

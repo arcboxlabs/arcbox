@@ -432,6 +432,16 @@ impl VmManager {
 }
 
 impl VmManager {
+    /// The VM stopped on its own: its VMM is no longer running.
+    pub(crate) fn model_vm_exit(&self, id: &VmId) {
+        self.vms.read().unwrap()[id]
+            .vmm
+            .as_ref()
+            .unwrap()
+            .running_flag()
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(crate) fn model_restarted_vm(&self, id: &VmId) -> VmIncarnation {
         let mut vms = self.vms.write().unwrap();
         let entry = vms.get_mut(id).unwrap();

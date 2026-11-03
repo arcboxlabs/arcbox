@@ -873,8 +873,25 @@ impl MachineManager {
         self.verify_storage_pair(name)?;
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
         let expected = self.vm_manager.start(&vm_id, self.host_network.clone())?;
-        let is_machine_vm = self.publish_running(name, &expected, cid)?;
+        let is_machine_vm = self.publish_or_stop(name, &vm_id, &expected, cid)?;
         Ok((is_machine_vm, expected))
+    }
+
+    /// Publishes the run a start just began, or stops it: a VM that stopped
+    /// before publication (a QEMU that exited at once) would otherwise stay
+    /// `Running` in the VM registry and refuse every later start.
+    fn publish_or_stop(
+        &self,
+        name: &str,
+        vm_id: &VmId,
+        expected: &VmIncarnation,
+        cid: u32,
+    ) -> Result<bool> {
+        self.publish_running(name, expected, cid).inspect_err(|error| {
+            if let Err(stop_error) = self.vm_manager.stop(vm_id, expected) {
+                tracing::warn!(machine = name, %error, %stop_error, "could not stop a VM whose start was not published");
+            }
+        })
     }
 
     fn publish_running(&self, name: &str, expected: &VmIncarnation, cid: u32) -> Result<bool> {
