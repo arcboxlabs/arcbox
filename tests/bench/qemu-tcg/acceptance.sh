@@ -5,15 +5,16 @@
 # the daemon with no QEMU left. Prints one timing line per step and exits
 # non-zero when any check fails. See README.md.
 #
-#   ARCBOX_QEMU_PATH=<qemu-system-aarch64> [ARCBOX_AGENT=<agent>] \
+#   [ARCBOX_QEMU_PATH=<qemu-system-aarch64>] [ARCBOX_AGENT=<agent>] \
 #     acceptance.sh <data-dir> [restarts]
 #
 # <data-dir> is a development data directory with the System VM's assets
 # (`abctl boot prefetch --data-dir`), not the ~/.arcbox of a running
-# production daemon. ARCBOX_AGENT, a musl build of this tree's agent,
-# replaces the boot assets' one. The QEMU must be an arcboxlabs/qemu build.
+# production daemon. Without ARCBOX_QEMU_PATH (or `[qemu] path`) the daemon
+# installs the QEMU build assets.lock pins into <data-dir>/runtime/qemu;
+# a QEMU named there must be an arcboxlabs/qemu build. ARCBOX_AGENT, a musl
+# build of this tree's agent, replaces the boot assets' one.
 set -euo pipefail
-: "${ARCBOX_QEMU_PATH:?set ARCBOX_QEMU_PATH to qemu-system-aarch64}"
 data=$(cd "${1:?data directory}" && pwd)
 restarts=${2:-3}
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -30,7 +31,8 @@ daemon=
 
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
 since() { perl -e 'printf "%.2f s", $ARGV[1] - $ARGV[0]' "$1" "$2"; }
-qemu() { pgrep -f "$ARCBOX_QEMU_PATH" | head -1 || true; }
+qemu_bin=${ARCBOX_QEMU_PATH:-$data/runtime/qemu/}
+qemu() { pgrep -f "$qemu_bin" | head -1 || true; }
 fail() {
   echo "FAIL: $*" >&2
   failures=$((failures + 1))
@@ -111,13 +113,14 @@ guest_agent() {
 }
 
 if [ -n "$(qemu)" ]; then
-  echo "a QEMU from $ARCBOX_QEMU_PATH is already running" >&2
+  echo "a QEMU from $qemu_bin is already running" >&2
   exit 1
 fi
 echo "kern.hv_support: $(sysctl -n kern.hv_support 2>/dev/null || echo absent)"
 start_daemon
 target/debug/abctl daemon status --grpc-socket "$data/run/arcbox.sock" --data-dir "$data" |
   grep -E 'virtualization|backend' || true
+echo "QEMU: $(ps -o command= -p "$(qemu)" | cut -d' ' -f1)"
 
 docker rmi -f alpine python:3.13-slim >/dev/null 2>&1 || true
 timed -e hello docker run --rm alpine echo hello
