@@ -18,10 +18,23 @@ lines on `hvc0`. Results: `docs/logs/2026-11-02-qemu-tcg-host-backend.md`.
 | dockerd by memory | dockerd from exec to `API listen on` at 2–14 GiB |
 | host memory | host free memory while the guest touches 3 GiB and frees it |
 
-`sigterm.sh <data-dir> poweroff|kill` runs the daemon itself on a
+`sigterm.sh <data-dir> kill|ready` runs the daemon itself on a
 development data directory whose System VM assets are prepared. It boots the
-System VM on QEMU, lets QEMU go away (the guest powering off at rcS, or a
-`kill -9` of QEMU), and times the daemon's exit on SIGTERM.
+System VM on QEMU, then either `kill -9`s QEMU 0.5 s into the boot or waits
+for dockerd, and times the daemon's exit on SIGTERM. (Its former `poweroff`
+mode relied on rcS failing without the `arcbox` share, which the daemon now
+serves.)
+
+`acceptance.sh <data-dir> [restarts]` is the plan's acceptance run on a Mac
+without hardware virtualization: the fallback to QEMU, cold start to dockerd
+ready, warm `docker run`, a `python:3.13-slim` pull, `exec` and `logs`, an
+amd64 container through FEX, the agent's executable path in the guest, a
+guest reboot, and SIGTERM with no QEMU left after each restart. Set
+`ARCBOX_AGENT` to a musl build of this tree's agent to stage it over the
+boot assets' one. Results:
+`docs/logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md`.
+
+Both need an arcboxlabs/qemu build (the CPU carries `dic=off`).
 
 Needs: `qemu-system-aarch64` in `ARCBOX_QEMU_PATH`, brew's
 `FiloSottile/musl-cross/musl-cross` for the guest benchmark, and network

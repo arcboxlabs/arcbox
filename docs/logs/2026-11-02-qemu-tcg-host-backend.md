@@ -118,11 +118,11 @@ TCG default only caps what the guest can hold on to.
 
 ## Follow-ups
 
-- The agent starts from the `arcbox` virtio-fs share, so the System VM
-  reaches neither the agent nor dockerd until the vhost-user fs and vsock
-  back-ends are attached. Executing ELF files from that share also needs
-  the patched QEMU that reports DIC=0 (its `-cpu` property goes in
-  `args::CPU`).
+- Done 2026-11-03 ([entry](2026-11-03-qemu-tcg-system-vm-to-dockerd.md)):
+  the vhost-user fs and vsock back-ends are attached and `args::CPU`
+  carries `dic=off`, so the agent runs from the `arcbox` share and dockerd
+  comes up. `sigterm.sh`'s `poweroff` mode, which relied on rcS failing
+  without the share, became `ready`.
 - The daemon's shutdown joins System startup before stopping the Runtime.
   On QEMU a boot ends when the VM stops, but a guest that stays up without
   an agent still holds a SIGTERM for up to 180 s. VZ and HV keep their

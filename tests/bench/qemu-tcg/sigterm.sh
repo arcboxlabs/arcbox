@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# A failed QEMU boot must not hold the daemon. Boots the System VM on QEMU
-# with a dev daemon, lets QEMU go away (the guest powers off once rcS fails
-# without its virtio-fs share, or QEMU is SIGKILLed), then measures how long
-# the daemon takes to exit on SIGTERM. See README.md.
+# A daemon running QEMU must stop promptly on SIGTERM. Boots the System VM on
+# QEMU with a dev daemon, then either SIGKILLs QEMU 0.5 s into the boot
+# (`kill`: the boot must fail at once rather than wait out its budget) or
+# waits for dockerd (`ready`: the clean stop), and measures how long the
+# daemon takes to exit on SIGTERM. See README.md.
 #
-#   ARCBOX_QEMU_PATH=<qemu-system-aarch64> sigterm.sh <data-dir> poweroff|kill
+#   ARCBOX_QEMU_PATH=<qemu-system-aarch64> sigterm.sh <data-dir> kill|ready
 #
 # <data-dir> is a development data directory whose System VM assets are
 # prepared, not the ~/.arcbox of a running production daemon.
 set -euo pipefail
 : "${ARCBOX_QEMU_PATH:?set ARCBOX_QEMU_PATH to qemu-system-aarch64}"
 data=$(cd "${1:?data directory}" && pwd)
-mode=${2:?poweroff or kill}
+mode=${2:?kill or ready}
+case $mode in kill | ready) ;; *) echo "unknown mode $mode" >&2 && exit 2 ;; esac
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 cargo build -p arcbox-daemon -p arcbox-cli >&2
@@ -39,17 +41,22 @@ spawned=$(now)
 if [ "$mode" = kill ]; then
   sleep 0.5
   kill -9 "$pid"
+  while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
+  echo "QEMU spawned -> gone: $(since "$spawned" "$(now)")"
+  sleep 1
+else
+  until DOCKER_HOST=unix://$data/run/docker.sock docker version >/dev/null 2>&1; do
+    kill -0 "$daemon"
+    sleep 0.25
+  done
+  echo "QEMU spawned -> dockerd ready: $(since "$spawned" "$(now)")"
 fi
-while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
-gone=$(now)
-sleep 1
 target/debug/abctl daemon status --grpc-socket "$data/run/arcbox.sock" --data-dir "$data" |
   grep -E '^System (runtime|detail)' || true
 term=$(now)
 kill -TERM "$daemon"
 wait "$daemon"
 exited=$(now)
-echo "QEMU spawned -> gone: $(since "$spawned" "$gone")"
 echo "SIGTERM -> daemon exit: $(since "$term" "$exited")"
 if [ -n "$(qemu)" ]; then
   echo "QEMU left running" >&2
