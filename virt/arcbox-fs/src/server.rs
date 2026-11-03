@@ -4,12 +4,12 @@
 //! from the guest VM. On Darwin, the native VZ framework handles virtio-fs,
 //! so this is primarily used for Linux KVM.
 //!
-//! The [`FsServer`] implements [`arcbox_virtio::fs::FuseRequestHandler`] to
+//! The [`FsServer`] implements [`arcbox_virtio_fs::FuseRequestHandler`] to
 //! integrate with the VirtIO-FS device.
 
 use std::sync::Arc;
 
-use arcbox_virtio::fs::{FuseRequestHandler, FuseSession};
+use arcbox_virtio_fs::{FuseRequestHandler, FuseSession};
 
 use crate::FsConfig;
 use crate::dispatcher::{DispatcherConfig, FuseDispatcher};
@@ -172,9 +172,9 @@ impl FsServer {
 }
 
 impl FuseRequestHandler for FsServer {
-    fn handle_request(&self, request: &[u8]) -> arcbox_virtio::Result<Vec<u8>> {
+    fn handle_request(&self, request: &[u8]) -> arcbox_virtio_core::Result<Vec<u8>> {
         self.handle_request(request)
-            .map_err(|e| arcbox_virtio::VirtioError::DeviceError {
+            .map_err(|e| arcbox_virtio_core::VirtioError::DeviceError {
                 device: "fs".to_string(),
                 message: e.to_string(),
             })

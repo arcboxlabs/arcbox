@@ -845,7 +845,7 @@ impl FuseOutHeader {
     pub const fn error(unique: u64, errno: i32) -> Self {
         Self {
             len: Self::SIZE as u32,
-            error: -arcbox_virtio::fs::linux_errno(errno),
+            error: -arcbox_virtio_fs::linux_errno(errno),
             unique,
         }
     }
