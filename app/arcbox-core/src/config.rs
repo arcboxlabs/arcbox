@@ -671,9 +671,12 @@ mod tests {
         assert_eq!(config.profile, ArcboxProfile::Production);
         assert_eq!(config.vm.cpus, arcbox_hypervisor::default_vm_cpu_count());
         // Default memory is half of host RAM, clamped to [512, 16384] MB,
-        // and at most 4096 MB where the System VM boots on QEMU.
+        // and at most 4096 MB where the System VM boots on QEMU: an Apple
+        // silicon Mac without hardware virtualization.
         let half_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
-        if arcbox_hypervisor::host_virtualization().available || cfg!(not(target_os = "macos")) {
+        if arcbox_hypervisor::host_virtualization().available
+            || !cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        {
             assert_eq!(config.vm.memory_mb, half_mb);
         } else {
             assert_eq!(config.vm.memory_mb, half_mb.min(4096));

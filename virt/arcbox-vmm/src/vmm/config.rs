@@ -155,8 +155,9 @@ const QEMU_STARTUP_TIMEOUT_FACTOR: u32 = 2;
 /// execution), Hypervisor.framework (a custom VMM with manual vCPU
 /// execution), or QEMU's TCG software emulation, which needs no hardware
 /// virtualization. They are parallel, directly-chosen backends — the choice is
-/// not inferred from workload "intent" — except that a Mac without hardware
-/// virtualization boots QEMU whatever was chosen ([`Self::on_host`]). Every
+/// not inferred from workload "intent" — except that an Apple silicon Mac
+/// without hardware virtualization boots QEMU whatever was chosen
+/// ([`Self::on_host`]). Every
 /// backend can host amd64 workloads; the in-guest x86_64 translator follows
 /// the backend (VZ → Apple Rosetta, HV and QEMU → FEX) and is configured
 /// separately.

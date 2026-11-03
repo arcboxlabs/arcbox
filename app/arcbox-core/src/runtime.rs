@@ -675,8 +675,8 @@ impl Runtime {
     }
 
     /// Switches the System VM's hypervisor backend and restarts the VM so it
-    /// takes effect. On a Mac without hardware virtualization the restart
-    /// boots QEMU whatever the recorded backend
+    /// takes effect. On an Apple silicon Mac without hardware virtualization
+    /// the restart boots QEMU whatever the recorded backend
     /// ([`Self::effective_system_vm_backend`]).
     ///
     /// When the backend is unchanged this only ensures the System VM is running
@@ -695,8 +695,9 @@ impl Runtime {
     /// Returns an error if the backend cannot be applied or the VM cannot be
     /// restarted on the new backend; and, before recording anything or
     /// downloading boot assets, [`arcbox_vmm::VmmError::PlatformUnsupported`]
-    /// on a Linux host without KVM and `InvalidState` when the restart needs
-    /// a QEMU that is not configured.
+    /// when the host cannot run the backend (a Linux host without KVM, an
+    /// Intel Mac without hardware virtualization or asked for QEMU) and
+    /// `InvalidState` when the restart needs a QEMU that is not configured.
     pub async fn switch_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
         let _operation = self
             .storage_recovery
@@ -766,8 +767,9 @@ impl Runtime {
     /// `512..=host memory` MiB, the config file cannot be written, or the
     /// System VM fails to stop or boot; and, before writing the config or
     /// downloading boot assets, [`arcbox_vmm::VmmError::PlatformUnsupported`]
-    /// on a Linux host without KVM and `InvalidState` when the restart needs
-    /// a QEMU that is not configured.
+    /// when the host cannot run the System VM's backend
+    /// ([`Self::effective_system_vm_backend`]) and `InvalidState` when the
+    /// restart needs a QEMU that is not configured.
     pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
         let _operation = self
             .storage_recovery
