@@ -8,21 +8,25 @@
 //! Every descriptor QEMU needs is inherited at spawn (`process`), so it
 //! opens no socket of its own.
 //!
-//! virtio-fs and vsock come from vhost-user back-ends in the daemon. QEMU
-//! blocks in device realize until a back-end answers, so a device is only
-//! put on the command line together with the back-end serving it — see
-//! [`QemuMachine::initialize`].
+//! virtio-fs and vsock come from vhost-user back-ends in the daemon, one per
+//! shared directory and one for vsock, each serving one end of a socketpair
+//! whose other end QEMU inherits. QEMU blocks in device realize until a
+//! back-end answers, so each one starts in [`QemuMachine::initialize`],
+//! before QEMU, and stops with it.
 
 mod args;
 mod process;
 mod qmp;
 
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use arcbox_vhost_user::fs::{FsBackend, FsShare};
+use arcbox_virtio::vsock::vhost_user::VhostUserVsock;
 
 use super::darwin_net;
 use crate::error::{Result, VmmError};
@@ -48,6 +52,10 @@ pub struct QemuMachine {
     consoles: Option<[OwnedFd; 2]>,
     net_cancel: Option<tokio_util::sync::CancellationToken>,
     inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
+    /// The virtio-fs back-ends, one per shared directory.
+    shares: Vec<FsBackend>,
+    /// The vsock back-end every host connection into the guest goes through.
+    vsock: Option<VhostUserVsock>,
     process: Option<process::QemuProcess>,
     qmp: Option<qmp::Qmp>,
     /// Completed by the guest's power-off; see [`Self::wait_for_poweroff`].
@@ -88,6 +96,8 @@ impl QemuMachine {
             consoles: None,
             net_cancel: None,
             inbound_listener_manager: None,
+            shares: Vec::new(),
+            vsock: None,
             process: None,
             qmp: None,
             poweroff_rx: None,
@@ -145,25 +155,31 @@ impl QemuMachine {
             None
         };
 
-        // vhost-user attach point. Each back-end gets one end of a
-        // `stream_pair()` and starts serving it before `start` spawns QEMU,
-        // which blocks in device realize until the back-end answers: one
-        // virtio-fs back-end per `config.shared_dirs` entry
-        // (`arcbox_vhost_user::fs::FsShare::new(tag, path).spawn(stream)`),
-        // one vsock back-end for the guest CID. QEMU's end goes into
-        // `inherited` and its number into `shares` (an `args::FsShare`) or
-        // `vsock_fd`; the machine keeps each back-end's handle and stops it
-        // after QEMU. Neither back-end is wired yet, so the guest boots
-        // without them.
-        let shares: Vec<args::FsShare> = Vec::new();
-        let vsock_fd: Option<RawFd> = None;
-        if !self.config.shared_dirs.is_empty() || self.config.vsock {
-            tracing::warn!(
-                shares = self.config.shared_dirs.len(),
-                vsock = self.config.vsock,
-                "QEMU backend: no vhost-user back-ends yet; booting without virtio-fs and vsock"
-            );
+        // Each back-end serves before QEMU starts, which blocks in device
+        // realize until it answers. Like HV, a share has no read-only mode.
+        let mut shares = Vec::with_capacity(self.config.shared_dirs.len());
+        for dir in &self.config.shared_dirs {
+            let (ours, theirs) = stream_pair()?;
+            let backend = FsShare::new(&dir.tag, &dir.host_path)
+                .spawn(ours)
+                .map_err(|e| VmmError::Device(format!("virtio-fs share {}: {e}", dir.tag)))?;
+            self.shares.push(backend);
+            shares.push(args::FsShare {
+                tag: dir.tag.clone(),
+                chardev_fd: theirs.as_raw_fd(),
+            });
+            inherited.push(theirs);
         }
+        let vsock_fd = if self.config.vsock {
+            let (ours, theirs) = stream_pair()?;
+            let cid = u64::from(self.config.guest_cid.unwrap_or(3));
+            self.vsock = Some(VhostUserVsock::spawn(cid, ours)?);
+            let fd = theirs.as_raw_fd();
+            inherited.push(theirs);
+            Some(fd)
+        } else {
+            None
+        };
 
         let argv = args::qemu_args(&args::QemuArgs {
             kernel: &self.config.kernel_path,
@@ -291,6 +307,7 @@ impl QemuMachine {
         if let Some(qmp) = qmp {
             qmp.join();
         }
+        self.stop_backends();
         self.running.store(false, Ordering::SeqCst);
         // QEMU removes its pidfile on a clean exit only.
         let _ = std::fs::remove_file(&self.pidfile);
@@ -338,15 +355,35 @@ impl QemuMachine {
         self.reset_requested.store(false, Ordering::SeqCst);
     }
 
-    /// Opens a host-initiated vsock connection to `port` in the guest.
+    /// Disconnects every vhost-user back-end and waits for it. QEMU has
+    /// gone by then, so each one has usually finished already.
+    fn stop_backends(&mut self) {
+        for share in self.shares.drain(..) {
+            let tag = share.tag().to_owned();
+            if let Err(e) = share.stop() {
+                tracing::warn!(tag, error = %e, "virtio-fs back-end ended with an error");
+            }
+        }
+        if let Some(vsock) = self.vsock.take()
+            && let Err(e) = vsock.stop()
+        {
+            tracing::warn!(error = %e, "vsock back-end ended with an error");
+        }
+    }
+
+    /// Opens a host-initiated vsock connection to `port` in the guest and
+    /// returns the host end, which the caller owns. As on HV, the call
+    /// returns before the guest answers: a refused connection reads as EOF.
     ///
     /// # Errors
     ///
-    /// Always, until the vhost-user vsock back-end is wired in.
+    /// Returns an error when the machine has no running vsock back-end.
     pub fn connect_vsock(&self, port: u32) -> Result<RawFd> {
-        Err(VmmError::Unsupported(format!(
-            "vsock port {port}: the QEMU backend has no vsock device yet"
-        )))
+        let vsock = self
+            .vsock
+            .as_ref()
+            .ok_or_else(|| VmmError::invalid_state("QEMU vsock back-end is not running"))?;
+        Ok(vsock.connect_vsock(port)?.into_raw_fd())
     }
 
     /// Duplicates the host ends of `hvc0` and `hvc1` for the serial drain.
