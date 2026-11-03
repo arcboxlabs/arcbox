@@ -31,12 +31,14 @@ ready, warm `docker run`, a `python:3.13-slim` pull, `exec` and `logs`, an
 amd64 container through FEX, the agent's executable path in the guest, a
 guest reboot, and SIGTERM with no QEMU left after each restart. Set
 `ARCBOX_AGENT` to a musl build of this tree's agent to stage it over the
-boot assets' one. Results:
+boot assets' one. Without `ARCBOX_QEMU_PATH` the daemon installs the build
+`assets.lock` pins, so the run also covers the download. Results:
 `docs/logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md`.
 
 Both need an arcboxlabs/qemu build (the CPU carries `dic=off`).
 
-Needs: `qemu-system-aarch64` in `ARCBOX_QEMU_PATH`, brew's
+Needs: `qemu-system-aarch64` in `ARCBOX_QEMU_PATH` (optional for
+`acceptance.sh`), brew's
 `FiloSottile/musl-cross/musl-cross` for the guest benchmark, and network
 access to fetch Debian's `busybox-static` package (`guest/build.sh` pins its
 sha256; when Debian drops that version from its pool, take it from
