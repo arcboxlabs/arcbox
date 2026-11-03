@@ -253,7 +253,10 @@ child process, which nothing tears down when the daemon dies. QEMU
 `-pidfile` locks its pidfile for as long as it runs, so a lock holder on
 `run/qemu/*.pid` is certainly an orphaned QEMU (a stale file with no holder
 is only removed). `wait_for_resources` sends it SIGTERM, then SIGKILL,
-before it scans for disk-image holders. Unlike the XPC helpers below, the
+before it scans for disk-image holders. A QEMU that outlives SIGKILL, stuck
+in host I/O, keeps its pidfile for the next start, and the holder scan that
+follows waits for it like for any other holder. Unlike the XPC helpers
+below, the
 guest is already unreachable, so stopping it loses nothing a wait would
 save.
 

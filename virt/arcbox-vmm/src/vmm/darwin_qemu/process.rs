@@ -64,6 +64,13 @@ impl QemuProcess {
         let pid = posix_spawn(binary, args, fds, stderr_write.as_raw_fd())?;
         drop(stderr_write);
         tracing::info!(pid, binary = %binary.display(), "QEMU started");
+        // Until the reaper runs, nothing else would stop or reap the child.
+        let abandon = move || {
+            // SAFETY: `pid` is our unreaped child, so the number cannot have
+            // been reused.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            wait(pid);
+        };
 
         let stderr = Arc::new(Mutex::new(VecDeque::new()));
         let tail = Arc::clone(&stderr);
@@ -80,7 +87,8 @@ impl QemuProcess {
                         tail.push_back(line);
                     }
                 }
-            })?;
+            })
+            .inspect_err(|_| abandon())?;
 
         let exit = Arc::new((Mutex::new(None), Condvar::new()));
         let exited = Arc::clone(&exit);
@@ -95,7 +103,8 @@ impl QemuProcess {
                     *slot = Some(status);
                 }
                 cvar.notify_all();
-            })?;
+            })
+            .inspect_err(|_| abandon())?;
 
         Ok(Self {
             pid,
@@ -346,6 +355,9 @@ fn lock_holder(pidfile: &Path) -> Option<libc::pid_t> {
 /// removes the pidfiles. Call it at startup, before anything waits for
 /// `docker.img` to be released. Returns how many it stopped.
 ///
+/// A QEMU that outlives SIGKILL (stuck in host I/O) keeps its pidfile, so
+/// the next start finds it again, and is not counted.
+///
 /// The VM's guest state is lost, as at a power cut; its disks were last
 /// written by a QEMU that nothing could reach any more.
 #[must_use]
@@ -361,7 +373,6 @@ pub fn reap_orphaned_qemu(run_dir: &Path) -> usize {
         }
         if let Some(pid) = lock_holder(&pidfile) {
             tracing::warn!(pid, pidfile = %pidfile.display(), "stopping QEMU left by a previous daemon");
-            reaped += 1;
             for signal in [libc::SIGTERM, libc::SIGKILL] {
                 // SAFETY: `pid` holds the lock right now; a lock is
                 // released when its holder exits, so the holder is alive.
@@ -374,6 +385,11 @@ pub fn reap_orphaned_qemu(run_dir: &Path) -> usize {
                     break;
                 }
             }
+            if let Some(pid) = lock_holder(&pidfile) {
+                tracing::error!(pid, pidfile = %pidfile.display(), "QEMU left by a previous daemon survived SIGKILL; keeping its pidfile");
+                continue;
+            }
+            reaped += 1;
         }
         let _ = std::fs::remove_file(&pidfile);
     }
