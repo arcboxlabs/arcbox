@@ -369,7 +369,15 @@ impl Vmm {
             event_loop.start()?;
         }
 
-        self.running.store(true, Ordering::SeqCst);
+        // QEMU raises the flag before it spawns the child, whose exit and
+        // QMP SHUTDOWN may already have lowered it again by now.
+        #[cfg(target_os = "macos")]
+        let flag_owned_by_machine = matches!(self.machine, Machine::Qemu(_));
+        #[cfg(not(target_os = "macos"))]
+        let flag_owned_by_machine = false;
+        if !flag_owned_by_machine {
+            self.running.store(true, Ordering::SeqCst);
+        }
         self.state = VmmState::Running;
 
         tracing::info!("VMM started");
