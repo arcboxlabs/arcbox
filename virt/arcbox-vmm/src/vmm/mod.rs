@@ -129,11 +129,12 @@ pub struct Vmm {
 /// The machine a macOS [`Vmm`] drives, chosen by [`VmmConfig::backend`].
 ///
 /// VZ keeps its state on the `Vmm` itself (`darwin_vm` and the network
-/// fields); HV owns its machine.
+/// fields); the other backends own theirs.
 #[cfg(target_os = "macos")]
 enum Machine {
     Vz,
     Hv(Box<darwin_hv::HvMachine>),
+    Qemu(Box<darwin_qemu::QemuMachine>),
 }
 
 impl Vmm {
@@ -178,11 +179,10 @@ impl Vmm {
                 config.clone(),
                 Arc::clone(&running),
             ))),
-            VmBackend::Qemu => {
-                return Err(VmmError::Unsupported(
-                    "the QEMU backend has no machine yet".to_string(),
-                ));
-            }
+            VmBackend::Qemu => Machine::Qemu(Box::new(darwin_qemu::QemuMachine::new(
+                config.clone(),
+                Arc::clone(&running),
+            )?)),
         };
 
         Ok(Self {
@@ -248,6 +248,8 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.shared_dns = Some(dns),
             Machine::Hv(ref mut hv) => hv.set_shared_dns(dns),
+            // No NIC yet.
+            Machine::Qemu(_) => {}
         }
     }
 
@@ -260,6 +262,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.proxy_env = Some(env),
             Machine::Hv(ref mut hv) => hv.set_proxy_env(env),
+            Machine::Qemu(_) => {}
         }
     }
 
@@ -275,6 +278,8 @@ impl Vmm {
                 .as_ref()
                 .and_then(|v| v.interface_info().cloned()),
             Machine::Hv(ref hv) => hv.vmnet_interface_info(),
+            // QEMU has no bridge NIC.
+            Machine::Qemu(_) => None,
         }
     }
 
@@ -310,6 +315,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.initialize_darwin()?,
                 Machine::Hv(ref mut hv) => hv.initialize()?,
+                Machine::Qemu(ref mut qemu) => qemu.initialize()?,
             }
         }
 
@@ -349,6 +355,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.start_darwin_vm()?,
                 Machine::Hv(ref mut hv) => hv.start()?,
+                Machine::Qemu(ref mut qemu) => qemu.start()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -390,6 +397,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.pause_darwin_vm()?,
                 Machine::Hv(ref hv) => hv.pause()?,
+                Machine::Qemu(ref qemu) => qemu.pause()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -422,6 +430,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.resume_darwin_vm()?,
                 Machine::Hv(ref hv) => hv.resume()?,
+                Machine::Qemu(ref qemu) => qemu.resume()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -460,6 +469,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.stop_darwin_vm()?,
                 Machine::Hv(ref mut hv) => hv.stop()?,
+                Machine::Qemu(ref mut qemu) => qemu.stop(),
             }
         }
         #[cfg(target_os = "linux")]
@@ -481,8 +491,8 @@ impl Vmm {
     /// Returns whether the guest requested a reboot (PSCI SYSTEM_RESET) rather
     /// than a power-off. The lifecycle driver polls this after the VM stops to
     /// choose between tearing the machine down and rebooting it via
-    /// [`Vmm::reboot`]. Always `false` on non-macOS backends (only the HV path
-    /// tracks the flag).
+    /// [`Vmm::reboot`]. Always `false` on VZ and off macOS (only the HV and
+    /// QEMU paths track the flag).
     #[must_use]
     pub fn reset_requested(&self) -> bool {
         #[cfg(target_os = "macos")]
@@ -490,6 +500,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => false,
                 Machine::Hv(ref hv) => hv.reset_requested(),
+                Machine::Qemu(ref qemu) => qemu.reset_requested(),
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -512,6 +523,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => {}
             Machine::Hv(ref hv) => hv.clear_reset_requested(),
+            Machine::Qemu(ref qemu) => qemu.clear_reset_requested(),
         }
         self.stop()?;
         // `initialize()` requires the Created state; `stop()` left us Stopped
@@ -561,7 +573,7 @@ impl Vmm {
     pub fn dax_stats(&self, share_idx: usize) -> Option<crate::dax::DaxStats> {
         match self.machine {
             Machine::Hv(ref hv) => hv.dax_stats(share_idx),
-            Machine::Vz => None,
+            Machine::Vz | Machine::Qemu(_) => None,
         }
     }
 
@@ -595,7 +607,7 @@ impl Vmm {
             #[cfg(target_os = "macos")]
             vcpus: match self.machine {
                 Machine::Hv(ref hv) => hv.vcpu_snapshots(),
-                Machine::Vz => Vec::new(),
+                Machine::Vz | Machine::Qemu(_) => Vec::new(),
             },
             #[cfg(not(target_os = "macos"))]
             vcpus: Vec::new(),
@@ -825,7 +837,8 @@ impl Drop for Vmm {
             let skip = self.skip_hypervisor_stop
                 && match self.machine {
                     Machine::Vz => true,
-                    Machine::Hv(_) => false,
+                    // The QEMU child must be reaped whatever the guest did.
+                    Machine::Hv(_) | Machine::Qemu(_) => false,
                 };
             #[cfg(not(target_os = "macos"))]
             let skip = self.skip_hypervisor_stop;
