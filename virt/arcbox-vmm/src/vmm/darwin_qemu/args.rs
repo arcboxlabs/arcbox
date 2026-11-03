@@ -10,6 +10,9 @@ use std::ffi::OsString;
 use std::os::fd::RawFd;
 use std::path::Path;
 
+// Each vhost-user-fs device's queue layout is the back-end's.
+use arcbox_vhost_user::fs::{QUEUE_SIZE as FS_QUEUE_SIZE, REQUEST_QUEUES as FS_REQUEST_QUEUES};
+
 use crate::vmm::BlockDeviceConfig;
 
 /// PCI slot of NIC1 (`eth0`).
@@ -42,13 +45,6 @@ const LAST_SLOT: u8 = 0x1f;
 /// held before: the agent executed from the `arcbox` share runs stale code.
 /// [`cpu_check_args`] lets the machine refuse a QEMU without the property.
 const CPU: &str = "max,pauth-impdef=on,dic=off";
-
-/// Virtqueue size of each vhost-user-fs device. Must equal the back-end's
-/// `arcbox_vhost_user::fs::QUEUE_SIZE`.
-const FS_QUEUE_SIZE: u16 = 1024;
-/// Request queues of each vhost-user-fs device. Must equal the back-end's
-/// `arcbox_vhost_user::fs::REQUEST_QUEUES`.
-const FS_REQUEST_QUEUES: u16 = 1;
 
 /// A virtio-fs share served by a vhost-user back-end over `chardev_fd`.
 #[derive(Debug, Clone)]
