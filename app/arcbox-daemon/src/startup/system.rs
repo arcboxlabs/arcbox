@@ -18,11 +18,11 @@ pub(super) async fn run(
     supervise(&ctx, &runtime, || initialize(&ctx, &runtime, assets)).await
 }
 
-/// This host cannot run the System VM. A property of the host, not a fault,
-/// so it is reported in the System status rather than as an error event.
-/// Startup still waits for a storage recovery like after any other failure:
-/// a Mac fails again at the probe, while a Linux host can pass it once the
-/// KVM module loads.
+/// This host cannot run the System VM: a Linux host without KVM, since a Mac
+/// without hardware virtualization boots it on QEMU instead. A property of
+/// the host, not a fault, so it is reported in the System status rather than
+/// as an error event. Startup still waits for a storage recovery like after
+/// any other failure: the host can pass the probe once the KVM module loads.
 #[derive(Debug)]
 struct NoHardwareVirtualization(&'static str);
 
@@ -132,13 +132,17 @@ async fn initialize(
     assets: super::assets::PreparedAssets,
 ) -> Result<SystemServiceHandles> {
     // Checked before any asset download or disk image work it would waste.
-    let host = arcbox_engine::host_virtualization();
-    if !host.available {
-        // This Mac can only emulate the System VM, so it gets the pinned QEMU
-        // build, downloaded only here. The VM still cannot start until the
-        // QEMU backend lands.
+    // A Mac without hardware virtualization still boots it, on QEMU.
+    if runtime.effective_system_vm_backend().is_none() {
+        return Err(NoHardwareVirtualization(arcbox_engine::host_virtualization().reason).into());
+    }
+    // QEMU gets the pinned build, downloaded only here, unless the user names
+    // their own binary. The boot still takes it from `[qemu] path` or
+    // `ARCBOX_QEMU_PATH` (`arcbox_core::qemu::binary`), not from this install.
+    if runtime.vm_lifecycle().effective_backend() == arcbox_core::VmBackend::Qemu
+        && runtime.config().qemu.path.is_none()
+    {
         super::qemu::ensure(ctx, runtime.config()).await?;
-        return Err(NoHardwareVirtualization(host.reason).into());
     }
     assets
         .prepare_system(runtime.config(), &ctx.setup_state)
@@ -168,7 +172,11 @@ async fn initialize(
     );
     anyhow::ensure!(!ctx.shutdown.is_cancelled(), "System startup cancelled");
 
-    if runtime.system_vm_backend().supports_nested_virt() {
+    if runtime
+        .vm_lifecycle()
+        .effective_backend()
+        .supports_nested_virt()
+    {
         arcbox_computer::cleanup::initialize(runtime.as_ref())
             .await
             .context("Failed to initialize sandbox cleanup")?;

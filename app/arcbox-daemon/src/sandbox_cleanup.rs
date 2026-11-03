@@ -56,7 +56,7 @@ struct RuntimeStream {
 
 impl CleanupStream for RuntimeStream {
     fn backend(&self) -> VmBackend {
-        self.runtime.system_vm_backend()
+        self.runtime.vm_lifecycle().effective_backend()
     }
 
     async fn watch(&self) -> EngineError {

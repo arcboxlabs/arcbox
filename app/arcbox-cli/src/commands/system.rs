@@ -43,6 +43,9 @@ pub enum BackendArg {
     Hv,
     /// Virtualization.framework — Apple-managed execution (default).
     Vz,
+    /// QEMU TCG emulation — slow; what a Mac without hardware
+    /// virtualization boots whatever is chosen.
+    Qemu,
 }
 
 impl From<BackendArg> for SystemVmBackend {
@@ -50,6 +53,7 @@ impl From<BackendArg> for SystemVmBackend {
         match arg {
             BackendArg::Hv => Self::Hv,
             BackendArg::Vz => Self::Vz,
+            BackendArg::Qemu => Self::Qemu,
         }
     }
 }
