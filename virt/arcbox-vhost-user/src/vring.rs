@@ -303,13 +303,15 @@ impl Vring {
         }
     }
 
-    /// Back to the state right after connection setup. Notifier clones the
-    /// device holds stay attached and fire again once QEMU installs a new
-    /// call descriptor.
+    /// Back to the state right after connection setup, except for the call
+    /// descriptor. When the device restarts, QEMU re-sends it only for queues
+    /// whose MSI-X vector the guest has unmasked. For a masked vector, the
+    /// completions must keep going to the masked notifier installed before,
+    /// which QEMU reads when the guest unmasks the vector. libvhost-user and
+    /// rust-vmm keep it across `RESET_DEVICE` too.
     pub(crate) fn reset(&mut self) -> Option<OwnedFd> {
         let kick = self.kick.take();
         let call = std::mem::take(&mut self.call);
-        let _ = call.replace(None);
         *self = Self {
             call,
             ..Self::new(self.index, self.max_size)
@@ -450,13 +452,15 @@ mod tests {
         assert_eq!(pending(&guest_rd), 8);
         assert_eq!(pending(&masked_rd), 8);
 
-        // A reset detaches the descriptor but keeps the clone attached.
+        // A reset keeps the descriptor, which QEMU does not re-send for a
+        // masked vector, and the clone follows the next one.
         let _ = vring.reset();
         kept.notify();
-        assert_eq!(pending(&guest_rd), 8);
+        assert_eq!(pending(&guest_rd), 16);
         let (again_rd, again_wr) = pipe();
         vring.set_call(Some(again_wr)).unwrap();
         kept.notify();
         assert_eq!(pending(&again_rd), 8);
+        assert_eq!(pending(&guest_rd), 16);
     }
 }
