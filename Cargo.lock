@@ -1409,6 +1409,7 @@ dependencies = [
  "arcbox-hypervisor",
  "arcbox-net",
  "arcbox-net-inject",
+ "arcbox-vhost-user",
  "arcbox-virtio",
  "arcbox-vm-driver",
  "arcbox-vmnet",

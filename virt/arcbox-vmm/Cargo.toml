@@ -36,6 +36,7 @@ crossbeam-channel = "0.5"
 arcbox-fakeip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+arcbox-vhost-user.workspace = true
 arcbox-vm-driver = { workspace = true }
 arcbox-vmnet = { workspace = true }
 async-trait = { workspace = true }
