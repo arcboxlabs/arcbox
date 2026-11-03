@@ -21,8 +21,11 @@ guest unchanged.
   (`VmBackend::arch_unsupported`): `qemu-system-aarch64` cannot boot its
   x86_64 guest assets. Callers boot with the result and never record it,
   and a VZ or HV start error never triggers it. `Runtime::effective_system_vm_backend`
-  reports it (`effective_backend` = QEMU); `SetSystemVmBackend(QEMU)` is
-  accepted.
+  reports it (`effective_backend` = QEMU), or why the host cannot run its
+  backend (`VmBackend::require_host`: the architecture first, then the
+  hardware probe), which startup puts in the System status and
+  `SetSystemVmBackend` returns as `PlatformUnsupported`.
+  `SetSystemVmBackend(QEMU)` is accepted.
 - `virt/arcbox-vmm/src/vmm/darwin_qemu/`: the command line as a pure
   function (`args.rs`), the child process (`process.rs`: `posix_spawn` with
   `POSIX_SPAWN_CLOEXEC_DEFAULT`, its own process group, a pidfile under

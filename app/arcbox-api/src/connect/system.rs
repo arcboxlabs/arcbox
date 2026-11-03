@@ -678,7 +678,7 @@ impl pb::SystemService for SystemServiceImpl {
         // Publish on failure too: the restart can fail after the switch was
         // recorded.
         self.setup_state
-            .set_effective_backend(runtime.effective_system_vm_backend());
+            .set_effective_backend(runtime.effective_system_vm_backend().ok());
         switched.map_err(RestartError)?;
         let info = pb::SystemVmBackendInfo {
             backend: backend_to_proto(runtime.system_vm_backend()).into(),
