@@ -9,6 +9,7 @@ use std::sync::Arc;
 use super::SharedRuntime;
 use crate::ApiError;
 
+use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::{ConnectRuntimeExt as _, ContextExt as _};
 use arcbox_computer::cleanup as sandbox_cleanup;
 use arcbox_computer::locks::SandboxOperationLocks;
@@ -49,6 +50,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -78,6 +80,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
                 .sandbox_dns_name(&sandbox_id)
                 .map_err(|error| ConnectError::invalid_argument(error.to_string()))?;
         }
+        runtime.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_restore(req)
@@ -104,6 +107,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -122,6 +126,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent

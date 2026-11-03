@@ -9,6 +9,7 @@ use buffa_types::google::protobuf::Empty;
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult};
 
 use super::SharedRuntime;
+use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::{ConnectRuntimeExt as _, ContextExt as _};
 use crate::ApiError;
 
@@ -46,6 +47,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -71,6 +73,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -95,6 +98,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -114,6 +118,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -134,6 +139,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent

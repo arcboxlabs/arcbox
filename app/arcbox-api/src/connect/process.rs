@@ -14,6 +14,7 @@ use tokio_stream::StreamExt as _;
 use super::SharedRuntime;
 use crate::ApiError;
 
+use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::sandbox_resume;
 use super::{ConnectRuntimeExt as _, ContextExt as _, with_keepalive};
 use arcbox_computer::SandboxHost as _;
@@ -81,7 +82,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
     ) -> ServiceResult<pb::Execution> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let execution = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -109,6 +110,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let rx = agent
@@ -130,7 +132,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
     ) -> ServiceResult<pb::StdinStatus> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let status = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -162,7 +164,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
             // truncated body), so it must fail the RPC rather than be read
             // as a clean finish — only `None` means the client is done.
             let req = item?.to_owned_message();
-            let runtime = self.runtime.ready()?;
+            let runtime = self.runtime.ready()?.sandbox_capable()?;
             let status = sandbox_resume::with_auto_resume(
                 runtime,
                 &self.operations,
@@ -194,6 +196,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let status = agent
@@ -212,6 +215,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
@@ -230,6 +234,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let mut agent = self
             .runtime
             .ready_for_write(&machine)?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
@@ -248,6 +253,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let execution = agent
@@ -269,6 +275,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let listing = agent
@@ -288,7 +295,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         // Resolve the proto's "0 = daemon default" and cap the budget here,
         // so the guest always enforces an explicit, bounded wait.
         req.timeout_seconds = resolve_wait_for_port_budget(req.timeout_seconds);
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,

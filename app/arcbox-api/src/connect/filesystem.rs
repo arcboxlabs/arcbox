@@ -14,6 +14,7 @@ use tokio_stream::StreamExt as _;
 use super::{SharedRuntime, stream_input};
 use crate::ApiError;
 
+use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::sandbox_resume;
 use super::{ConnectRuntimeExt as _, ContextExt as _, with_keepalive};
 use arcbox_computer::SandboxHost as _;
@@ -54,7 +55,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<ServiceStream<FileChunk>> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
 
         // Optimistic first attempt. The guest's verdict arrives as the first
         // stream frame, so peek it: a SANDBOX_PAUSED answer becomes one
@@ -112,7 +113,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             }
         };
 
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         // A paused sandbox must be handled before any chunk is consumed —
         // the input stream cannot be replayed for a retry.
         sandbox_resume::ensure_resumed_for_write(
@@ -144,7 +145,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<pb::FileStat> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let stat = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -170,7 +171,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<pb::ListDirResponse> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let listing = sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -196,7 +197,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<Empty> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -222,7 +223,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<Empty> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -248,7 +249,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<Empty> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         sandbox_resume::with_auto_resume(
             runtime,
             &self.operations,
@@ -274,7 +275,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
     ) -> ServiceResult<ServiceStream<pb::WatchDirResponse>> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
 
         // Optimistic first attempt, mirroring read_file: the guest confirms
         // an established watch with an immediate keepalive frame, so peeking
