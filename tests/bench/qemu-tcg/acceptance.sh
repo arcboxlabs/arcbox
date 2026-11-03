@@ -31,8 +31,9 @@ daemon=
 
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
 since() { perl -e 'printf "%.2f s", $ARGV[1] - $ARGV[0]' "$1" "$2"; }
-qemu_bin=${ARCBOX_QEMU_PATH:-$data/runtime/qemu/}
-qemu() { pgrep -f "$qemu_bin" | head -1 || true; }
+# This data directory's System VM, whichever binary runs it: the daemon
+# gives every QEMU it boots a pidfile under <data-dir>/run/qemu.
+qemu() { pgrep -f -- "-pidfile $data/run/qemu/" | head -1 || true; }
 fail() {
   echo "FAIL: $*" >&2
   failures=$((failures + 1))
@@ -113,7 +114,7 @@ guest_agent() {
 }
 
 if [ -n "$(qemu)" ]; then
-  echo "a QEMU from $qemu_bin is already running" >&2
+  echo "a QEMU for $data is already running" >&2
   exit 1
 fi
 echo "kern.hv_support: $(sysctl -n kern.hv_support 2>/dev/null || echo absent)"
