@@ -22,12 +22,34 @@ const MAX_DISKS: u8 = 4;
 const SERIAL_SLOT: u8 = FIRST_DISK_SLOT + MAX_DISKS;
 /// PCI slot of the entropy device.
 const RNG_SLOT: u8 = SERIAL_SLOT + 1;
+/// PCI slot of the vhost-user vsock device.
+const VSOCK_SLOT: u8 = RNG_SLOT + 1;
+/// PCI slot of the first vhost-user-fs share; the rest follow in order.
+const FIRST_SHARE_SLOT: u8 = VSOCK_SLOT + 1;
+/// The root bus ends at slot 0x1f.
+const LAST_SLOT: u8 = 0x1f;
 
 /// The guest CPU: its model and every property, in this one place.
 ///
 /// QARMA5 pointer authentication costs every kernel function entry and
 /// exit under TCG; the implementation-defined algorithm is far cheaper.
 const CPU: &str = "max,pauth-impdef=on";
+
+/// Virtqueue size of each vhost-user-fs device. Must equal the back-end's
+/// `arcbox_vhost_user::fs::QUEUE_SIZE`.
+const FS_QUEUE_SIZE: u16 = 1024;
+/// Request queues of each vhost-user-fs device. Must equal the back-end's
+/// `arcbox_vhost_user::fs::REQUEST_QUEUES`.
+const FS_REQUEST_QUEUES: u16 = 1;
+
+/// A virtio-fs share served by a vhost-user back-end over `chardev_fd`.
+#[derive(Debug, Clone)]
+pub(super) struct FsShare {
+    /// The tag the guest mounts.
+    pub(super) tag: String,
+    /// QEMU's end of the back-end's socketpair.
+    pub(super) chardev_fd: RawFd,
+}
 
 /// What the command line names. Every fd is one QEMU inherits at that
 /// number.
@@ -47,6 +69,9 @@ pub(super) struct QemuArgs<'a> {
     pub(super) net_fd: Option<RawFd>,
     /// In guest order: `vda`, `vdb`, ...
     pub(super) disks: &'a [BlockDeviceConfig],
+    /// QEMU's end of the vhost-user vsock back-end's socketpair.
+    pub(super) vsock_fd: Option<RawFd>,
+    pub(super) shares: &'a [FsShare],
 }
 
 /// Renders `args` as `qemu-system-aarch64`'s argument vector.
@@ -61,6 +86,13 @@ pub(super) fn qemu_args(args: &QemuArgs<'_>) -> Result<Vec<OsString>, String> {
             args.disks.len()
         ));
     }
+    if args.shares.len() > usize::from(LAST_SLOT - FIRST_SHARE_SLOT + 1) {
+        return Err(format!(
+            "too many virtio-fs shares for the QEMU backend: {}",
+            args.shares.len()
+        ));
+    }
+
     let mut out = Vec::new();
     // Guest RAM is shareable POSIX memory so vhost-user back-ends can map it;
     // TCG runs on it as fast as on anonymous memory.
@@ -155,6 +187,30 @@ pub(super) fn qemu_args(args: &QemuArgs<'_>) -> Result<Vec<OsString>, String> {
         "-device",
         format!("virtio-rng-pci,addr={RNG_SLOT:#04x}"),
     );
+    if let Some(fd) = args.vsock_fd {
+        flag(&mut out, "-chardev", format!("socket,id=vsock0,fd={fd}"));
+        flag(
+            &mut out,
+            "-device",
+            format!("vhost-user-vsock-pci,chardev=vsock0,addr={VSOCK_SLOT:#04x}"),
+        );
+    }
+    for (index, (slot, share)) in (FIRST_SHARE_SLOT..).zip(args.shares).enumerate() {
+        flag(
+            &mut out,
+            "-chardev",
+            format!("socket,id=fs{index},fd={}", share.chardev_fd),
+        );
+        flag(
+            &mut out,
+            "-device",
+            format!(
+                "vhost-user-fs-pci,chardev=fs{index},tag={},queue-size={FS_QUEUE_SIZE},\
+                 num-request-queues={FS_REQUEST_QUEUES},addr={slot:#04x}",
+                escape_option(std::ffi::OsStr::new(&share.tag)).to_string_lossy()
+            ),
+        );
+    }
     Ok(out)
 }
 
@@ -205,7 +261,7 @@ mod tests {
             .collect()
     }
 
-    fn system_vm(disks: &[BlockDeviceConfig]) -> QemuArgs<'_> {
+    fn system_vm<'a>(disks: &'a [BlockDeviceConfig], shares: &'a [FsShare]) -> QemuArgs<'a> {
         QemuArgs {
             kernel: Path::new("/boot/kernel"),
             initrd: None,
@@ -217,6 +273,8 @@ mod tests {
             console_fds: [8, 9],
             net_fd: Some(10),
             disks,
+            vsock_fd: Some(11),
+            shares,
         }
     }
 
@@ -227,7 +285,7 @@ mod tests {
             disk("/data/docker.img", false),
             disk("/data/docker-meta.img", false),
         ];
-        let argv = render(&system_vm(&disks));
+        let argv = render(&system_vm(&disks, &[]));
         assert_eq!(
             values(&argv, "-drive"),
             [
@@ -258,13 +316,23 @@ mod tests {
             disk("/c", false),
             disk("/d", false),
         ];
-        let argv = render(&system_vm(&disks));
+        let shares: Vec<_> = (0..3)
+            .map(|i| FsShare {
+                tag: format!("share{i}"),
+                chardev_fd: 20 + i,
+            })
+            .collect();
+        let argv = render(&system_vm(&disks, &shares));
         let mut slots: Vec<_> = values(&argv, "-device")
             .into_iter()
             .filter_map(|d| d.split(",addr=").nth(1))
             .collect();
         let count = slots.len();
-        assert_eq!(count, 1 + 4 + 1 + 1, "net, disks, serial, rng");
+        assert_eq!(
+            count,
+            1 + 4 + 1 + 1 + 1 + 3,
+            "net, disks, serial, rng, vsock, shares"
+        );
         slots.sort_unstable();
         slots.dedup();
         assert_eq!(slots.len(), count);
@@ -272,13 +340,19 @@ mod tests {
 
     #[test]
     fn inherited_fds_are_named_where_qemu_expects_them() {
-        let argv = render(&system_vm(&[]));
+        let shares = [FsShare {
+            tag: "arcbox".into(),
+            chardev_fd: 12,
+        }];
+        let argv = render(&system_vm(&[], &shares));
         assert_eq!(
             values(&argv, "-chardev"),
             [
                 "socket,id=qmp,fd=7",
                 "socket,id=hvc0,fd=8",
                 "socket,id=hvc1,fd=9",
+                "socket,id=vsock0,fd=11",
+                "socket,id=fs0,fd=12",
             ]
         );
         assert_eq!(
@@ -288,11 +362,15 @@ mod tests {
         let devices = values(&argv, "-device");
         assert!(devices.contains(&"virtconsole,bus=serial0.0,nr=0,chardev=hvc0"));
         assert!(devices.contains(&"virtconsole,bus=serial0.0,nr=1,chardev=hvc1"));
+        assert!(devices.contains(&"vhost-user-vsock-pci,chardev=vsock0,addr=0x08"));
+        assert!(
+            devices.contains(&"vhost-user-fs-pci,chardev=fs0,tag=arcbox,queue-size=1024,num-request-queues=1,addr=0x09")
+        );
     }
 
     #[test]
     fn guest_ram_is_shareable_memory_of_the_configured_size() {
-        let argv = render(&system_vm(&[]));
+        let argv = render(&system_vm(&[], &[]));
         assert_eq!(
             values(&argv, "-object"),
             ["memory-backend-shm,id=ram,size=4096M,share=on"]
@@ -307,7 +385,7 @@ mod tests {
 
     #[test]
     fn kernel_cmdline_pidfile_and_reset_behaviour() {
-        let argv = render(&system_vm(&[]));
+        let argv = render(&system_vm(&[], &[]));
         assert_eq!(values(&argv, "-kernel"), ["/boot/kernel"]);
         assert_eq!(values(&argv, "-append"), ["console=hvc0 root=/dev/vda ro"]);
         assert_eq!(values(&argv, "-pidfile"), ["/data/run/qemu/vm.pid"]);
@@ -317,7 +395,7 @@ mod tests {
 
         let with_initrd = QemuArgs {
             initrd: Some(Path::new("/boot/initrd")),
-            ..system_vm(&[])
+            ..system_vm(&[], &[])
         };
         assert_eq!(values(&render(&with_initrd), "-initrd"), ["/boot/initrd"]);
     }
@@ -326,12 +404,12 @@ mod tests {
     /// the QEMU ArcBox ships has no firmware directory.
     #[test]
     fn nic_skips_the_option_rom() {
-        let argv = render(&system_vm(&[]));
+        let argv = render(&system_vm(&[], &[]));
         assert!(
             values(&argv, "-device").contains(&"virtio-net-pci,netdev=net0,romfile=,addr=0x01")
         );
 
-        let mut offline = system_vm(&[]);
+        let mut offline = system_vm(&[], &[]);
         offline.net_fd = None;
         let argv = render(&offline);
         assert!(values(&argv, "-netdev").is_empty());
@@ -347,7 +425,7 @@ mod tests {
     #[test]
     fn commas_in_paths_are_escaped() {
         let disks = [disk("/Users/a,b/docker.img", false)];
-        let argv = render(&system_vm(&disks));
+        let argv = render(&system_vm(&disks, &[]));
         assert_eq!(
             values(&argv, "-drive"),
             ["file=/Users/a,,b/docker.img,if=none,id=disk0,format=raw,discard=unmap"]
@@ -357,6 +435,6 @@ mod tests {
     #[test]
     fn too_many_disks_is_an_error() {
         let disks: Vec<_> = (0..5).map(|i| disk(&format!("/d{i}"), false)).collect();
-        assert!(qemu_args(&system_vm(&disks)).is_err());
+        assert!(qemu_args(&system_vm(&disks, &[])).is_err());
     }
 }
