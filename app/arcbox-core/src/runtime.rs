@@ -625,13 +625,16 @@ impl Runtime {
     }
 
     /// The backend the System VM boots with on this host: the configured
-    /// one, QEMU on a Mac without hardware virtualization
-    /// ([`arcbox_vmm::VmBackend::on_host`]), and none on a Linux host
-    /// without KVM.
+    /// one, QEMU on an Apple silicon Mac without hardware virtualization
+    /// ([`arcbox_vmm::VmBackend::on_host`]), and none when the host cannot
+    /// run it (a Linux host without KVM, an Intel Mac without hardware
+    /// virtualization or configured for QEMU).
     #[must_use]
     pub fn effective_system_vm_backend(&self) -> Option<arcbox_vmm::VmBackend> {
         let backend = self.vm_lifecycle.effective_backend();
-        (!backend.needs_hardware_virtualization() || arcbox_engine::host_virtualization().available)
+        (backend.arch_unsupported().is_none()
+            && (!backend.needs_hardware_virtualization()
+                || arcbox_engine::host_virtualization().available))
             .then_some(backend)
     }
 
@@ -639,6 +642,9 @@ impl Runtime {
     /// the VM manager the QEMU it runs when `backend` is QEMU. Checked before
     /// anything is recorded, written or downloaded.
     async fn prepare_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
+        if let Some(reason) = backend.arch_unsupported() {
+            return Err(arcbox_vmm::VmmError::PlatformUnsupported(reason).into());
+        }
         if backend.needs_hardware_virtualization() {
             arcbox_engine::host_virtualization()
                 .require()
