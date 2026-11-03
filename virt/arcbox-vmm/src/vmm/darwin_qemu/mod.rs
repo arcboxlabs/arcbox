@@ -231,7 +231,15 @@ impl QemuMachine {
                 Ok(())
             }
             Err(e) => {
-                let stderr = process.terminate(|| {});
+                let stderr = match process.terminate(|| {}) {
+                    Ok(stderr) => stderr,
+                    Err(process) => {
+                        // `stop` tries again; until it succeeds the run
+                        // keeps its pidfile.
+                        self.process = Some(process);
+                        "QEMU survived SIGKILL".to_string()
+                    }
+                };
                 self.running.store(false, Ordering::SeqCst);
                 Err(VmmError::Device(format!(
                     "QEMU failed to start ({e}): {stderr}"
@@ -260,14 +268,25 @@ impl QemuMachine {
     /// Ends QEMU — `quit`, then SIGTERM, then SIGKILL — and releases every
     /// host resource of the run. A guest that already shut down leaves an
     /// exited process, which only needs reaping.
-    pub fn stop(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when QEMU outlives SIGKILL, stuck in host I/O. The
+    /// machine then keeps the process, its QMP session and its pidfile, so
+    /// a later stop tries again.
+    pub fn stop(&mut self) -> Result<()> {
         let qmp = self.qmp.take();
         if let Some(process) = self.process.take() {
-            let _ = process.terminate(|| {
+            let terminated = process.terminate(|| {
                 if let Some(qmp) = &qmp {
                     let _ = qmp.execute("quit");
                 }
             });
+            if let Err(process) = terminated {
+                self.process = Some(process);
+                self.qmp = qmp;
+                return Err(VmmError::Device("QEMU survived SIGKILL".into()));
+            }
         }
         if let Some(qmp) = qmp {
             qmp.join();
@@ -280,6 +299,7 @@ impl QemuMachine {
         }
         self.consoles = None;
         self.launch = None;
+        Ok(())
     }
 
     /// Waits for the guest's power-off. `running` is whether the owner

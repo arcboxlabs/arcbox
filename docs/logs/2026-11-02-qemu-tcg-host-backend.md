@@ -27,7 +27,8 @@ guest unchanged.
   `run/qemu/`), QMP (`qmp.rs`: `SHUTDOWN` with `guest-shutdown` completes a
   graceful stop, `guest-reset` flags the in-place reboot, an unrequested
   `STOP` is logged), and stop (`quit`, then SIGTERM, then SIGKILL, 5 s
-  apart). Snapshots return `Unsupported`.
+  apart; a QEMU that outlives SIGKILL fails the stop and stays tracked,
+  pidfile included, for the next attempt). Snapshots return `Unsupported`.
 - Devices: NIC1 is the VZ frame socketpair (`darwin_net::GuestNic`, shared
   with VZ) on `-netdev dgram,local.type=fd`; no NIC2, vmnet or Rosetta.
   `hvc0`/`hvc1` are two `virtconsole` ports whose socketpairs feed the
