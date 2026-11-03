@@ -75,8 +75,9 @@ and with Chrome's team and identifier substituted it accepted Chrome's
 
 ## Follow-ups
 
-- `assets.lock` names no build until `arcboxlabs/qemu` v0.1.0 is signed,
-  notarized and published; fill in `version` and `arch.arm64.sha256` then.
+- Done 2026-11-03 ([entry](2026-11-03-qemu-tcg-system-vm-to-dockerd.md)):
+  `assets.lock` pins v0.1.0, and a daemon with no QEMU setting downloads,
+  verifies and boots it.
 - The QEMU backend selects the executable; a user-configured QEMU path
   must take precedence over the installed build.
 - `SetSystemVmBackend(QEMU)` does not download yet: only a host without
