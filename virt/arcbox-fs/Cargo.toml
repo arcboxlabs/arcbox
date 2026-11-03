@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 arcbox-error = { workspace = true }
-arcbox-virtio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
@@ -18,6 +17,8 @@ bytes = { workspace = true }
 nix = { workspace = true }
 libc = { workspace = true }
 dashmap = { workspace = true }
+arcbox-virtio-core.workspace = true
+arcbox-virtio-fs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

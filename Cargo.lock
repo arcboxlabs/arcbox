@@ -820,7 +820,8 @@ name = "arcbox-fs"
 version = "0.10.5"
 dependencies = [
  "arcbox-error",
- "arcbox-virtio",
+ "arcbox-virtio-core",
+ "arcbox-virtio-fs",
  "bytes",
  "dashmap",
  "libc",
