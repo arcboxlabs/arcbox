@@ -152,7 +152,9 @@ also passed every check.
 
 - `VhostUserVsock` (`arcbox_virtio_vsock::vhost_user`) is the entry point
   for the QEMU backend: `spawn(cid, UnixStream)`, `connect_vsock(port)`.
-- Open: whether the harness keeps `AGENT_LAUNCHER` now that the TCG fix
-  (`aa1c259`, `dic=off`) passes `--exec-from-share`.
+- Closed 2026-11-03: the harness dropped `AGENT_LAUNCHER` and
+  `--exec-from-share`. The agent always runs from the share, and `--cpu`
+  defaults to the daemon's `max,pauth-impdef=on,dic=off`, so the probe
+  needs arcboxlabs/qemu.
 - Not exercised over real traffic here: 16443, 2049 and 2201 (same
   connect path as 1024 and 2375).
