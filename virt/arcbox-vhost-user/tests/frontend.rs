@@ -265,8 +265,11 @@ fn kick(fd: &OwnedFd) {
     );
 }
 
-/// Sets queue 1 up the way `vhost_virtqueue_start` does and returns the
-/// guest's ends of the kick and call pipes.
+/// Starts queue 1 the way `vhost_dev_start` does for a device without
+/// guest-notifier masking, the stricter order: `vhost_virtqueue_start` sends
+/// the kick before the call, and `SET_VRING_ENABLE` follows once every queue
+/// is set up. With `REPLY_ACK` QEMU waits for the ack of all three. Returns
+/// the guest's ends of the kick and call pipes.
 fn start_queue(fe: &Frontend, guest: &Guest, base: u32) -> (OwnedFd, OwnedFd) {
     fe.vring_state(8, QUEUE, u32::from(QUEUE_SIZE), 0); // SET_VRING_NUM
     fe.vring_state(10, QUEUE, base, 0); // SET_VRING_BASE
@@ -279,20 +282,18 @@ fn start_queue(fe: &Frontend, guest: &Guest, base: u32) -> (OwnedFd, OwnedFd) {
     fe.send(9, 0, &addr, &[]); // SET_VRING_ADDR
     let (kick_rd, kick_wr) = pipe();
     let (call_rd, call_wr) = pipe();
-    fe.send(
-        12,
-        0,
-        &u64::from(QUEUE).to_ne_bytes(),
-        &[kick_rd.as_raw_fd()],
-    ); // SET_VRING_KICK
-    fe.send(
-        13,
-        0,
-        &u64::from(QUEUE).to_ne_bytes(),
-        &[call_wr.as_raw_fd()],
-    ); // SET_VRING_CALL
-    fe.vring_state(18, QUEUE, 1, 0); // SET_VRING_ENABLE
+    let index = u64::from(QUEUE).to_ne_bytes();
+    assert_eq!(fe.acked(12, &index, &[kick_rd.as_raw_fd()]), 0); // SET_VRING_KICK
+    assert_eq!(fe.acked(13, &index, &[call_wr.as_raw_fd()]), 0); // SET_VRING_CALL
+    set_enabled(fe, true);
     (kick_wr, call_rd)
+}
+
+/// `SET_VRING_ENABLE` for queue 1; QEMU always waits for its ack.
+fn set_enabled(fe: &Frontend, enabled: bool) {
+    let mut state = QUEUE.to_ne_bytes().to_vec();
+    state.extend_from_slice(&u32::from(enabled).to_ne_bytes());
+    assert_eq!(fe.acked(18, &state, &[]), 0);
 }
 
 #[test]
@@ -369,18 +370,22 @@ fn qemu_style_session_processes_rings_and_survives_a_restart() {
     );
     assert_eq!(acked.load(Ordering::SeqCst), F_VERSION_1 | F_EVENT_IDX);
 
-    // Stop: the cursor comes back.
+    // Stop the way `vhost_dev_stop` does: disable, then fetch the cursor.
+    set_enabled(&fe, false);
     fe.vring_state(11, QUEUE, 0, 0);
     let state = fe.reply(11);
     assert_eq!(state, [1, 0, 0, 0, 1, 0, 0, 0]);
 
-    // Restart from that cursor; only the new chain is consumed.
+    // Restart from that cursor; only the new chain is consumed. The guest
+    // posts it while the ring is stopped: the ring stays disabled through
+    // the kick descriptor, so the completion interrupts on the new call
+    // descriptor, never the one replaced after the kick.
     guest.write(
         GPA_BASE + AVAIL + 4 + u64::from(QUEUE_SIZE) * 2,
         &1u16.to_le_bytes(),
     );
-    let (kick_wr, call_rd) = start_queue(&fe, &guest, 1);
     let out = guest.post(1, b"again");
+    let (kick_wr, call_rd) = start_queue(&fe, &guest, 1);
     kick(&kick_wr);
     assert!(wait_readable(&call_rd), "no interrupt after restart");
     assert_eq!(guest.u16_at(GPA_BASE + USED + 2), 2);
