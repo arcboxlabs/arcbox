@@ -182,6 +182,44 @@ impl QemuProcess {
     }
 }
 
+/// Runs `binary` with `args`, inheriting `fds`, for a QEMU that exits on
+/// its own within milliseconds: `Err` with its stderr when it fails, or
+/// when it is still running after [`EXIT_GRACE`] and gets killed.
+pub(super) fn run_to_exit(
+    binary: &Path,
+    args: &[OsString],
+    fds: &[RawFd],
+) -> Result<std::result::Result<(), String>> {
+    let (stderr_read, stderr_write) = pipe()?;
+    let pid = posix_spawn(binary, args, fds, stderr_write.as_raw_fd())?;
+    drop(stderr_write);
+    let deadline = Instant::now() + EXIT_GRACE;
+    let status = loop {
+        let mut status = 0;
+        // SAFETY: waitpid on our own child with a valid status pointer.
+        let ret = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        if ret == pid {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            // SAFETY: `pid` is our unreaped child, so the number cannot have
+            // been reused.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            wait(pid);
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let mut stderr = String::new();
+    // QEMU has exited, so the pipe ends at what it wrote.
+    let _ = std::io::Read::read_to_string(&mut std::fs::File::from(stderr_read), &mut stderr);
+    Ok(match status {
+        Some(status) if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 => Ok(()),
+        Some(_) => Err(stderr.trim().to_owned()),
+        None => Err(format!("still running after {EXIT_GRACE:?}")),
+    })
+}
+
 fn pipe() -> Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     // SAFETY: `fds` has room for the two descriptors pipe(2) writes.
@@ -481,6 +519,21 @@ mod tests {
         // SAFETY: waitpid with a valid status pointer.
         let ret = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
         assert_eq!(ret, -1, "the child is reaped");
+    }
+
+    /// `run_to_exit` tells a failed run, with what it printed, from a clean
+    /// exit.
+    #[test]
+    fn run_to_exit_reports_the_stderr_of_a_failure() {
+        let sh = Path::new("/bin/sh");
+        let run = |script: &str| {
+            run_to_exit(sh, &[OsString::from("-c"), OsString::from(script)], &[]).unwrap()
+        };
+        assert_eq!(run("exit 0"), Ok(()));
+        assert_eq!(
+            run("echo \"Property 'max-arm-cpu.dic' not found\" >&2; exit 1"),
+            Err("Property 'max-arm-cpu.dic' not found".to_owned())
+        );
     }
 
     /// A process holding the lock the way QEMU does is stopped and its file

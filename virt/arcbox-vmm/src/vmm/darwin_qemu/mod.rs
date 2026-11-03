@@ -123,6 +123,7 @@ impl QemuMachine {
                 self.host.binary.display()
             )));
         }
+        check_cpu(&self.host.binary)?;
         std::fs::create_dir_all(&self.host.run_dir)?;
         let mut inherited = Vec::new();
 
@@ -411,6 +412,30 @@ impl QemuMachine {
     ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
         self.inbound_listener_manager.take()
     }
+}
+
+/// Refuses a QEMU that cannot create the guest CPU, before anything starts:
+/// a build without ArcBox's patches has no `dic` property, and its guest
+/// would run stale code from the `arcbox` share (see `args::CPU`). Takes a
+/// QEMU start on an empty machine, about 20 ms.
+fn check_cpu(binary: &std::path::Path) -> Result<()> {
+    let (qmp, theirs) = stream_pair()?;
+    // Queued for QMP to read after its greeting.
+    std::io::Write::write_all(
+        &mut &qmp,
+        b"{\"execute\":\"qmp_capabilities\"}\n{\"execute\":\"quit\"}\n",
+    )?;
+    let fd = theirs.as_raw_fd();
+    let result = process::run_to_exit(binary, &args::cpu_check_args(fd), &[fd])?;
+    result.map_err(|stderr| {
+        VmmError::config(format!(
+            "QEMU at {} cannot create the System VM's CPU ({stderr}). The QEMU backend needs \
+             ArcBox's QEMU build (arcboxlabs/qemu), whose `dic` CPU property keeps the guest \
+             from running stale code from its virtio-fs shares; leave [qemu] path unset to use \
+             the build ArcBox installs",
+            binary.display()
+        ))
+    })
 }
 
 /// A connected `SOCK_STREAM` pair, both ends close-on-exec.

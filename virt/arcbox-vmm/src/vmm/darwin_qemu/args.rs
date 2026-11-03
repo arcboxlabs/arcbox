@@ -33,7 +33,15 @@ const LAST_SLOT: u8 = 0x1f;
 ///
 /// QARMA5 pointer authentication costs every kernel function entry and
 /// exit under TCG; the implementation-defined algorithm is far cheaper.
-const CPU: &str = "max,pauth-impdef=on";
+///
+/// `dic=off` exists only in ArcBox's QEMU (arcboxlabs/qemu). It clears
+/// `CTR_EL0.DIC`, so Linux issues `IC IVAU` for every page-cache page it
+/// first maps executable, and that build makes `IC IVAU` drop QEMU's
+/// translations of the page. Without both, code the virtio-fs back-end
+/// writes into guest RAM, which TCG never sees, runs as whatever the page
+/// held before: the agent executed from the `arcbox` share runs stale code.
+/// [`cpu_check_args`] lets the machine refuse a QEMU without the property.
+const CPU: &str = "max,pauth-impdef=on,dic=off";
 
 /// Virtqueue size of each vhost-user-fs device. Must equal the back-end's
 /// `arcbox_vhost_user::fs::QUEUE_SIZE`.
@@ -212,6 +220,21 @@ pub(super) fn qemu_args(args: &QemuArgs<'_>) -> Result<Vec<OsString>, String> {
         );
     }
     Ok(out)
+}
+
+/// A command line that only creates [`CPU`], on QEMU's empty `none`
+/// machine, and then serves QMP on `qmp_fd`. A QEMU that lacks a property
+/// [`CPU`] sets exits at once with "Property ... not found"; one that has
+/// them all waits for a QMP `quit`.
+pub(super) fn cpu_check_args(qmp_fd: RawFd) -> Vec<OsString> {
+    let mut out = Vec::new();
+    flag(&mut out, "-machine", "none");
+    flag(&mut out, "-accel", "tcg");
+    flag(&mut out, "-cpu", CPU);
+    out.extend(["-nodefaults", "-no-user-config", "-display", "none", "-S"].map(OsString::from));
+    flag(&mut out, "-chardev", format!("socket,id=qmp,fd={qmp_fd}"));
+    flag(&mut out, "-mon", "chardev=qmp,mode=control");
+    out
 }
 
 /// Appends `name` and its value.
@@ -430,6 +453,21 @@ mod tests {
             values(&argv, "-drive"),
             ["file=/Users/a,,b/docker.img,if=none,id=disk0,format=raw,discard=unmap"]
         );
+    }
+
+    /// The check must try the very CPU the machine boots, `dic=off`
+    /// included, or an unpatched QEMU passes it and runs stale code.
+    #[test]
+    fn the_cpu_check_creates_the_booted_cpu() {
+        let booted = render(&system_vm(&[], &[]));
+        let check: Vec<String> = cpu_check_args(5)
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert_eq!(values(&check, "-cpu"), values(&booted, "-cpu"));
+        assert!(values(&check, "-cpu")[0].split(',').any(|p| p == "dic=off"));
+        assert_eq!(values(&check, "-machine"), ["none"]);
+        assert_eq!(values(&check, "-chardev"), ["socket,id=qmp,fd=5"]);
     }
 
     #[test]
