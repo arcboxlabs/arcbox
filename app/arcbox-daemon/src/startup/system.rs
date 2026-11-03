@@ -140,8 +140,8 @@ async fn initialize(
         return Err(SystemVmUnsupported(reason).into());
     }
     // QEMU gets the pinned build, downloaded only here, unless the user names
-    // their own binary. The boot still takes it from `[qemu] path` or
-    // `ARCBOX_QEMU_PATH` (`arcbox_core::qemu::binary`), not from this install.
+    // their own binary. The boot runs `[qemu] path` when set, else this
+    // install (`arcbox_core::qemu::binary`).
     if runtime.vm_lifecycle().effective_backend() == arcbox_core::VmBackend::Qemu
         && runtime.config().qemu.path.is_none()
     {
