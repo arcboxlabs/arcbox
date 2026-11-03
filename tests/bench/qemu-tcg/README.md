@@ -44,6 +44,11 @@ boot assets' one. Without `ARCBOX_QEMU_PATH` the daemon installs the build
 `docs/logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md` and
 `docs/logs/2026-11-03-qemu-bridge-nic.md`.
 
+`acceptance.sh` also fails a stop when the daemon logged "Server drain
+timed out" after that SIGTERM: a System listener that ignores shutdown
+holds every stop for the drain's 5 s
+(`docs/logs/2026-11-03-kubernetes-proxy-drain.md`).
+
 Both need an arcboxlabs/qemu build (the CPU carries `dic=off`).
 
 Needs: `qemu-system-aarch64` in `ARCBOX_QEMU_PATH` (optional for

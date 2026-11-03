@@ -126,6 +126,7 @@ from memory. Every new file is added to the index below.
 
 - [2026-11-03 — The QEMU System VM gets a vmnet bridge NIC, and the host reaches containers by IP](logs/2026-11-03-qemu-bridge-nic.md) — Probes: [acceptance run](../tests/bench/qemu-tcg/acceptance.sh)
 - [2026-11-03 — A Mac without hardware virtualization runs dockerd in the System VM on QEMU TCG](logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md) — Probes: [acceptance run](../tests/bench/qemu-tcg/acceptance.sh)
+- [2026-11-03 — Every daemon stop waited 5 s for the Kubernetes API proxy](logs/2026-11-03-kubernetes-proxy-drain.md) — Probes: [acceptance run](../tests/bench/qemu-tcg/acceptance.sh)
 - [2026-11-02 — An Apple silicon Mac without hardware virtualization boots the System VM on QEMU TCG](logs/2026-11-02-qemu-tcg-host-backend.md) — Probes: [QEMU TCG](../tests/bench/qemu-tcg/README.md)
 - [2026-11-02 — The daemon raises its own open-file limit, and HV vsock descriptors are no longer capped at 64](logs/2026-11-02-daemon-nofile-limit.md) — Probes: [placement](../tests/bench/nofile-limit/probe.c), [launchd daemon](../tests/bench/nofile-limit/launchd-limit.sh)
 - [2026-11-02 — HV's virtio-fs refuses requests longer than any FUSE request](logs/2026-11-02-virtio-fs-request-limit.md)
