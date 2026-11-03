@@ -114,10 +114,7 @@ pub struct Vmm {
     proxy_env: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
     /// vmnet bridge interface for the bridge NIC (`vmnet` feature only).
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
-    vmnet_bridge: Option<std::sync::Arc<arcbox_vmnet::Vmnet>>,
-    /// Cancellation token for the vmnet relay task.
-    #[cfg(all(target_os = "macos", feature = "vmnet"))]
-    vmnet_relay_cancel: Option<tokio_util::sync::CancellationToken>,
+    vmnet_bridge: Option<darwin_net::VmnetBridge>,
     /// VZ-side fd for the vmnet bridge NIC attachment.
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     vmnet_bridge_fd: Option<OwnedFd>,
@@ -213,8 +210,6 @@ impl Vmm {
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
-            vmnet_relay_cancel: None,
-            #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge_fd: None,
             #[cfg(target_os = "macos")]
             machine,
@@ -275,7 +270,7 @@ impl Vmm {
             Machine::Vz => self
                 .vmnet_bridge
                 .as_ref()
-                .and_then(|v| v.interface_info().cloned()),
+                .and_then(darwin_net::VmnetBridge::interface_info),
             Machine::Hv(ref hv) => hv.vmnet_interface_info(),
             // QEMU has no bridge NIC.
             Machine::Qemu(_) => None,

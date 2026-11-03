@@ -228,87 +228,15 @@ impl Vmm {
     /// Returns a `VirtioDeviceConfig` with the VZ-side raw fd.
     #[cfg(feature = "vmnet")]
     fn create_vmnet_bridge_nic(&mut self) -> Result<VirtioDeviceConfig> {
-        use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetRelay};
-        use std::os::fd::FromRawFd;
-
-        // Parse MAC from config.
-        let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
-            let mac = arcbox_net::darwin::parse_mac(mac_str)
-                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
-            VmnetConfig::shared().with_mac(mac)
-        } else {
-            VmnetConfig::shared()
-        };
-
-        let vmnet = std::sync::Arc::new(
-            Vmnet::new(config).map_err(|e| VmmError::Device(format!("vmnet start failed: {e}")))?,
-        );
-
-        let info = vmnet
-            .interface_info()
-            .ok_or_else(|| VmmError::Device("vmnet interface_info unavailable".to_string()))?;
-
-        tracing::info!(
-            mac = arcbox_net::darwin::format_mac(&info.mac),
-            mtu = info.mtu,
-            max_packet_size = info.max_packet_size,
-            "vmnet bridge NIC created"
-        );
-
-        // Create socketpair for the relay.
-        let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: socketpair with valid parameters.
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(VmmError::Device(format!(
-                "socketpair for vmnet bridge failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // Prevent fd inheritance to child processes and enable non-blocking I/O.
-        darwin_net::set_nonblock_cloexec(fds[0])?;
-        darwin_net::set_nonblock_cloexec(fds[1])?;
-
-        // SAFETY: fds are valid from socketpair.
-        let vz_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: fds are valid from socketpair.
-        let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        // Size both ends (matching the primary NIC): the bridge guest NIC also
-        // negotiates the enhanced MTU, so the relay end must be able to send a
-        // full-size frame to the guest.
-        darwin_net::set_socket_buffers(vz_fd.as_raw_fd());
-        darwin_net::set_socket_buffers(relay_fd.as_raw_fd());
-
-        // Spawn the relay task.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), cancel.clone());
-
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            VmmError::Device(format!("tokio runtime not available for vmnet relay: {e}"))
-        })?;
-
-        runtime.spawn(async move {
-            if let Err(e) = relay.run(relay_fd).await {
-                tracing::error!("vmnet relay exited with error: {e}");
-            }
-        });
-
-        tracing::info!("vmnet relay task spawned");
-
-        // Extract MAC string before moving vmnet (info borrows the Arc).
-        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
-
+        let nic = darwin_net::BridgeNic::new(self.config.bridge_nic_mac.as_deref())?;
+        let vz_raw_fd = nic.guest_fd.as_raw_fd();
         // Store state for cleanup.
-        let vz_raw_fd = vz_fd.as_raw_fd();
-        self.vmnet_bridge = Some(vmnet);
-        self.vmnet_relay_cancel = Some(cancel);
-        self.vmnet_bridge_fd = Some(vz_fd);
+        self.vmnet_bridge = Some(nic.vmnet);
+        self.vmnet_bridge_fd = Some(nic.guest_fd);
 
         // Pass the vmnet MAC to the VZ-side NIC so bridge FDB lookups match.
         Ok(VirtioDeviceConfig::network_file_handle_with_mac(
-            vz_raw_fd, mac_str,
+            vz_raw_fd, nic.mac,
         ))
     }
 
@@ -361,13 +289,10 @@ impl Vmm {
         // Stop vmnet relay and bridge interface.
         #[cfg(feature = "vmnet")]
         {
-            if let Some(cancel) = self.vmnet_relay_cancel.take() {
-                cancel.cancel();
+            if let Some(bridge) = self.vmnet_bridge.take() {
+                bridge.stop();
             }
             let _ = self.vmnet_bridge_fd.take();
-            if let Some(vmnet) = self.vmnet_bridge.take() {
-                vmnet.stop();
-            }
         }
     }
 

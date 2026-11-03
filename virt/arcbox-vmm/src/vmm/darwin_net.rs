@@ -1,10 +1,11 @@
-//! The primary NIC's socketpair and the host network stack behind it,
-//! shared by the VZ and QEMU backends.
+//! The guest NICs' socketpairs and what serves their host ends, shared by
+//! the VZ and QEMU backends.
 //!
 //! The guest end of a `SOCK_DGRAM` socketpair carries raw Ethernet frames:
 //! VZ attaches it with `VZFileHandleNetworkDeviceAttachment`, QEMU with
-//! `-netdev dgram,local.type=fd`. The host end feeds the guest NAT datapath
-//! (DHCP, DNS, socket proxy, TCP bridge).
+//! `-netdev dgram,local.type=fd`. NIC1's host end feeds the guest NAT
+//! datapath (DHCP, DNS, socket proxy, TCP bridge); the bridge NIC's feeds a
+//! vmnet interface (`vmnet` feature).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -92,6 +93,126 @@ impl GuestNic {
             cancel,
             inbound,
         })
+    }
+}
+
+/// The bridge NIC (NIC2): a vmnet.framework Shared-mode interface relayed
+/// through a socketpair, so the host has a bridge interface (`bridge100`)
+/// to route the container subnet to.
+///
+/// The interface runs in the daemon, which holds `com.apple.vm.networking`;
+/// the hypervisor only ever sees the socketpair.
+#[cfg(feature = "vmnet")]
+pub(super) struct BridgeNic {
+    /// The hypervisor's end of the frame socketpair.
+    pub(super) guest_fd: OwnedFd,
+    /// The interface's MAC, which the guest NIC must carry: the host finds
+    /// the bridge by looking it up in each bridge's forwarding table.
+    pub(super) mac: String,
+    /// What serves the host end until the VM stops.
+    pub(super) vmnet: VmnetBridge,
+}
+
+/// A running vmnet interface and the relay into it.
+#[cfg(feature = "vmnet")]
+pub(super) struct VmnetBridge {
+    vmnet: std::sync::Arc<arcbox_vmnet::Vmnet>,
+    relay_cancel: tokio_util::sync::CancellationToken,
+}
+
+#[cfg(feature = "vmnet")]
+impl BridgeNic {
+    /// Starts the interface, with `mac` (the VM's stable bridge MAC) when
+    /// given, and spawns the relay on the current tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns why vmnet refused the interface, typically a daemon without
+    /// `com.apple.vm.networking` that is not running as root.
+    pub(super) fn new(mac: Option<&str>) -> Result<Self> {
+        use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetRelay};
+
+        let config = if let Some(mac_str) = mac {
+            let mac = arcbox_net::darwin::parse_mac(mac_str)
+                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
+            VmnetConfig::shared().with_mac(mac)
+        } else {
+            VmnetConfig::shared()
+        };
+
+        let vmnet = std::sync::Arc::new(
+            Vmnet::new(config).map_err(|e| VmmError::Device(format!("vmnet start failed: {e}")))?,
+        );
+
+        let info = vmnet
+            .interface_info()
+            .ok_or_else(|| VmmError::Device("vmnet interface_info unavailable".to_string()))?;
+        let mac = arcbox_net::darwin::format_mac(&info.mac);
+
+        tracing::info!(
+            mac,
+            mtu = info.mtu,
+            max_packet_size = info.max_packet_size,
+            "vmnet bridge NIC created"
+        );
+
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: socketpair with valid parameters.
+        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "socketpair for vmnet bridge failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: fds are valid from socketpair.
+        let guest_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: fds are valid from socketpair.
+        let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Prevent fd inheritance to child processes and enable non-blocking I/O.
+        set_nonblock_cloexec(guest_fd.as_raw_fd())?;
+        set_nonblock_cloexec(relay_fd.as_raw_fd())?;
+        // Size both ends (matching the primary NIC): the bridge guest NIC also
+        // negotiates the enhanced MTU, so the relay end must be able to send a
+        // full-size frame to the guest.
+        set_socket_buffers(guest_fd.as_raw_fd());
+        set_socket_buffers(relay_fd.as_raw_fd());
+
+        let relay_cancel = tokio_util::sync::CancellationToken::new();
+        let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), relay_cancel.clone());
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            VmmError::Device(format!("tokio runtime not available for vmnet relay: {e}"))
+        })?;
+        runtime.spawn(async move {
+            if let Err(e) = relay.run(relay_fd).await {
+                tracing::error!("vmnet relay exited with error: {e}");
+            }
+        });
+        tracing::info!("vmnet relay task spawned");
+
+        Ok(Self {
+            guest_fd,
+            mac,
+            vmnet: VmnetBridge {
+                vmnet,
+                relay_cancel,
+            },
+        })
+    }
+}
+
+#[cfg(feature = "vmnet")]
+impl VmnetBridge {
+    /// The interface's addresses, MAC and MTU.
+    pub(super) fn interface_info(&self) -> Option<arcbox_vmnet::VmnetInterfaceInfo> {
+        self.vmnet.interface_info().cloned()
+    }
+
+    /// Stops the relay, then the interface.
+    pub(super) fn stop(self) {
+        self.relay_cancel.cancel();
+        self.vmnet.stop();
     }
 }
 
