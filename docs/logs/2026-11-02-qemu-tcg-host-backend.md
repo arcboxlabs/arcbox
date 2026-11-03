@@ -91,9 +91,17 @@ took 2.0 s against 1.3 s at 4.
 The hardware budgets are 90 s (boot to agent) and 150 s (agent to
 dockerd); QEMU spawn to dockerd ready takes under 4 s in the probe.
 Factor 2 keeps a loaded host and the 13–55× syscall/fork slowdown inside
-the budget, and bounds how long a failed boot holds the daemon: a SIGTERM
-during the boot waits for it (below), which took exactly 360 s at the
-earlier factor of 4.
+the budget, and bounds how long a boot whose guest stays up without an
+agent holds the daemon, since a SIGTERM during the boot waits for it: that
+took exactly 360 s at the earlier factor of 4.
+
+A boot whose VM goes away no longer waits out the budget: on QEMU
+`wait_for_agent` fails as soon as the run flag drops, on the QMP
+`SHUTDOWN` or the child's exit. `sigterm.sh`, with the guest powering off
+at rcS 1.6 s after spawn, then SIGTERM a second later: the daemon took
+177.40 s to exit before the change and 0.01–0.03 s after it, the boot
+failing within 4 ms of QEMU's exit with "VM stopped before its agent became
+ready". After a `kill -9` of QEMU 0.6 s into the boot, 0.01–0.03 s.
 
 Memory: host free memory (`vm_stat`) fell 0.9 GiB at boot, then 3.0 GiB
 while the guest filled a 3 GiB tmpfs, and stayed there after the guest
@@ -109,10 +117,11 @@ TCG default only caps what the guest can hold on to.
   back-ends are attached. Executing ELF files from that share also needs
   the patched QEMU that reports DIC=0 (its `-cpu` property goes in
   `args::CPU`).
-- `wait_for_agent` does not notice a guest that powered off, and the
-  daemon's shutdown joins System startup before stopping the Runtime, so a
-  SIGTERM during a failed boot waits out the whole budget (180 s on QEMU).
-  Same shape on VZ and HV with 90 s.
+- The daemon's shutdown joins System startup before stopping the Runtime.
+  On QEMU a boot ends when the VM stops, but a guest that stays up without
+  an agent still holds a SIGTERM for up to 180 s. VZ and HV keep their
+  90 s wait even for a guest that stopped; `wait_for_agent` races the run
+  flag on QEMU only.
 - The guest's own dockerd poll budget is fixed inside the guest.
 - `ARCBOX_VM_MEMORY_MB` is split by figment into `vm.memory.mb` and never
   reaches `[vm] memory_mb`; only the config file sets it.

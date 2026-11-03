@@ -657,7 +657,37 @@ impl LifecycleShared {
     }
 
     /// Waits for the agent to become ready.
+    ///
+    /// On QEMU the wait also fails as soon as the VM stops on its own: the
+    /// guest powered off or reset, or QEMU exited. Its process is the whole
+    /// VM, so no agent can answer once it is gone, and waiting out `timeout`
+    /// (which a shutdown joins) would only delay the failure. VZ and HV
+    /// wait as before.
     async fn wait_for_agent(&self, timeout: Duration) -> Result<()> {
+        if self.effective_backend() != arcbox_vmm::VmBackend::Qemu {
+            return self.probe_agent(timeout, false).await;
+        }
+        tokio::select! {
+            result = self.probe_agent(timeout, true) => result,
+            reset = self.stopped_on_its_own() => Err(stopped_before_agent_error(reset)),
+        }
+    }
+
+    /// Resolves once the VM stopped on its own, with whether the guest asked
+    /// for a reset ([`crate::machine::MachineManager::vm_self_stopped`]).
+    async fn stopped_on_its_own(&self) -> bool {
+        loop {
+            if let Some(reset) = self.machine_manager.vm_self_stopped(&self.machine_name) {
+                return reset;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// The agent wait itself. With `ends_with_vm` the blocking probe also
+    /// returns once the VM stopped on its own, so the thread does not outlive
+    /// a [`Self::wait_for_agent`] that already failed.
+    async fn probe_agent(&self, timeout: Duration, ends_with_vm: bool) -> Result<()> {
         // Per-boot correlation id: stamped on every readiness RPC so the host's
         // wait logs and the guest's RPC-dispatch logs can be matched for one boot.
         let boot_id = uuid::Uuid::new_v4().to_string();
@@ -690,6 +720,9 @@ impl LifecycleShared {
             let mut last_readiness_err: Option<String> = None;
 
             while std::time::Instant::now() < deadline {
+                if ends_with_vm && let Some(reset) = mm.vm_self_stopped(&machine_name) {
+                    return Err(stopped_before_agent_error(reset));
+                }
                 // connect_agent discovers when the guest starts listening on
                 // the agent vsock port, then the readiness event stream waits
                 // for the guest to report a terminal state.
@@ -888,6 +921,14 @@ pub(super) fn agent_timeout_error(last_error: Option<&str>) -> EngineError {
         Some(e) => EngineError::Vm(format!("timeout waiting for agent (last error: {e})")),
         None => EngineError::Vm("timeout waiting for agent".to_string()),
     }
+}
+
+/// The boot failure of a VM that stopped before its agent answered.
+fn stopped_before_agent_error(reset: bool) -> EngineError {
+    let how = if reset { "reset" } else { "stopped" };
+    EngineError::Vm(format!(
+        "VM {how} before its agent became ready; see the guest serial log"
+    ))
 }
 
 const fn is_not_found_error(err: &EngineError) -> bool {

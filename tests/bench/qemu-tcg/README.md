@@ -18,6 +18,11 @@ lines on `hvc0`. Results: `docs/logs/2026-11-02-qemu-tcg-host-backend.md`.
 | dockerd by memory | dockerd from exec to `API listen on` at 2–14 GiB |
 | host memory | host free memory while the guest touches 3 GiB and frees it |
 
+`sigterm.sh <data-dir> poweroff|kill` runs the daemon itself on a
+development data directory whose System VM assets are prepared. It boots the
+System VM on QEMU, lets QEMU go away (the guest powering off at rcS, or a
+`kill -9` of QEMU), and times the daemon's exit on SIGTERM.
+
 Needs: `qemu-system-aarch64` in `ARCBOX_QEMU_PATH`, brew's
 `FiloSottile/musl-cross/musl-cross` for the guest benchmark, and network
 access to fetch Debian's `busybox-static` package (`guest/build.sh` pins its
