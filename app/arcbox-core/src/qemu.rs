@@ -37,7 +37,7 @@ pub async fn binary(config: &Config) -> Result<PathBuf> {
     }
     let Some(runtime) = config.qemu_runtime()? else {
         return Err(CoreError::invalid_state(
-            "this ArcBox build pins no QEMU build yet; set [qemu] path in config.toml or \
+            "this ArcBox build pins no QEMU build for this host; set [qemu] path in config.toml or \
              ARCBOX_QEMU_PATH to a qemu-system-aarch64 from arcboxlabs/qemu",
         ));
     };
@@ -61,8 +61,15 @@ mod tests {
     async fn the_path_comes_from_the_environment_layer_and_must_be_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::for_test(dir.path());
+        // With no path: what to set where this host's pin selects no build,
+        // and how to install the build it does select.
         let error = binary(&config).await.unwrap_err().to_string();
-        assert!(error.contains("ARCBOX_QEMU_PATH"), "{error}");
+        let advice = if config.qemu_runtime().unwrap().is_some() {
+            "abctl qemu import"
+        } else {
+            "ARCBOX_QEMU_PATH"
+        };
+        assert!(error.contains(advice), "{error}");
 
         config.qemu.path = Some(dir.path().to_path_buf());
         let error = binary(&config).await.unwrap_err().to_string();
@@ -83,7 +90,7 @@ mod tests {
 
     /// Without `[qemu] path` the installed pinned build runs, and a
     /// configured path still wins over it. A development override names the
-    /// build, since `assets.lock` pins none yet.
+    /// build, so the test does not depend on what `assets.lock` pins.
     #[test]
     #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
     fn the_installed_build_runs_unless_a_path_is_configured() {

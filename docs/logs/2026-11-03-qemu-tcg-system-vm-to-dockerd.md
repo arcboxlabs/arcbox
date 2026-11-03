@@ -1,7 +1,7 @@
 # 2026-11-03 — A Mac without hardware virtualization runs dockerd in the System VM on QEMU TCG
 
 - Type: change
-- Area: `arcbox-vmm` (`darwin_qemu`), `arcbox-core` (`qemu`), `arcbox-e2e` (`qemu` harness), `arcbox-vhost-user` (System VM probe)
+- Area: `assets.lock` (`[qemu]`), `arcbox-vmm` (`darwin_qemu`), `arcbox-core` (`qemu`), `arcbox-e2e` (`qemu` harness), `arcbox-vhost-user` (System VM probe)
 - Commits / PRs: this change
 - Related: [QEMU host backend](2026-11-02-qemu-tcg-host-backend.md), [on-demand QEMU](2026-11-02-qemu-on-demand-download.md), [vhost-user vsock](../experiments/2026-11-02-vhost-user-vsock.md), [real agent on vhost-user-fs](../experiments/2026-11-02-vhost-user-fs-real-agent.md), probes in [`tests/bench/qemu-tcg/`](../../tests/bench/qemu-tcg/README.md)
 
@@ -26,8 +26,12 @@ TCG translations on a stock QEMU.
   configuration error that names arcboxlabs/qemu. Measured: 19 ms for the
   patched build, 26 ms for the refusal.
 - `arcbox_core::qemu::binary` takes `[qemu] path` (or `ARCBOX_QEMU_PATH`)
-  first, then the installed build of the pin in `assets.lock`. While the
-  pin is empty it says so and names both settings.
+  first, then the installed build of the pin in `assets.lock`. An empty pin
+  says so and names both settings.
+- `assets.lock` pins arcboxlabs/qemu v0.1.0 (QEMU 10.2.4, released
+  Developer ID signed and notarized; sha256 `60f84ddd…61eab47`, 5,921,565
+  bytes, the same bytes on the CDN and the GitHub release), so a Mac
+  without hardware virtualization needs no QEMU setting at all.
 - The e2e harness and the System VM probe run the agent straight from the
   share; the tmpfs and devtmpfs copies are gone, and the harness serves its
   share with `FsShare` instead of its own device.
@@ -75,14 +79,26 @@ leaves the System runtime `failed` with the arcboxlabs/qemu message and no
 QEMU running. After a `kill -9` of the daemon, the next one logs "stopping
 QEMU left by a previous daemon" and reaches dockerd in 7.87 s.
 
+Zero-config run, with the pin: `acceptance.sh` again on a fresh data
+directory, with no config file and no `ARCBOX_QEMU_PATH`. The daemon
+created `runtime/qemu/0.1.0/` and spawned
+`runtime/qemu/0.1.0/bin/qemu-system-aarch64` 0.39 s after it started,
+download and signature check included; dockerd was ready at 11.96 s and
+every check passed (warm `run` 1.01–1.07 s, `python:3.13-slim` 9.97 s,
+amd64 `x86_64`, reboot 13.39 s, restart 6.86 s, SIGTERM 7.31–7.34 s with
+no QEMU left). `codesign -dv` on the installed binary: identifier
+`com.arcboxlabs.qemu.system-aarch64`, Developer ID Application: ArcBox,
+Inc. (422ACSY6Y5), hardened runtime; it carries no quarantine attribute.
+`syspolicy_check distribution` reports no stapled ticket, which a bare
+Mach-O cannot carry, and an internal XProtect error; notarization was not
+checked online.
+
 The startup budgets stay at factor 2 (180 s to the agent, 300 s from the
 agent to dockerd) and the TCG memory default at 4096 MiB: the slowest cold
 start, 11.32 s in all, is far inside both.
 
 ## Follow-ups
 
-- The `assets.lock` QEMU pin is empty until arcboxlabs/qemu v0.1.0; until
-  then the backend needs `[qemu] path` or `ARCBOX_QEMU_PATH`.
 - `ensure()` runs only at startup, so `SetSystemVmBackend(QEMU)` on a Mac
   with hardware virtualization and no installed build fails "not
   installed" until `abctl qemu import`.

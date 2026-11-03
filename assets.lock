@@ -30,7 +30,7 @@ manifest_sha256 = "4e1638ce4d9f5fcb4669420bb41481297807bf7f069ea264e54c1e258abc4
 [qemu]
 version = "0.1.0"
 cdn = "https://boot.arcboxcdn.com/qemu"
-arch.arm64.sha256 = ""
+arch.arm64.sha256 = "60f84ddd4b2a90e8652d332e7e152da22c4627de2cc47d755baf4f4fc61eab47"
 
 [[tools]]
 name = "docker"

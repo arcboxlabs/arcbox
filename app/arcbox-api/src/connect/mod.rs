@@ -421,7 +421,7 @@ mod tests {
     /// or download boot assets. Runs only on such a host (a Linux container
     /// without `/dev/kvm`, a macOS VM). An Apple silicon Mac boots the System
     /// VM on QEMU instead, so there those requests are refused for the QEMU
-    /// this test leaves unconfigured.
+    /// this test neither configures nor installs.
     #[tokio::test]
     async fn vm_starts_are_refused_up_front_without_hardware_virtualization() {
         use arcbox_connect::v1::{self as pb, MachineService as _, SystemService as _};
@@ -487,11 +487,18 @@ mod tests {
         );
         let machine_error = tokio::time::timeout(LIMIT, call).await.unwrap().err();
 
+        // With no QEMU path, the advice for this host's pin: install the
+        // build it selects, or name a binary where it selects none.
+        let advice = if runtime_handle.config().qemu_runtime().unwrap().is_some() {
+            "abctl qemu import"
+        } else {
+            "ARCBOX_QEMU_PATH"
+        };
         for error in system_errors {
             let error = error.expect("refused");
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                 let message = error.message.unwrap_or_default();
-                assert!(message.contains("ARCBOX_QEMU_PATH"), "{message}");
+                assert!(message.contains(advice), "{message}");
             } else {
                 assert_eq!(error.code, connectrpc::ErrorCode::Unimplemented);
                 assert_eq!(error.message.as_deref(), Some(host.reason));
