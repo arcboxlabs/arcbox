@@ -15,6 +15,7 @@ use arcbox_constants::ports::KUBERNETES_API_VSOCK_PORT;
 use arcbox_core::Runtime;
 use arcbox_docker::proxy::{HalfCloseStream, VsockShutdown, VsockStream};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 /// A bound Kubernetes API TCP→vsock proxy.
@@ -53,14 +54,27 @@ impl KubernetesProxy {
         self.host_port
     }
 
-    /// Starts accepting and forwarding connections.
+    /// Starts accepting and forwarding connections until `shutdown` is
+    /// cancelled, then closes the listener.
+    ///
+    /// The returned task is one of the System listeners shutdown drains, so
+    /// it must end on cancellation: an accept loop that ignored the token
+    /// held every daemon stop for the whole drain timeout.
     #[must_use]
-    pub fn start(self, runtime: Arc<Runtime>) -> tokio::task::JoinHandle<()> {
+    pub fn start(
+        self,
+        runtime: Arc<Runtime>,
+        shutdown: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let listener = self.listener;
 
         tokio::spawn(async move {
             loop {
-                let Ok((mut host_stream, _)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut host_stream, _)) = accepted else {
                     continue;
                 };
                 let runtime = Arc::clone(&runtime);
@@ -96,12 +110,19 @@ impl KubernetesProxy {
                     }
                 });
             }
+            info!("Kubernetes API proxy stopped");
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use arcbox_core::{Config, Runtime};
+    use tokio_util::sync::CancellationToken;
+
     use super::KubernetesProxy;
 
     #[tokio::test]
@@ -111,5 +132,27 @@ mod tests {
 
         assert_ne!(port, 0);
         assert!(KubernetesProxy::bind(port).await.is_err());
+    }
+
+    /// Shutdown drains this task with a timeout; a loop that kept accepting
+    /// after cancellation cost every daemon stop the full timeout.
+    #[tokio::test]
+    async fn cancelled_proxy_stops_and_releases_its_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Runtime::new(Config::for_test(directory.path())).unwrap());
+        let proxy = KubernetesProxy::bind(0).await.unwrap();
+        let port = proxy.host_port();
+        let shutdown = CancellationToken::new();
+
+        let task = proxy.start(runtime, shutdown.clone());
+        shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("proxy task ends on shutdown")
+            .expect("proxy task panicked");
+        KubernetesProxy::bind(port)
+            .await
+            .expect("the stopped proxy no longer owns its port");
     }
 }
