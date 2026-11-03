@@ -204,6 +204,7 @@ When the daemon is killed without graceful shutdown:
 | disk images | **possibly held by XPC helpers** | `wait_for_resources` waits up to 10 s |
 | `~/ArcBox/docker`, `~/ArcBox/machines/<name>` | **dead NFS mounts** (their servers died with the daemon) | `startup::host_mounts::prepare` force-unmounts them, and the pre-ADR-0003 layout (`~/ArcBox` itself, `~/ArcBoxMachines/<name>`) |
 | VM | non-graceful termination | Virtualization.framework cleans up |
+| QEMU (QEMU backend) | **orphaned child**, still running and holding the disk images | `wait_for_resources` stops every QEMU that holds a `run/qemu/*.pid` lock, before the holder scan |
 | Route | **stale** | `recovery::run()` rebuilds |
 
 All residual state is handled automatically on next startup. No manual
@@ -243,6 +244,17 @@ This avoids race conditions where a centralized cleanup could delete a
 socket that another component has already bound.
 
 ## Edge Cases
+
+### QEMU left by a crashed daemon
+
+On a Mac without hardware virtualization the System VM runs in a QEMU
+child process, which nothing tears down when the daemon dies. QEMU
+`-pidfile` locks its pidfile for as long as it runs, so a lock holder on
+`run/qemu/*.pid` is certainly an orphaned QEMU (a stale file with no holder
+is only removed). `wait_for_resources` sends it SIGTERM, then SIGKILL,
+before it scans for disk-image holders. Unlike the XPC helpers below, the
+guest is already unreachable, so stopping it loses nothing a wait would
+save.
 
 ### Disk images held by orphaned XPC helpers
 

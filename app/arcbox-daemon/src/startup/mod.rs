@@ -205,6 +205,21 @@ async fn wait_for_resources(ctx: &DaemonContext) -> Result<()> {
     // not-yet-ready. Mirrors the gRPC socket's early unlink-then-bind.
     let _ = std::fs::remove_file(&ctx.layout.docker_socket);
 
+    // A QEMU is the daemon's child, not an XPC helper the system reaps, so a
+    // daemon that crashed or was killed leaves it running with the disk
+    // images open. Its pidfile lock says so for certain, unlike the
+    // heuristics below, and checking costs one directory read.
+    let qemu_run = ctx
+        .layout
+        .run_dir
+        .join(arcbox_constants::paths::host::QEMU_RUN);
+    let reaped = tokio::task::spawn_blocking(move || arcbox_engine::reap_orphaned_qemu(&qemu_run))
+        .await
+        .context("QEMU reap task panicked")?;
+    if reaped > 0 {
+        tracing::warn!(reaped, "Stopped QEMU processes left by a previous daemon");
+    }
+
     let docker_imgs = resource_cleanup::disk_image_paths(&ctx.layout.data_subdir);
     let decision = resource_cleanup::decide(
         ctx.daemon_lock.displaced_stale_daemon(),

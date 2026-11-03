@@ -348,6 +348,8 @@ pub mod host {
     pub const DOCKER_SOCKET: &str = "docker.sock";
     /// Default gRPC API socket name (inside `RUN`).
     pub const GRPC_SOCKET: &str = "arcbox.sock";
+    /// QEMU backend pidfiles (inside `RUN`).
+    pub const QEMU_RUN: &str = "qemu";
 }
 
 /// Resolved host-side directory layout.
