@@ -95,13 +95,17 @@ impl QemuProcess {
         let reaper = std::thread::Builder::new()
             .name("qemu-wait".into())
             .spawn(move || {
-                let status = wait(pid);
-                tracing::info!(pid, status, "QEMU exited");
+                // Leave the exited child unreaped until its status is
+                // published: the zombie keeps the pid ours, so `signal`
+                // cannot reach a process that reused it.
+                wait_exited(pid);
                 on_exit();
                 let (lock, cvar) = &*exited;
-                if let Ok(mut slot) = lock.lock() {
-                    *slot = Some(status);
-                }
+                let status = match lock.lock() {
+                    Ok(mut slot) => *slot.insert(wait(pid)),
+                    Err(_) => wait(pid),
+                };
+                tracing::info!(pid, status, "QEMU exited");
                 cvar.notify_all();
             })
             .inspect_err(|_| abandon())?;
@@ -135,6 +139,19 @@ impl QemuProcess {
             .map_or(true, |(slot, _)| slot.is_some())
     }
 
+    /// Sends `signal` to QEMU unless it has been reaped. The reaper reaps
+    /// and publishes the exit status in one critical section of the exit
+    /// lock, so while the slot is empty the pid is still our child.
+    fn signal(&self, signal: libc::c_int) {
+        let (lock, _) = &*self.exit;
+        let Ok(slot) = lock.lock() else { return };
+        if slot.is_none() {
+            // SAFETY: the reaper has not reaped `pid` (see above), so the
+            // number cannot have been reused.
+            unsafe { libc::kill(self.pid, signal) };
+        }
+    }
+
     /// Ends QEMU: `quit` (the caller's closure, over QMP) first, then
     /// SIGTERM, then SIGKILL, each given [`EXIT_GRACE`]. Returns QEMU's
     /// last stderr lines once the process is gone and its threads joined.
@@ -151,9 +168,7 @@ impl QemuProcess {
                     break;
                 }
                 tracing::warn!(pid = self.pid, signal, "QEMU still running; signalling it");
-                // SAFETY: `pid` is our unreaped child, so the number cannot
-                // have been reused.
-                unsafe { libc::kill(self.pid, signal) };
+                self.signal(signal);
             }
             if !self.wait_exit(EXIT_GRACE) {
                 tracing::error!(pid = self.pid, "QEMU survived SIGKILL");
@@ -180,6 +195,26 @@ fn pipe() -> Result<(OwnedFd, OwnedFd)> {
         unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
     }
     Ok((read, write))
+}
+
+/// Waits for `pid` to exit, leaving it unreaped.
+fn wait_exited(pid: libc::pid_t) {
+    loop {
+        // SAFETY: an all-zero `siginfo_t` is a valid out-parameter.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: waitid on our own child with a valid `siginfo_t` pointer.
+        let ret = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid.cast_unsigned(),
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if ret == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 /// Reaps `pid`, returning its raw wait status.
@@ -418,6 +453,34 @@ mod tests {
         assert_eq!(reap_orphaned_qemu(dir.path()), 0);
         assert!(!dir.path().join("vm.pid").exists());
         assert!(dir.path().join("other.txt").exists());
+    }
+
+    /// `terminate` ends a running child, runs `on_exit`, and reaps it: the
+    /// reaper's wait leaves the child a zombie only until it is published.
+    #[test]
+    fn terminate_stops_and_reaps_the_child() {
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&exited);
+        let process = QemuProcess::spawn(
+            Path::new("/bin/sleep"),
+            &[OsString::from("60")],
+            &[],
+            move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .unwrap();
+        let pid = process.pid;
+        let start = Instant::now();
+        let stopped = process.terminate(|| {
+            // SAFETY: `pid` is the child just spawned, not yet reaped.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        });
+        assert!(stopped.is_ok());
+        assert!(start.elapsed() < EXIT_GRACE, "{:?}", start.elapsed());
+        assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
+        let mut status = 0;
+        // SAFETY: waitpid with a valid status pointer.
+        let ret = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        assert_eq!(ret, -1, "the child is reaped");
     }
 
     /// A process holding the lock the way QEMU does is stopped and its file
