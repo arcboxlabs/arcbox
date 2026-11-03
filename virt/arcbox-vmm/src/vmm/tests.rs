@@ -148,6 +148,47 @@ fn hv_stop_wait_requires_guest_poweroff_and_retains_completion() {
     assert!(vmm.wait_for_stopped(Duration::ZERO).unwrap());
 }
 
+/// A `qemu-system-aarch64` that reports the guest's power-off before it
+/// answers `qmp_capabilities`, then exits at the host's next command.
+#[cfg(target_os = "macos")]
+const QEMU_SHUT_DOWN_DURING_START: &str = r#"#!/bin/sh
+for arg; do
+  case $arg in socket,id=qmp,fd=*) qmp=${arg##*=} ;; esac
+done
+printf '{"QMP":{"version":{},"capabilities":[]}}\n' >&"$qmp"
+read -r _ <&"$qmp"
+printf '{"event":"SHUTDOWN","data":{"guest":true,"reason":"guest-shutdown"}}\n' >&"$qmp"
+printf '{"return":{}}\n' >&"$qmp"
+read -r _ <&"$qmp"
+"#;
+
+/// The guest can be gone before `Vmm::start` returns. QEMU's own handlers
+/// lower the run flag, and `start` must not raise it again, or the
+/// lifecycle waits on a VM that no longer exists.
+#[cfg(target_os = "macos")]
+#[test]
+fn qemu_start_keeps_the_shutdown_reported_while_starting() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("qemu-system-aarch64");
+    std::fs::write(&binary, QEMU_SHUT_DOWN_DURING_START).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut vmm = Vmm::new(VmmConfig {
+        guest_cid: Some(3),
+        backend: VmBackend::Qemu,
+        networking: false,
+        qemu: Some(QemuHost {
+            binary,
+            run_dir: dir.path().join("run"),
+        }),
+        ..Default::default()
+    })
+    .unwrap();
+    vmm.start().unwrap();
+    assert!(!vmm.is_running());
+    vmm.stop().unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn hv_stop_wait_rejects_vcpu_exit_without_guest_poweroff() {
