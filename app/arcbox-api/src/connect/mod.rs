@@ -417,19 +417,30 @@ mod tests {
     }
 
     /// Where no sandbox can run, every sandbox RPC that would reach the
-    /// guest refuses before dialing it with `Create`'s reason: the guest's
-    /// own missing-KVM error describes the guest (it advises VZ on a Mac
-    /// that cannot run VZ), and `Events` would open a stream the guest ends
-    /// at once.
+    /// guest, in all five services, refuses before dialing it with `Create`'s
+    /// reason: the guest's own missing-KVM error describes the guest (it
+    /// advises VZ on a Mac that cannot run VZ), and `Events` would open a
+    /// stream the guest ends at once.
     #[tokio::test]
     async fn sandbox_rpcs_refuse_up_front_without_nested_virt() {
-        use arcbox_connect::sandbox_v1::{self as pb, SandboxService as _};
+        use arcbox_connect::sandbox_v1::{
+            self as pb, SandboxFilesystemService as _, SandboxProcessService as _,
+            SandboxService as _, SandboxSnapshotService as _, TemplateService as _,
+        };
         use buffa::Message as _;
         use connectrpc::HasMessageView as _;
 
         /// The error `$service.$method` answers for `pb::$request { .. }`,
-        /// defaulted when no fields are given.
+        /// defaulted when no fields are given, or for a client stream of the
+        /// one message in `[..]`.
         macro_rules! refusal {
+            ($service:ident.$method:ident([$message:expr])) => {{
+                let input: connectrpc::InboundStream<_> = Box::pin(tokio_stream::iter([Ok(
+                    connectrpc::StreamMessage::from_message(&$message),
+                )]));
+                let context = RequestContext::new(Default::default());
+                (stringify!($service.$method), $service.$method(context, input).await.err())
+            }};
             ($service:ident.$method:ident(pb::$request:ident)) => {
                 refusal!($service.$method(pb::$request { ..Default::default() }))
             };
@@ -456,6 +467,11 @@ mod tests {
         let expected = runtime.sandbox_nested_virt();
         assert!(!expected.supported);
         let control = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
+        let process = process::SandboxProcessServiceImpl::new(shared.clone(), Arc::default());
+        let filesystem =
+            filesystem::SandboxFilesystemServiceImpl::new(shared.clone(), Arc::default());
+        let snapshot = snapshot::SandboxSnapshotServiceImpl::new(shared.clone(), Arc::default());
+        let template = template::TemplateServiceImpl::new(shared);
 
         // Answered host-side, so it is the one call that still succeeds.
         let (_, error) = refusal!(control.get_capabilities(pb::GetCapabilitiesRequest));
@@ -479,6 +495,36 @@ mod tests {
                 ..Default::default()
             })),
             refusal!(control.events(pb::SandboxEventsRequest)),
+            refusal!(process.start_execution(pb::StartExecutionRequest)),
+            refusal!(process.attach_execution(pb::AttachExecutionRequest)),
+            refusal!(process.write_stdin(pb::WriteStdinRequest)),
+            refusal!(process.stream_stdin([pb::WriteStdinRequest::default()])),
+            refusal!(process.get_stdin_status(pb::GetStdinStatusRequest)),
+            refusal!(process.signal_execution(pb::SignalExecutionRequest)),
+            refusal!(process.resize_execution_tty(pb::ResizeExecutionTtyRequest)),
+            refusal!(process.wait_execution(pb::WaitExecutionRequest)),
+            refusal!(process.list_executions(pb::ListExecutionsRequest)),
+            refusal!(process.wait_for_port(pb::WaitForPortRequest)),
+            refusal!(filesystem.read_file(pb::ReadFileRequest)),
+            refusal!(filesystem.write_file([pb::WriteFileRequest {
+                payload: pb::WriteFileOpen::default().into(),
+                ..Default::default()
+            }])),
+            refusal!(filesystem.stat(pb::StatFileRequest)),
+            refusal!(filesystem.list_dir(pb::ListDirRequest)),
+            refusal!(filesystem.make_dir(pb::MakeDirRequest)),
+            refusal!(filesystem.remove(pb::RemoveEntryRequest)),
+            refusal!(filesystem.r#move(pb::MoveEntryRequest)),
+            refusal!(filesystem.watch_dir(pb::WatchDirRequest)),
+            refusal!(snapshot.checkpoint(pb::CheckpointRequest)),
+            refusal!(snapshot.restore(pb::RestoreRequest)),
+            refusal!(snapshot.list_snapshots(pb::ListSnapshotsRequest)),
+            refusal!(snapshot.delete_snapshot(pb::DeleteSnapshotRequest)),
+            refusal!(template.build(pb::BuildTemplateRequest)),
+            refusal!(template.publish(pb::PublishTemplateRequest)),
+            refusal!(template.get(pb::GetTemplateRequest)),
+            refusal!(template.list(pb::ListTemplatesRequest)),
+            refusal!(template.delete(pb::DeleteTemplateRequest)),
         ];
         for (rpc, error) in refusals {
             let error = error.unwrap_or_else(|| panic!("{rpc} succeeded"));

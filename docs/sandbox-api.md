@@ -35,10 +35,12 @@ sandbox — see [agent-sandbox.md](agent-sandbox.md).
 
 Sandboxes need **nested virtualization**: the VZ backend on Apple Silicon
 M3 or newer with macOS 15+. On the HV and QEMU backends or Intel/M1/M2
-hosts every sandbox RPC fails fast with `FAILED_PRECONDITION` and an
-explanatory message (`/dev/kvm` is absent in the guest). `Create` and
-`Events` refuse before reaching the guest, with the
-`NESTED_VIRT_UNSUPPORTED` detail and the reason `GetCapabilities` reports.
+hosts every sandbox RPC except `GetCapabilities`, in all five services,
+refuses before reaching the guest: `FAILED_PRECONDITION`, the message
+`sandboxes cannot run on this host: <reason>`, and the
+`NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail whose `reason` context is the
+reason `GetCapabilities` reports. Request validation (malformed ports, an
+invalid sandbox ID) still answers `INVALID_ARGUMENT` first.
 
 ## Connection
 
@@ -373,10 +375,11 @@ any sandbox exists):
 - `features` — append-only named flags: `pause_resume`, `auto_resume`,
   `idle_policy`, `set_lifecycle`, `list_exposed_ports`.
 - `nested_virt` — `{supported, reason}` for the **current** backend and
-  hardware (VZ on Apple Silicon M3+/macOS 15+). When unsupported,
-  `Create` fails fast with `FAILED_PRECONDITION` carrying the
-  `NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail and the same `reason`,
-  instead of booting into an opaque KVM failure.
+  hardware (VZ on Apple Silicon M3+/macOS 15+). When unsupported, every
+  other sandbox RPC fails fast with `FAILED_PRECONDITION` carrying the
+  `NESTED_VIRT_UNSUPPORTED` `ErrorInfo` detail and the same `reason`
+  (see Requirements), so `Create` refuses instead of booting into an
+  opaque KVM failure.
 
 ### Stop / Remove
 
@@ -401,11 +404,11 @@ any sandbox exists):
   `exit_code`/`signal` attributes, `STOPPING`, `STOPPED`, `FAILED` with
   `error`, `REMOVED`) interleaved with `keep_alive` frames while idle.
   Where sandboxes cannot run (`nested_virt.supported` false) the
-  subscription fails with `FAILED_PRECONDITION` and the
-  `NESTED_VIRT_UNSUPPORTED` detail; resubscribing gets the same answer
-  until the effective backend changes. Over gRPC that status arrives in
-  the response headers and trailers of a stream with no messages, so a
-  client sees the call accepted and the error on its first read.
+  subscription fails like every other sandbox RPC (see Requirements);
+  resubscribing gets the same answer until the effective backend
+  changes. Over gRPC that status arrives in the response headers and
+  trailers of a stream with no messages, so a client sees the call
+  accepted and the error on its first read.
 
 ## SandboxSnapshotService
 
