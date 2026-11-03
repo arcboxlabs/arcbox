@@ -1,8 +1,11 @@
-//! Socketpair helpers for the guest NICs' frame sockets.
+//! The primary NIC's socketpair and the host network stack behind it.
 //!
-//! The guest end of a `SOCK_DGRAM` socketpair carries raw Ethernet frames
-//! to the hypervisor; the host end feeds a datapath. Both ends need the same
-//! descriptor flags and buffer sizes.
+//! The guest end of a `SOCK_DGRAM` socketpair carries raw Ethernet frames:
+//! VZ attaches it with `VZFileHandleNetworkDeviceAttachment`. The host end
+//! feeds the guest NAT datapath (DHCP, DNS, socket proxy, TCP bridge). The
+//! descriptor helpers serve the vmnet bridge NIC's socketpair too.
+
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Result, VmmError};
 
@@ -16,6 +19,80 @@ use crate::error::{Result, VmmError};
 /// none at all when `ARCBOX_DIAG_NET_MTU_4000` raises the link to the enhanced
 /// MTU (see `arcbox-vz/src/device/network.rs`).
 const NET_SOCKET_BUF_BYTES: libc::c_int = 8 * 1024 * 1024;
+
+/// NIC1 wired to the guest NAT datapath. The VMM hands `guest_fd` to the
+/// hypervisor, keeps it open while the VM runs, and fires `cancel` on stop.
+pub(super) struct GuestNic {
+    /// The hypervisor's end of the frame socketpair.
+    pub(super) guest_fd: OwnedFd,
+    /// Stops the datapath task.
+    pub(super) cancel: tokio_util::sync::CancellationToken,
+    /// Port-forwarding listeners into the guest.
+    pub(super) inbound: arcbox_net::darwin::inbound_relay::InboundListenerManager,
+}
+
+impl GuestNic {
+    /// Creates the socketpair and spawns the datapath on the current tokio
+    /// runtime; `mtu` is the one the guest NIC negotiates.
+    pub(super) fn new(
+        mtu: usize,
+        shared_dns: Option<&arcbox_net::dns::SharedDns>,
+        proxy_env: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
+    ) -> Result<Self> {
+        use arcbox_net::darwin::guest_nat::{self, GuestNat};
+
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: socketpair with valid parameters.
+        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "socketpair failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: fds are valid file descriptors returned by socketpair.
+        let guest_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: fds are valid file descriptors returned by socketpair.
+        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Prevent fd inheritance to child processes and enable non-blocking I/O.
+        set_nonblock_cloexec(guest_fd.as_raw_fd())?;
+        set_nonblock_cloexec(host_fd.as_raw_fd())?;
+        // Size both ends of the pair: the guest side buffers bursts, and the
+        // host datapath side must be able to *send* a full enhanced-MTU frame
+        // to the guest (see NET_SOCKET_BUF_BYTES).
+        set_socket_buffers(guest_fd.as_raw_fd());
+        set_socket_buffers(host_fd.as_raw_fd());
+
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            VmmError::Device(format!(
+                "tokio runtime not available for network datapath: {e}"
+            ))
+        })?;
+        let GuestNat {
+            datapath,
+            inbound,
+            cancel,
+        } = GuestNat::new(host_fd, mtu, shared_dns, proxy_env);
+        tracing::info!(
+            "Custom network stack: socket proxy (gateway={}, guest={})",
+            guest_nat::GATEWAY_IP,
+            guest_nat::GUEST_IP,
+        );
+        runtime.spawn(async move {
+            if let Err(e) = datapath.run().await {
+                tracing::error!("Network datapath exited with error: {}", e);
+            }
+        });
+        tracing::info!("Network datapath task spawned");
+
+        Ok(Self {
+            guest_fd,
+            cancel,
+            inbound,
+        })
+    }
+}
 
 /// Sets `O_NONBLOCK` and `FD_CLOEXEC` on a raw file descriptor.
 ///
@@ -102,7 +179,7 @@ pub(super) fn set_socket_buffers(fd: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::io::AsRawFd;
 
     /// A `SOCK_DGRAM` unix socket caps datagram size at `SO_SNDBUF`; the host
     /// end of the network socketpair must be enlarged or a full enhanced-MTU
