@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1](https://github.com/arcboxlabs/arcbox/compare/v0.11.0...v0.11.1) (2026-11-03)
+
+
+### Features
+
+* **core:** find QEMU and boot the System VM on it as the host fallback ([fc71955](https://github.com/arcboxlabs/arcbox/commit/fc71955c42f2ab4c29656b7d0f0100a79c43190b))
+* **core:** run the installed QEMU build when no path is configured ([18da5e8](https://github.com/arcboxlabs/arcbox/commit/18da5e806ecf8529e1d85376ab50c5e049bfdd39))
+* **daemon:** boot the System VM on QEMU without hardware virtualization ([3406a30](https://github.com/arcboxlabs/arcbox/commit/3406a30cd75bcebb1221eee6757c2daca3de7917))
+* **daemon:** stop QEMU processes a crashed daemon left running ([02da30a](https://github.com/arcboxlabs/arcbox/commit/02da30a992ecc87f8b7c40fdea95588103717991))
+* **engine:** boot the System VM on QEMU where the host cannot run VZ or HV ([9c43fa2](https://github.com/arcboxlabs/arcbox/commit/9c43fa2d582421b3f8e76edfed9dbb738c61e170))
+* **vmm:** add a QMP session for the QEMU backend ([7a795eb](https://github.com/arcboxlabs/arcbox/commit/7a795eb6f73622460c6fdf7af75aa36ea263177f))
+* **vmm:** add the QEMU backend variant ([5c5498e](https://github.com/arcboxlabs/arcbox/commit/5c5498e62b970a8f36c0de69185d4118e7334371))
+* **vmm:** attach NIC1 to the QEMU machine ([9b0c288](https://github.com/arcboxlabs/arcbox/commit/9b0c2883555c9aedcbb5f6ed04da2ed29883e985))
+* **vmm:** boot QEMU with dic=off and refuse a QEMU without it ([a752ec7](https://github.com/arcboxlabs/arcbox/commit/a752ec7862151a6c554f7ea37c2edd5651932a4e))
+* **vmm:** boot the QEMU machine ([1900d15](https://github.com/arcboxlabs/arcbox/commit/1900d1557e7c08d516155a147f51b6a71d760c71))
+* **vmm:** lay out the vhost-user devices on the QEMU command line ([b2dc63a](https://github.com/arcboxlabs/arcbox/commit/b2dc63a7666fbe33213887d00a875679464a72c6))
+* **vmm:** render the QEMU command line ([abd2b0f](https://github.com/arcboxlabs/arcbox/commit/abd2b0f53803db3007bb1f273d690405ebeac749))
+* **vmm:** serve the QEMU machine's virtio-fs and vsock over vhost-user ([bd882dc](https://github.com/arcboxlabs/arcbox/commit/bd882dc1220c2d17b354cc4d0eb4e2f723050e80))
+* **vmm:** spawn and stop the QEMU child ([b53a0f8](https://github.com/arcboxlabs/arcbox/commit/b53a0f826a74bb598907e0d7b2ce920b005de07e))
+* **vsock:** serve virtio-vsock to QEMU over vhost-user ([2e14ace](https://github.com/arcboxlabs/arcbox/commit/2e14aceef186ed6c8dd073f16f13fee1558cd78a))
+
+
+### Bug Fixes
+
+* **daemon:** name why the System VM cannot start on this host ([fdacf24](https://github.com/arcboxlabs/arcbox/commit/fdacf248db993781d53ad8aa5454ef091122fc61))
+* **engine:** fail a QEMU boot as soon as the VM stops ([972690a](https://github.com/arcboxlabs/arcbox/commit/972690a395c341196306186762132042cbd16195))
+* **engine:** stop a VM whose start could not be published ([52d2f7e](https://github.com/arcboxlabs/arcbox/commit/52d2f7e75d1c7b6a33023e845e3805f7e898162a))
+* **vhost-user:** keep call descriptors across RESET_DEVICE ([a190e2c](https://github.com/arcboxlabs/arcbox/commit/a190e2cf498aea420ffcf82c99c89c6ae959e7fe))
+* **virtio-fs:** refuse requests longer than any FUSE request on HV ([6b69fbc](https://github.com/arcboxlabs/arcbox/commit/6b69fbc225ac7ff9dfdeae953b17f57da625abba))
+* **vmm:** bound the wait for a QEMU that outlives SIGKILL ([6423866](https://github.com/arcboxlabs/arcbox/commit/6423866027fbfe2ff1ff4f025719559607d0b5be))
+* **vmm:** fall back to QEMU only on Apple silicon ([c48678f](https://github.com/arcboxlabs/arcbox/commit/c48678f4e05a17d20aa2dead824c047625a723e0))
+* **vmm:** keep a QEMU stop reported while the VM starts ([d550ebd](https://github.com/arcboxlabs/arcbox/commit/d550ebdb9d93d6946e5a7d8320d0f621fc3fa05d))
+* **vmm:** match QMP replies to their command ([81835b1](https://github.com/arcboxlabs/arcbox/commit/81835b19167d503758b8693440dc8341ab694e4e))
+* **vmm:** never lose track of a QEMU child ([04c4d67](https://github.com/arcboxlabs/arcbox/commit/04c4d6738cc9e16d54f8d8c18b39471d3dc2b8ac))
+* **vmm:** never signal a reaped QEMU pid ([2fc80bc](https://github.com/arcboxlabs/arcbox/commit/2fc80bcf1655f919c39202a7311e3438490aab52))
+* **vmm:** take the QEMU fs queue layout from the vhost-user back-end ([0e8e2d8](https://github.com/arcboxlabs/arcbox/commit/0e8e2d8a10dbdfb0285268590b7093b9c082503a))
+* **vsock:** refuse connects once the vhost-user back-end has stopped ([0b7a3ed](https://github.com/arcboxlabs/arcbox/commit/0b7a3ed1b25488972fbb8cb2d68834175637c8fa))
+
+
+### Code Refactoring
+
+* **virtio-fs:** answer a descriptor chain in VirtioFs ([9df0199](https://github.com/arcboxlabs/arcbox/commit/9df0199ff03f3435e9e6a1c07a43687101079171))
+* **vmm:** move the frame socketpair helpers into darwin_net ([34d5edb](https://github.com/arcboxlabs/arcbox/commit/34d5edb72210dc05292a48b3005f2f0a7ed240bb))
+* **vmm:** select the macOS machine with an enum ([dd75c3c](https://github.com/arcboxlabs/arcbox/commit/dd75c3c93e653f93a8476de2747ddfd2f972c2ec))
+* **vmm:** wire the primary NIC through darwin_net::GuestNic ([4222ccd](https://github.com/arcboxlabs/arcbox/commit/4222ccda5fd3497c101f8ff743000abef2d94221))
+* **vsock:** share the host connect socketpair between backends ([c5664a0](https://github.com/arcboxlabs/arcbox/commit/c5664a0797d94381130fb9b1e5bcd883c3764f4b))
+
+
+### Tests
+
+* **bench:** fail the QEMU acceptance run on a failed check ([acf18c7](https://github.com/arcboxlabs/arcbox/commit/acf18c7ce12c9aa24bd16fd6ded988738e0808a4))
+* **bench:** find the acceptance run's QEMU by its pidfile argument ([48af98a](https://github.com/arcboxlabs/arcbox/commit/48af98a01a55bcb57f25ffe0384e3417a3d176f0))
+* **bench:** match the acceptance run's pidfile path literally ([b090cc7](https://github.com/arcboxlabs/arcbox/commit/b090cc76f2e9d9c41496dc262a831dc619e231e9))
+* **bench:** record the QEMU System VM's acceptance run ([886e415](https://github.com/arcboxlabs/arcbox/commit/886e41537d92e61b743de2949ce0761ebd187183))
+* **bench:** run the QEMU acceptance run on the pinned build ([48e5033](https://github.com/arcboxlabs/arcbox/commit/48e503340aa50b24d4505244ac6d5e48ec243924))
+* **e2e:** boot the System VM under QEMU TCG with vhost-user devices ([f58a1f2](https://github.com/arcboxlabs/arcbox/commit/f58a1f26eb4a0b6b7d4ff77a8a3fc113b2a4452d))
+* **e2e:** drive the Docker API over vhost-user vsock ([9495b6c](https://github.com/arcboxlabs/arcbox/commit/9495b6c9f1ef335197f3043b6ff1dfdc432f1d25))
+* **e2e:** measure Docker throughput and latency over vhost-user vsock ([3c4450c](https://github.com/arcboxlabs/arcbox/commit/3c4450ce52dfca0c52861f8ace89bb9bf08aa225))
+* **e2e:** probe agent RPC over vhost-user vsock ([c9bd9b9](https://github.com/arcboxlabs/arcbox/commit/c9bd9b9b3a2be2cf69dadc379315ff45a7a7ac2a))
+* **e2e:** probe vsock concurrency, guest close and guest reboot ([0191b54](https://github.com/arcboxlabs/arcbox/commit/0191b5487ffc856300e65e226da33b29862d1af5))
+* **e2e:** serve the arcbox share to QEMU over vhost-user-fs ([162ead5](https://github.com/arcboxlabs/arcbox/commit/162ead537b8cf3a274a79195b66c39ee3a68b54b))
+* **e2e:** serve the QEMU harness's share with arcbox_vhost_user::fs ([e1081c6](https://github.com/arcboxlabs/arcbox/commit/e1081c6ef8eca8b471c1ee2d0ecc99b6a8d0eb00))
+* **vhost-user:** run the System VM probe's agent straight from the share ([840d45e](https://github.com/arcboxlabs/arcbox/commit/840d45e5b67e0c3f73e9d47b7d3b1973c2cc7ba5))
+* **vhost-user:** stop and restart the ring in QEMU's order ([89cf139](https://github.com/arcboxlabs/arcbox/commit/89cf13908e9f952bcd22d82daeb1e39a61fc18ad))
+* **vmm:** add a QEMU backend probe ([60568b2](https://github.com/arcboxlabs/arcbox/commit/60568b2bf0aa45ebde0ac83cc85a2a65a21b958a))
+* **vsock:** cover the vhost-user config space and device reset ([62c3fe0](https://github.com/arcboxlabs/arcbox/commit/62c3fe0da5ee8e3f1f04660dd08220dc73720e8d))
+
+
+### Documentation
+
+* **core:** scope the remaining QEMU fallback claims to Apple silicon ([49fdf62](https://github.com/arcboxlabs/arcbox/commit/49fdf6290f6fe7b1d5620eb58f19beb1e5dba69f))
+* **engine:** scope the effective backend's QEMU fallback to Apple silicon ([6db7665](https://github.com/arcboxlabs/arcbox/commit/6db76656d94a5691978678823c8c046eb74916f5))
+* record the QEMU TCG host backend ([c2b2339](https://github.com/arcboxlabs/arcbox/commit/c2b2339296faa3e45fbb43edd2b3c96bec6a3859))
+* scope the QEMU backend's own docs to Apple silicon ([9b47888](https://github.com/arcboxlabs/arcbox/commit/9b4788829523e52c5fddfda2d1ff327d526da646))
+* **vsock:** record the vhost-user vsock traffic experiment ([4d817e7](https://github.com/arcboxlabs/arcbox/commit/4d817e7724b5edef556d50a1913f1a15a424de2f))
+
+
+### Build System
+
+* **qemu:** pin arcboxlabs/qemu v0.1.0 ([e8778ff](https://github.com/arcboxlabs/arcbox/commit/e8778ffe48debe70bf3c13a7bf111bd36b644db2))
+
 ## [0.11.0](https://github.com/arcboxlabs/arcbox/compare/v0.10.5...v0.11.0) (2026-11-03)
 
 
