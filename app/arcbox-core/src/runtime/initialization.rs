@@ -103,6 +103,8 @@ impl Runtime {
             return Ok(());
         }
 
+        self.prepare_system_vm_backend(self.vm_lifecycle.effective_backend())
+            .await?;
         // Keep the agent-ready milestone separate from the later dockerd readiness probe.
         progress(InitProgress::SystemVmStarting);
         if let Err(error) = self.vm_lifecycle.ensure_ready().await {

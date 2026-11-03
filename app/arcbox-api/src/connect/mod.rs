@@ -419,7 +419,9 @@ mod tests {
     /// Every request that would boot a VM is refused with the host's reason,
     /// and the System VM ones before they record a backend, write the config
     /// or download boot assets. Runs only on such a host (a Linux container
-    /// without `/dev/kvm`, a macOS VM).
+    /// without `/dev/kvm`, a macOS VM). A Mac boots the System VM on QEMU
+    /// instead, so there those requests are refused for the QEMU this test
+    /// leaves unconfigured.
     #[tokio::test]
     async fn vm_starts_are_refused_up_front_without_hardware_virtualization() {
         use arcbox_connect::v1::{self as pb, MachineService as _, SystemService as _};
@@ -441,7 +443,7 @@ mod tests {
             Arc::default(),
         );
         let machines = MachineServiceImpl::new(runtime, Arc::default());
-        let mut errors = Vec::new();
+        let mut system_errors = Vec::new();
         for backend in [pb::SystemVmBackend::Hv, pb::SystemVmBackend::Vz] {
             let request = pb::SetSystemVmBackendRequest {
                 backend: backend.into(),
@@ -453,7 +455,7 @@ mod tests {
                 RequestContext::new(Default::default()),
                 connectrpc::ServiceRequest::from_parts(&view, &bytes),
             );
-            errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+            system_errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
         }
         // Unchanged limits would otherwise succeed without a restart.
         let bytes = bytes::Bytes::from(pb::SetSystemVmResourcesRequest::default().encode_to_vec());
@@ -462,7 +464,7 @@ mod tests {
             RequestContext::new(Default::default()),
             connectrpc::ServiceRequest::from_parts(&view, &bytes),
         );
-        errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+        system_errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
         // A created machine gets as far as the VMM, which refuses before it
         // touches a hypervisor.
         runtime_handle
@@ -483,13 +485,21 @@ mod tests {
             RequestContext::new(Default::default()),
             connectrpc::ServiceRequest::from_parts(&view, &bytes),
         );
-        errors.push(tokio::time::timeout(LIMIT, call).await.unwrap().err());
+        let machine_error = tokio::time::timeout(LIMIT, call).await.unwrap().err();
 
-        for error in errors {
+        for error in system_errors {
             let error = error.expect("refused");
-            assert_eq!(error.code, connectrpc::ErrorCode::Unimplemented);
-            assert_eq!(error.message.as_deref(), Some(host.reason));
+            if cfg!(target_os = "macos") {
+                let message = error.message.unwrap_or_default();
+                assert!(message.contains("ARCBOX_QEMU_PATH"), "{message}");
+            } else {
+                assert_eq!(error.code, connectrpc::ErrorCode::Unimplemented);
+                assert_eq!(error.message.as_deref(), Some(host.reason));
+            }
         }
+        let error = machine_error.expect("refused");
+        assert_eq!(error.code, connectrpc::ErrorCode::Unimplemented);
+        assert_eq!(error.message.as_deref(), Some(host.reason));
         assert!(!directory.join("boot").exists());
         std::fs::remove_dir_all(directory).unwrap();
     }

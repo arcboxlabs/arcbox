@@ -624,13 +624,38 @@ impl Runtime {
         self.vm_lifecycle.backend()
     }
 
-    /// The backend the System VM can boot with on this host: the configured
-    /// one when the host provides hardware virtualization, otherwise none.
+    /// The backend the System VM boots with on this host: the configured
+    /// one, QEMU on a Mac without hardware virtualization
+    /// ([`arcbox_vmm::VmBackend::on_host`]), and none on a Linux host
+    /// without KVM.
     #[must_use]
     pub fn effective_system_vm_backend(&self) -> Option<arcbox_vmm::VmBackend> {
-        arcbox_engine::host_virtualization()
-            .available
-            .then(|| self.system_vm_backend())
+        let backend = self.vm_lifecycle.effective_backend();
+        (!backend.needs_hardware_virtualization() || arcbox_engine::host_virtualization().available)
+            .then_some(backend)
+    }
+
+    /// Refuses a System VM boot on `backend` the host cannot run, and hands
+    /// the VM manager the QEMU it runs when `backend` is QEMU. Checked before
+    /// anything is recorded, written or downloaded.
+    async fn prepare_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
+        if backend.needs_hardware_virtualization() {
+            arcbox_engine::host_virtualization()
+                .require()
+                .map_err(arcbox_vmm::VmmError::PlatformUnsupported)?;
+        }
+        if backend != arcbox_vmm::VmBackend::Qemu {
+            return Ok(());
+        }
+        let binary = crate::qemu::binary(&self.config).await?;
+        tracing::info!(binary = %binary.display(), "System VM boots on QEMU");
+        self.machine_manager
+            .vm_manager()
+            .set_qemu_host(arcbox_vmm::QemuHost {
+                binary,
+                run_dir: self.config.qemu_run_dir(),
+            })?;
+        Ok(())
     }
 
     /// Whether this host can run sandboxes on the System VM's *current*
@@ -641,11 +666,13 @@ impl Runtime {
     /// cached either.
     #[must_use]
     pub fn sandbox_nested_virt(&self) -> arcbox_computer::NestedVirtCapability {
-        arcbox_computer::nested_virt_for_backend(self.system_vm_backend())
+        arcbox_computer::nested_virt_for_backend(self.vm_lifecycle.effective_backend())
     }
 
-    /// Switches the System VM's hypervisor backend (HV <-> VZ) and restarts the
-    /// VM so it takes effect.
+    /// Switches the System VM's hypervisor backend and restarts the VM so it
+    /// takes effect. On a Mac without hardware virtualization the restart
+    /// boots QEMU whatever the recorded backend
+    /// ([`Self::effective_system_vm_backend`]).
     ///
     /// When the backend is unchanged this only ensures the System VM is running
     /// (an earlier switch may have recorded the backend and then failed to
@@ -661,10 +688,10 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if the backend cannot be applied or the VM cannot be
-    /// restarted on the new backend, and
-    /// [`arcbox_vmm::VmmError::PlatformUnsupported`], before recording
-    /// anything or downloading boot assets, on a host without hardware
-    /// virtualization.
+    /// restarted on the new backend; and, before recording anything or
+    /// downloading boot assets, [`arcbox_vmm::VmmError::PlatformUnsupported`]
+    /// on a Linux host without KVM and `InvalidState` when the restart needs
+    /// a QEMU that is not configured.
     pub async fn switch_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
         let _operation = self
             .storage_recovery
@@ -672,9 +699,10 @@ impl Runtime {
             .try_lock()
             .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
         self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
-        arcbox_engine::host_virtualization()
-            .require()
-            .map_err(arcbox_vmm::VmmError::PlatformUnsupported)?;
+        self.prepare_system_vm_backend(
+            backend.on_host(arcbox_engine::host_virtualization().available),
+        )
+        .await?;
         let lifecycle = &self.vm_lifecycle;
         if lifecycle.backend() == backend {
             // Already on the requested backend — but an earlier switch may have
@@ -731,10 +759,10 @@ impl Runtime {
     ///
     /// Returns an error if a limit is outside `1..=host cpus` or
     /// `512..=host memory` MiB, the config file cannot be written, or the
-    /// System VM fails to stop or boot; and
-    /// [`arcbox_vmm::VmmError::PlatformUnsupported`], before writing the
-    /// config or downloading boot assets, on a host without hardware
-    /// virtualization.
+    /// System VM fails to stop or boot; and, before writing the config or
+    /// downloading boot assets, [`arcbox_vmm::VmmError::PlatformUnsupported`]
+    /// on a Linux host without KVM and `InvalidState` when the restart needs
+    /// a QEMU that is not configured.
     pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
         let _operation = self
             .storage_recovery
@@ -742,9 +770,8 @@ impl Runtime {
             .try_lock()
             .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
         self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
-        arcbox_engine::host_virtualization()
-            .require()
-            .map_err(arcbox_vmm::VmmError::PlatformUnsupported)?;
+        self.prepare_system_vm_backend(self.vm_lifecycle.effective_backend())
+            .await?;
         let current = self.system_vm_resources();
         let cpus = if cpus == 0 { current.cpus } else { cpus };
         let memory_mb = if memory_mb == 0 {
@@ -897,7 +924,7 @@ impl Runtime {
     /// silently falling back.
     #[must_use]
     pub fn amd64_runtime_supported(&self) -> bool {
-        match self.system_vm_backend() {
+        match self.vm_lifecycle.effective_backend() {
             arcbox_vmm::VmBackend::Vz => {
                 cfg!(all(target_os = "macos", target_arch = "aarch64"))
                     && self.vm_lifecycle.config().default_vm.rosetta

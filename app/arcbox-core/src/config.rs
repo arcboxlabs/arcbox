@@ -14,7 +14,7 @@
 //!
 //! [vm]
 //! # cpus = 8         # default: host core count; `abctl system resources` writes these
-//! # memory_mb = 8192  # default: half of host RAM (512–16384)
+//! # memory_mb = 8192  # default: half of host RAM (512–16384), at most 4096 under QEMU
 //! # autostart = true  # boot the default Linux VM (Docker/K8s); false = VM-host only
 //!
 //! [machine]
@@ -41,6 +41,9 @@
 //!
 //! [logging]
 //! level = "info"
+//!
+//! [qemu]
+//! # path = "/opt/qemu/bin/qemu-system-aarch64"  # emulator for Macs without hardware virtualization
 //! ```
 
 use arcbox_constants::container_network::ContainerNetwork;
@@ -81,6 +84,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// Storage configuration.
     pub storage: StorageConfig,
+    /// QEMU backend configuration.
+    pub qemu: crate::qemu::QemuConfig,
 }
 
 impl Default for Config {
@@ -104,6 +109,7 @@ impl Config {
             container: ContainerRuntimeConfig::default(),
             logging: LoggingConfig::default(),
             storage: StorageConfig::default(),
+            qemu: crate::qemu::QemuConfig::default(),
         }
     }
 
@@ -231,6 +237,12 @@ impl Config {
         self.data_dir.join(arcbox_constants::paths::host::RUN)
     }
 
+    /// Returns the directory QEMU keeps its pidfiles in (`run/qemu/`).
+    #[must_use]
+    pub fn qemu_run_dir(&self) -> PathBuf {
+        self.run_dir().join(arcbox_constants::paths::host::QEMU_RUN)
+    }
+
     /// Returns the path to the log directory (`log/`).
     #[must_use]
     pub fn log_dir(&self) -> PathBuf {
@@ -263,7 +275,7 @@ pub struct VmDefaults {
     pub memory_mb: u64,
     /// Kernel path (optional, uses embedded kernel if not set).
     pub kernel_path: Option<PathBuf>,
-    /// macOS hypervisor backend for the System VM (`"vz"` or `"hv"`).
+    /// macOS hypervisor backend for the System VM (`"vz"`, `"hv"` or `"qemu"`).
     ///
     /// First-boot default only: once the machine exists, its persisted
     /// backend (as switched via `abctl system backend`) wins. Settable
@@ -295,13 +307,30 @@ impl VmDefaults {
     }
 }
 
+/// The most memory the System VM gets by default on a Mac that boots it on
+/// QEMU because it has no hardware virtualization.
+///
+/// TCG boots and starts dockerd as fast with 2 GiB as with 14 GiB, and QEMU
+/// keeps every page the guest has touched until it exits, so a smaller
+/// default bounds what an idle VM can hold on to without slowing anything
+/// (`docs/logs/2026-11-02-qemu-tcg-host-backend.md`). An explicit
+/// `memory_mb` is used as given.
+const QEMU_DEFAULT_MEMORY_MB: u64 = 4096;
+
 impl Default for VmDefaults {
     fn default() -> Self {
+        let mut memory_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
+        let backend = arcbox_vmm::VmBackend::default();
+        if backend.on_host(arcbox_hypervisor::host_virtualization().available)
+            == arcbox_vmm::VmBackend::Qemu
+        {
+            memory_mb = memory_mb.min(QEMU_DEFAULT_MEMORY_MB);
+        }
         Self {
             cpus: arcbox_hypervisor::default_vm_cpu_count(),
-            memory_mb: arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024),
+            memory_mb,
             kernel_path: None,
-            backend: arcbox_vmm::VmBackend::default(),
+            backend,
             autostart: true,
         }
     }
@@ -641,9 +670,14 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.profile, ArcboxProfile::Production);
         assert_eq!(config.vm.cpus, arcbox_hypervisor::default_vm_cpu_count());
-        // Default memory is half of host RAM, clamped to [512, 16384] MB.
-        let expected_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
-        assert_eq!(config.vm.memory_mb, expected_mb);
+        // Default memory is half of host RAM, clamped to [512, 16384] MB,
+        // and at most 4096 MB where the System VM boots on QEMU.
+        let half_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
+        if arcbox_hypervisor::host_virtualization().available || cfg!(not(target_os = "macos")) {
+            assert_eq!(config.vm.memory_mb, half_mb);
+        } else {
+            assert_eq!(config.vm.memory_mb, half_mb.min(4096));
+        }
         assert!(config.vm.memory_mb >= 512);
         assert!(config.vm.memory_mb <= 16384);
         assert_eq!(config.machine.disk_gb, 50);

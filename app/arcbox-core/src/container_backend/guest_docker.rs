@@ -34,7 +34,11 @@ impl GuestDockerBackend {
 
     async fn wait_guest_endpoint_ready(&self) -> Result<()> {
         let port = self.config.guest_docker_vsock_port;
-        let timeout = Duration::from_millis(self.config.startup_timeout_ms);
+        let timeout = Duration::from_millis(self.config.startup_timeout_ms)
+            * self
+                .vm_lifecycle
+                .effective_backend()
+                .startup_timeout_factor();
         let agent = self.machine_manager.connect_agent(self.machine_name)?;
 
         // Correlate with the triggering Docker API request via its trace id.
@@ -49,7 +53,9 @@ impl GuestDockerBackend {
             }
             Ok(event) => Err(CoreError::Machine(format!(
                 "guest docker endpoint on vsock port {} not ready within {}ms: {}",
-                port, self.config.startup_timeout_ms, event.detail
+                port,
+                timeout.as_millis(),
+                event.detail
             ))),
             Err(e) => Err(CoreError::Machine(format!(
                 "guest readiness watch failed: {e}"
