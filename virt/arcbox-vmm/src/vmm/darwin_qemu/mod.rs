@@ -431,8 +431,8 @@ fn check_cpu(binary: &std::path::Path) -> Result<()> {
         VmmError::config(format!(
             "QEMU at {} cannot create the System VM's CPU ({stderr}). The QEMU backend needs \
              ArcBox's QEMU build (arcboxlabs/qemu), whose `dic` CPU property keeps the guest \
-             from running stale code from its virtio-fs shares; leave [qemu] path unset to use \
-             the build ArcBox installs",
+             from running stale code from its virtio-fs shares: point [qemu] path at that \
+             build, or leave it unset where this ArcBox release installs one",
             binary.display()
         ))
     })
