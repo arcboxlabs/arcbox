@@ -226,8 +226,9 @@ impl SystemServiceImpl {
     }
 }
 
-/// A failed System VM restart: a host without hardware virtualization
-/// classifies as every RPC does; any other failure is internal.
+/// A failed System VM restart: a host that cannot run the backend
+/// (`PlatformUnsupported`) classifies as every RPC does; any other failure
+/// is internal.
 struct RestartError(arcbox_core::CoreError);
 
 impl From<RestartError> for ConnectError {

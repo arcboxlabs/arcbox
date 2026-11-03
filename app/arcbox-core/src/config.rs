@@ -43,7 +43,7 @@
 //! level = "info"
 //!
 //! [qemu]
-//! # path = "/opt/qemu/bin/qemu-system-aarch64"  # emulator for Macs without hardware virtualization
+//! # path = "/opt/qemu/bin/qemu-system-aarch64"  # emulator for Apple silicon Macs without hardware virtualization
 //! ```
 
 use arcbox_constants::container_network::ContainerNetwork;

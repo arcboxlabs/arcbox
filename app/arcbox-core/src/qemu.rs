@@ -23,8 +23,8 @@ pub struct QemuConfig {
 pub async fn binary(config: &Config) -> Result<PathBuf> {
     let Some(path) = &config.qemu.path else {
         return Err(CoreError::invalid_state(
-            "QEMU is required on a host without hardware virtualization; \
-             set [qemu] path in config.toml or ARCBOX_QEMU_PATH to a qemu-system-aarch64",
+            "the QEMU backend needs a qemu-system-aarch64; \
+             set [qemu] path in config.toml or ARCBOX_QEMU_PATH to one",
         ));
     };
     if !path.is_file() {

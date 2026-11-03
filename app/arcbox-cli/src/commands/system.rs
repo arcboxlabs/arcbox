@@ -43,8 +43,8 @@ pub enum BackendArg {
     Hv,
     /// Virtualization.framework — Apple-managed execution (default).
     Vz,
-    /// QEMU TCG emulation — slow; what a Mac without hardware
-    /// virtualization boots whatever is chosen.
+    /// QEMU TCG emulation — slow; what an Apple silicon Mac without
+    /// hardware virtualization boots whatever is chosen.
     Qemu,
 }
 
