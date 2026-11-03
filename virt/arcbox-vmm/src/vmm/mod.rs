@@ -6,6 +6,7 @@
 //! Platform-specific logic lives in submodules:
 //! - `darwin`: macOS (Virtualization.framework) managed execution
 //! - `darwin_hv`: macOS (Hypervisor.framework) manual execution
+//! - `darwin_qemu`: macOS QEMU TCG emulation in a child process
 //! - `linux`: Linux (KVM) manual execution
 
 #[cfg(target_os = "macos")]
@@ -28,6 +29,8 @@ mod darwin;
 pub(crate) mod darwin_hv;
 #[cfg(target_os = "macos")]
 mod darwin_net;
+#[cfg(target_os = "macos")]
+mod darwin_qemu;
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -38,6 +41,8 @@ mod helpers;
 mod tests;
 
 pub use config::{BlockDeviceConfig, QemuHost, SharedDirConfig, VmBackend, VmmConfig, VmmState};
+#[cfg(target_os = "macos")]
+pub use darwin_qemu::reap_orphaned_qemu;
 use helpers::placeholder_vcpu_snapshots;
 
 /// Virtual Machine Monitor.

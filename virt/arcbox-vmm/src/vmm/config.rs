@@ -89,7 +89,9 @@ pub struct VmmConfig {
 pub struct QemuHost {
     /// The `qemu-system-aarch64` to run.
     pub binary: PathBuf,
-    /// Directory each running QEMU keeps its pidfile in.
+    /// Directory each running QEMU keeps its pidfile in; a daemon that
+    /// restarts after a crash stops what it finds there
+    /// ([`crate::vmm::reap_orphaned_qemu`]).
     pub run_dir: PathBuf,
 }
 

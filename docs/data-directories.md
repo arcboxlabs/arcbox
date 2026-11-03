@@ -27,6 +27,7 @@ Created by daemon on startup. Cleaned on next launch if stale.
 | `run/daemon.pid` | Daemon PID file (stale-process detection) | daemon |
 | `run/docker.sock` | Docker-compatible API Unix socket | daemon |
 | `run/arcbox.sock` | gRPC API Unix socket | daemon |
+| `run/qemu/<uuid>.pid` | Pidfile of a running QEMU (QEMU backend), locked by QEMU while it runs; a starting daemon stops every QEMU that still holds one and removes the file | QEMU |
 
 ### 1.2 `log/` — Logs
 

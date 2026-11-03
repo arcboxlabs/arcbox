@@ -26,3 +26,5 @@ pub use arcbox_hypervisor::{
     HostVirtualization, NestedVirtSupport, host_nested_virt, host_virtualization,
 };
 pub use arcbox_vmm::VmBackend;
+#[cfg(target_os = "macos")]
+pub use arcbox_vmm::reap_orphaned_qemu;

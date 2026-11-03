@@ -106,4 +106,6 @@ pub use snapshot::{
 };
 pub use vcpu::{DeviceManagerExitHandler, ExitHandler, VcpuManager};
 pub use vcpu_stats::{VcpuStats, VcpuStatsSnapshot, VmDebugSnapshot};
+#[cfg(target_os = "macos")]
+pub use vmm::reap_orphaned_qemu;
 pub use vmm::{BlockDeviceConfig, QemuHost, SharedDirConfig, VmBackend, Vmm, VmmConfig, VmmState};
