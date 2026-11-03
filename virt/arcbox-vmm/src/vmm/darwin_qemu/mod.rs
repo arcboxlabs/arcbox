@@ -8,8 +8,10 @@
 //! Every descriptor QEMU needs is inherited at spawn (`process`), so it
 //! opens no socket of its own.
 //!
-//! virtio-fs and vsock are not attached yet: the guest boots without its
-//! shares and the host cannot reach the agent.
+//! virtio-fs and vsock come from vhost-user back-ends in the daemon. QEMU
+//! blocks in device realize until a back-end answers, so a device is only
+//! put on the command line together with the back-end serving it — see
+//! [`QemuMachine::initialize`].
 
 mod args;
 mod process;
@@ -143,6 +145,18 @@ impl QemuMachine {
             None
         };
 
+        // vhost-user attach point. Each back-end gets one end of a
+        // `stream_pair()` and starts serving it before `start` spawns QEMU,
+        // which blocks in device realize until the back-end answers: one
+        // virtio-fs back-end per `config.shared_dirs` entry
+        // (`arcbox_vhost_user::fs::FsShare::new(tag, path).spawn(stream)`),
+        // one vsock back-end for the guest CID. QEMU's end goes into
+        // `inherited` and its number into `shares` (an `args::FsShare`) or
+        // `vsock_fd`; the machine keeps each back-end's handle and stops it
+        // after QEMU. Neither back-end is wired yet, so the guest boots
+        // without them.
+        let shares: Vec<args::FsShare> = Vec::new();
+        let vsock_fd: Option<RawFd> = None;
         if !self.config.shared_dirs.is_empty() || self.config.vsock {
             tracing::warn!(
                 shares = self.config.shared_dirs.len(),
@@ -162,6 +176,8 @@ impl QemuMachine {
             console_fds,
             net_fd,
             disks: &self.config.block_devices,
+            vsock_fd,
+            shares: &shares,
         })
         .map_err(VmmError::config)?;
 
