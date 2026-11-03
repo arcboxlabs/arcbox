@@ -49,8 +49,9 @@ impl NestedVirtCapability {
 #[must_use]
 pub fn nested_virt_for_backend(backend: VmBackend) -> NestedVirtCapability {
     if !backend.supports_nested_virt() {
-        // A Mac without hardware virtualization boots QEMU whatever the
-        // chosen backend, so switching to VZ would change nothing.
+        // An Apple silicon Mac without hardware virtualization boots QEMU
+        // whatever the chosen backend, so switching to VZ would change
+        // nothing.
         let host = arcbox_engine::host_virtualization();
         if backend == VmBackend::Qemu && !host.available {
             return NestedVirtCapability::unsupported(host.reason);
