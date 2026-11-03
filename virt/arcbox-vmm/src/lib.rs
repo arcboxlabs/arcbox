@@ -7,8 +7,8 @@
 //!
 //! - **macOS VZ**: Virtualization.framework manages execution and devices.
 //! - **macOS HV**: Hypervisor.framework runs vCPUs with ArcBox device emulation.
-//! - **macOS QEMU**: QEMU TCG emulates the guest in a child process, on Macs
-//!   without hardware virtualization.
+//! - **macOS QEMU**: QEMU TCG emulates the guest in a child process, on
+//!   Apple silicon Macs without hardware virtualization.
 //! - **Linux KVM**: KVM runs vCPUs through `arcbox-hypervisor`.
 //!
 //! For the guest-side Firecracker sandbox stack, see `arcbox-computer-runtime`.

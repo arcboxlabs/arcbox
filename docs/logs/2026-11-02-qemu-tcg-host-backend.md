@@ -1,4 +1,4 @@
-# 2026-11-02 — A Mac without hardware virtualization boots the System VM on QEMU TCG
+# 2026-11-02 — An Apple silicon Mac without hardware virtualization boots the System VM on QEMU TCG
 
 - Type: change
 - Area: `arcbox-vmm` (`darwin_qemu`, `darwin_net`, `VmBackend`), `arcbox-engine` (`vm_lifecycle`, machine reboot), `arcbox-core` (`qemu`, config, runtime), `arcbox-daemon` (startup reaping), `arcbox-api`, `abctl`

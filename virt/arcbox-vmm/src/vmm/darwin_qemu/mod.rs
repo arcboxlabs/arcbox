@@ -1,5 +1,5 @@
 //! macOS QEMU TCG backend: the System VM in a `qemu-system-aarch64` child,
-//! for Macs without hardware virtualization.
+//! for Apple silicon Macs without hardware virtualization.
 //!
 //! QEMU owns the vCPUs, guest RAM and the virtio transport; the daemon keeps
 //! what it owns on every backend. NIC1 is the same frame socketpair VZ

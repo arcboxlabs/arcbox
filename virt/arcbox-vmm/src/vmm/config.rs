@@ -172,7 +172,7 @@ pub enum VmBackend {
     /// The default: Apple-managed and stable.
     #[default]
     Vz = 1,
-    /// QEMU TCG in a child process, for Macs without hardware
+    /// QEMU TCG in a child process, for Apple silicon Macs without hardware
     /// virtualization. Plain computation runs near native speed; syscalls,
     /// `fork` and memory copies run 13–70 times slower.
     Qemu = 2,
