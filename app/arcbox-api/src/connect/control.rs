@@ -14,6 +14,7 @@ use super::SharedRuntime;
 use crate::ApiError;
 
 use super::exposed_port;
+use super::sandbox_errors::SandboxCapabilityExt as _;
 use super::sandbox_resume;
 use super::{ConnectRuntimeExt as _, ContextExt as _, port_protocol, with_keepalive};
 use arcbox_computer::cleanup as sandbox_cleanup;
@@ -65,10 +66,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         }
         // CORE-13 fail-fast: refuse before dialing the guest instead of a
         // boot that wedges into FAILED with an opaque KVM error.
-        let capability = runtime.sandbox_nested_virt();
-        if !capability.supported {
-            return Err(super::sandbox_errors::nested_virt_unsupported(&capability));
-        }
+        runtime.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
         // must record a failed lifecycle mutation on its own (CORE-82).
@@ -97,7 +95,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let response = agent
             .sandbox_stop(req)
@@ -124,7 +122,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready_for_write(&machine)?;
+        let runtime = self.runtime.ready_for_write(&machine)?.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let response = agent
             .sandbox_remove(req)
@@ -155,7 +153,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready_for_write(&machine)?;
+        let runtime = self.runtime.ready_for_write(&machine)?.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // Same reason as create/stop/remove: a failed lifecycle mutation must
         // reach the daemon log on its own, not only the caller (CORE-82).
@@ -184,7 +182,7 @@ impl pb::SandboxService for SandboxServiceImpl {
     ) -> ServiceResult<Empty> {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         sandbox_resume::resume(
             runtime,
             &self.operations,
@@ -208,7 +206,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let _operation = self.operations.lock(&machine, &req.id).await;
-        let runtime = self.runtime.ready_for_write(&machine)?;
+        let runtime = self.runtime.ready_for_write(&machine)?.sandbox_capable()?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
             .sandbox_set_lifecycle(req)
@@ -255,6 +253,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let info = agent
@@ -273,6 +272,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let mut agent = self
             .runtime
             .ready()?
+            .sandbox_capable()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -297,7 +297,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let host_port = u16::try_from(req.host_port)
             .map_err(|_| ConnectError::invalid_argument("host_port must be 0-65535"))?;
         let protocol = port_protocol(req.protocol.as_known().unwrap_or_default());
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
 
         let exposed = ports::expose(
             runtime,
@@ -331,7 +331,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let _operation = self.operations.lock(&machine, &req.id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let mappings =
             ports::list(runtime, &machine, &req.id)
                 .await
@@ -366,7 +366,7 @@ impl pb::SandboxService for SandboxServiceImpl {
             .filter(|p| *p != 0)
             .ok_or_else(|| ConnectError::invalid_argument("sandbox_port must be 1-65535"))?;
         let protocol = port_protocol(req.protocol.as_known().unwrap_or_default());
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         ports::unexpose(runtime, &machine, &req.id, sandbox_port, protocol)
             .await
             .map_err(ApiError::from)?;
@@ -380,15 +380,11 @@ impl pb::SandboxService for SandboxServiceImpl {
         request: ServiceRequest<'_, pb::SandboxEventsRequest>,
     ) -> ServiceResult<ServiceStream<WatchEventsResponse>> {
         let machine = ctx.sandbox_machine_id()?;
-        let runtime = self.runtime.ready()?;
         // Where no sandbox can run, none can change: refuse the subscription
         // with `Create`'s reason. The guest would accept the stream and end
         // it with its missing-KVM error, which a client reads as a dropped
         // stream to reconnect.
-        let capability = runtime.sandbox_nested_virt();
-        if !capability.supported {
-            return Err(super::sandbox_errors::nested_virt_unsupported(&capability));
-        }
+        let runtime = self.runtime.ready()?.sandbox_capable()?;
         let agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let rx = agent
             .sandbox_events(request.to_owned_message())
