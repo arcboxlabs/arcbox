@@ -16,9 +16,11 @@ guest unchanged.
 ## What was done
 
 - `VmBackend::Qemu` ("qemu"). `VmBackend::on_host` is the fallback rule: on
-  macOS without hardware virtualization every configured backend boots as
-  QEMU. Callers boot with the result and never record it, and a VZ or HV
-  start error never triggers it. `Runtime::effective_system_vm_backend`
+  an Apple silicon Mac without hardware virtualization every configured
+  backend boots as QEMU. An Intel Mac gets no fallback and refuses QEMU
+  (`VmBackend::arch_unsupported`): `qemu-system-aarch64` cannot boot its
+  x86_64 guest assets. Callers boot with the result and never record it,
+  and a VZ or HV start error never triggers it. `Runtime::effective_system_vm_backend`
   reports it (`effective_backend` = QEMU); `SetSystemVmBackend(QEMU)` is
   accepted.
 - `virt/arcbox-vmm/src/vmm/darwin_qemu/`: the command line as a pure

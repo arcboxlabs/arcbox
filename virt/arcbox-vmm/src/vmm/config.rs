@@ -222,18 +222,34 @@ impl VmBackend {
     /// The backend a VM configured with `self` boots with on a host whose
     /// hardware virtualization is `available`.
     ///
-    /// A Mac without it — a macOS virtual machine — emulates with QEMU
-    /// instead. The fallback is the host's, not the user's: callers boot
-    /// with it and never record it as the configured backend, and only an
-    /// unavailable host triggers it, never a backend that failed to start.
-    /// Off macOS there is no emulator to fall back to, so a host without
-    /// KVM keeps `self` and `Vmm::initialize` refuses the start.
+    /// An Apple silicon Mac without it — a macOS virtual machine — emulates
+    /// with QEMU instead. The fallback is the host's, not the user's:
+    /// callers boot with it and never record it as the configured backend,
+    /// and only an unavailable host triggers it, never a backend that
+    /// failed to start. An Intel Mac, which QEMU cannot boot
+    /// ([`Self::arch_unsupported`]), and a Linux host have no emulator to
+    /// fall back to, so a host without hardware virtualization keeps
+    /// `self` and the start is refused.
     #[must_use]
     pub const fn on_host(self, available: bool) -> Self {
-        if !available && cfg!(target_os = "macos") {
+        if !available && cfg!(target_os = "macos") && Self::Qemu.arch_unsupported().is_none() {
             Self::Qemu
         } else {
             self
+        }
+    }
+
+    /// Why this backend cannot run on this Mac's architecture, whatever
+    /// its hardware virtualization. QEMU emulates an aarch64 guest
+    /// (`qemu-system-aarch64`, the only build ArcBox runs), and an Intel
+    /// Mac boots x86_64 guest assets.
+    #[must_use]
+    pub const fn arch_unsupported(self) -> Option<&'static str> {
+        match self {
+            Self::Qemu if cfg!(all(target_os = "macos", not(target_arch = "aarch64"))) => Some(
+                "the QEMU backend emulates an Apple silicon guest and cannot boot this Intel Mac's x86_64 guest",
+            ),
+            Self::Hv | Self::Vz | Self::Qemu => None,
         }
     }
 
