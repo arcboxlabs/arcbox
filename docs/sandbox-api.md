@@ -34,9 +34,11 @@ sandbox — see [agent-sandbox.md](agent-sandbox.md).
 ## Requirements
 
 Sandboxes need **nested virtualization**: the VZ backend on Apple Silicon
-M3 or newer with macOS 15+. On the HV backend or Intel/M1/M2 hosts every
-sandbox RPC fails fast with `FAILED_PRECONDITION` and an explanatory
-message (`/dev/kvm` is absent in the guest).
+M3 or newer with macOS 15+. On the HV and QEMU backends or Intel/M1/M2
+hosts every sandbox RPC fails fast with `FAILED_PRECONDITION` and an
+explanatory message (`/dev/kvm` is absent in the guest). `Create` and
+`Events` refuse before reaching the guest, with the
+`NESTED_VIRT_UNSUPPORTED` detail and the reason `GetCapabilities` reports.
 
 ## Connection
 
@@ -398,6 +400,12 @@ any sandbox exists):
   frames: lifecycle events (`CREATED`, `READY`, `RUNNING`, `IDLE` with
   `exit_code`/`signal` attributes, `STOPPING`, `STOPPED`, `FAILED` with
   `error`, `REMOVED`) interleaved with `keep_alive` frames while idle.
+  Where sandboxes cannot run (`nested_virt.supported` false) the
+  subscription fails with `FAILED_PRECONDITION` and the
+  `NESTED_VIRT_UNSUPPORTED` detail; resubscribing gets the same answer
+  until the effective backend changes. Over gRPC that status arrives in
+  the response headers and trailers of a stream with no messages, so a
+  client sees the call accepted and the error on its first read.
 
 ## SandboxSnapshotService
 
