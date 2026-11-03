@@ -10,9 +10,10 @@ use crate::connect;
 
 #[derive(Debug, Subcommand)]
 pub enum SystemCommands {
-    /// Show or switch the System VM hypervisor backend (HV / VZ).
+    /// Show or switch the System VM hypervisor backend (HV / VZ / QEMU).
     ///
-    /// With no argument, prints the current backend. With `hv` or `vz`,
+    /// With no argument, prints the backend the System VM runs on, and the
+    /// configured one too when this host overrides it. With a backend,
     /// persists the choice and restarts the System VM so it takes effect —
     /// this stops running containers.
     Backend {
@@ -98,8 +99,15 @@ pub async fn execute(cmd: SystemCommands) -> Result<()> {
                     .context("failed to query System VM backend")?
                     .into_owned()
             };
-            let current = info.backend.as_known().unwrap_or_default();
-            println!("System VM backend: {}", label(current));
+            let configured = info.backend.as_known().unwrap_or_default();
+            // The effective backend lives in the setup status; without it
+            // the configured one is all there is to show.
+            let status = client
+                .get_setup_status(pb::Empty::default())
+                .await
+                .ok()
+                .map(connectrpc::UnaryResponse::into_owned);
+            println!("{}", render_backend(configured, status.as_ref()));
             Ok(())
         }
         SystemCommands::Resources { cpus, memory } => {
@@ -128,10 +136,114 @@ pub async fn execute(cmd: SystemCommands) -> Result<()> {
     }
 }
 
+/// The backend the System VM runs on, and the configured one when they
+/// differ: an Apple silicon Mac without hardware virtualization boots QEMU
+/// whatever is configured, and never records that.
+fn render_backend(configured: SystemVmBackend, status: Option<&pb::SetupStatus>) -> String {
+    let effective = status
+        .and_then(|status| status.effective_backend.as_known())
+        .filter(|backend| *backend != SystemVmBackend::Unspecified);
+    let no_hardware_virtualization =
+        status.and_then(|status| status.hardware_virtualization_available) == Some(false);
+    match effective {
+        Some(effective) if effective != configured => {
+            let mut rendered = format!(
+                "System VM backend: {}\nConfigured backend: {}",
+                label(effective),
+                label(configured)
+            );
+            if no_hardware_virtualization {
+                rendered.push_str(" (this host has no hardware virtualization)");
+            }
+            rendered
+        }
+        // Unspecified once resolved means no backend can run here; a daemon
+        // that predates the field leaves it unspecified too.
+        None if no_hardware_virtualization => format!(
+            "System VM backend: none (this host has no hardware virtualization)\n\
+             Configured backend: {}",
+            label(configured)
+        ),
+        _ => format!("System VM backend: {}", label(configured)),
+    }
+}
+
 /// Human rendering of the System VM's limits against the host.
 fn render_resources(r: &pb::SystemVmResources) -> String {
     format!(
         "System VM resources:\n  CPUs:   {} of {} on the host\n  Memory: {} MiB of {} MiB on the host",
         r.cpus, r.host_cpus, r.memory_mb, r.host_memory_mb
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(effective: SystemVmBackend, hardware: Option<bool>) -> pb::SetupStatus {
+        pb::SetupStatus {
+            effective_backend: effective.into(),
+            hardware_virtualization_available: hardware,
+            ..Default::default()
+        }
+    }
+
+    /// The regression: a Mac without hardware virtualization runs QEMU
+    /// while VZ stays configured, and the command printed only VZ.
+    #[test]
+    fn fallback_shows_the_running_backend_and_the_configured_one() {
+        let rendered = render_backend(
+            SystemVmBackend::Vz,
+            Some(&status(SystemVmBackend::Qemu, Some(false))),
+        );
+        assert_eq!(
+            rendered,
+            "System VM backend: qemu (TCG emulation)\n\
+             Configured backend: vz (Virtualization.framework) \
+             (this host has no hardware virtualization)"
+        );
+    }
+
+    #[test]
+    fn matching_backends_print_one_line() {
+        let rendered = render_backend(
+            SystemVmBackend::Hv,
+            Some(&status(SystemVmBackend::Hv, Some(true))),
+        );
+        assert_eq!(
+            rendered,
+            "System VM backend: hv (Hypervisor.framework + FEX)"
+        );
+    }
+
+    /// An unreachable status or a daemon without the field must not invent
+    /// a difference.
+    #[test]
+    fn unknown_effective_backend_falls_back_to_the_configured_one() {
+        let expected = "System VM backend: vz (Virtualization.framework)";
+        assert_eq!(render_backend(SystemVmBackend::Vz, None), expected);
+        assert_eq!(
+            render_backend(
+                SystemVmBackend::Vz,
+                Some(&status(SystemVmBackend::Unspecified, None))
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_host_that_runs_no_backend_says_so() {
+        let rendered = render_backend(
+            SystemVmBackend::Qemu,
+            Some(&status(SystemVmBackend::Unspecified, Some(false))),
+        );
+        assert!(
+            rendered.starts_with("System VM backend: none"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.ends_with("Configured backend: qemu (TCG emulation)"),
+            "{rendered}"
+        );
+    }
 }
