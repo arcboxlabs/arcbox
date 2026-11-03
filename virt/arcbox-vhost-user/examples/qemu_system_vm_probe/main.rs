@@ -9,13 +9,13 @@
 //! images `arcbox_storage::prepare_pair` creates, and the cmdline tokens
 //! `desired_boot` appends.
 //!
-//! The agent is staged behind `guest/wrapper.sh`, which runs it from a
-//! devtmpfs copy (the reason is in the script) and starts
-//! `guest/driver.sh`. The driver reaches the agent over vsock loopback
-//! (`guest/agent_rpc.rs`), asks it for the runtime (EnsureRuntime:
-//! materialize to Btrfs, start containerd and dockerd), runs `sync` and
-//! `syncfs` on every share, reads a tree of small files from `/Users` with
-//! one reader and from `/private` with four, then powers off. A
+//! The agent is staged behind `guest/wrapper.sh`, which runs it straight
+//! from the share and starts `guest/driver.sh`. The driver reaches the
+//! agent over vsock loopback (`guest/agent_rpc.rs`), asks it for the
+//! runtime (EnsureRuntime: materialize to Btrfs, start containerd and
+//! dockerd), runs `sync` and `syncfs` on every share, reads a tree of small
+//! files from `/Users` with one reader and from `/private` with four, then
+//! powers off. A
 //! vhost-user-vsock back-end with only a config space gives the guest its
 //! vsock transport; no NIC is attached.
 //!
@@ -28,7 +28,9 @@
 //!     [--smp 4] [--memory-mib 4096] [--small-files 4000]
 //! ```
 //!
-//! The guest helpers are built with `rustc` for `aarch64-unknown-linux-musl`
+//! Executing from the share needs arcboxlabs/qemu: the CPU is the daemon's,
+//! `max,pauth-impdef=on,dic=off`, and a stock QEMU refuses `dic`. The guest
+//! helpers are built with `rustc` for `aarch64-unknown-linux-musl`
 //! and link with `aarch64-linux-musl-gcc`, as the agent does. Exit status 0
 //! means every check passed.
 
@@ -239,7 +241,8 @@ mod probe {
     fn qemu_command(args: &Args, work: &Path, share: &Path) -> Result<Command, Error> {
         let mem = format!("{}M", args.memory_mib);
         let mut qemu = Command::new(&args.qemu);
-        qemu.args(["-accel", "tcg,thread=multi", "-cpu", "max,pauth-impdef=on"])
+        qemu.args(["-accel", "tcg,thread=multi"])
+            .args(["-cpu", "max,pauth-impdef=on,dic=off"])
             .args(["-smp", &args.smp.to_string(), "-m", &mem])
             .arg("-object")
             .arg(format!("memory-backend-shm,id=mem,size={mem},share=on"))

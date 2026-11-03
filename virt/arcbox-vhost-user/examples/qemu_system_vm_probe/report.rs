@@ -187,9 +187,9 @@ pub fn report(args: &Args, work: &Path, outcome: &Outcome) -> usize {
     }
     check(field(&console, "done").is_some(), "driver finished");
     // QEMU TCG drops a page's translations when the guest CPU or a QEMU
-    // device writes it, but not when a vhost-user back-end does, and its
-    // IC IVAU is a no-op; until arcboxlabs/qemu fixes that, this fails, and
-    // the agent and helpers run from devtmpfs copies (`guest/wrapper.sh`).
+    // device writes it, but not when a vhost-user back-end does. With
+    // `dic=off` and arcboxlabs/qemu's IC IVAU the guest's own cache
+    // maintenance drops them; on a stock QEMU this fails.
     let coherence = field(&console, "exec-coherence ").unwrap_or("missing");
     check(
         coherence == format!("buffered=2 direct=2 share-stale=0/{EXEC_ROUNDS}"),
