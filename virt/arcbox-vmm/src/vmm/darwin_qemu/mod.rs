@@ -2,14 +2,14 @@
 //! for Macs without hardware virtualization.
 //!
 //! QEMU owns the vCPUs, guest RAM and the virtio transport; the daemon keeps
-//! what it owns on every backend. `hvc0` and `hvc1` are `virtconsole` ports
-//! whose socketpairs feed the engine's serial drain; QMP drives the
-//! lifecycle.
+//! what it owns on every backend. NIC1 is the same frame socketpair VZ
+//! attaches (`darwin_net`); `hvc0` and `hvc1` are `virtconsole` ports whose
+//! socketpairs feed the engine's serial drain; QMP drives the lifecycle.
 //! Every descriptor QEMU needs is inherited at spawn (`process`), so it
 //! opens no socket of its own.
 //!
-//! NIC1, virtio-fs and vsock are not attached yet: the guest boots without
-//! a network or its shares, and the host cannot reach the agent.
+//! virtio-fs and vsock are not attached yet: the guest boots without its
+//! shares and the host cannot reach the agent.
 
 mod args;
 mod process;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use super::darwin_net;
 use crate::error::{Result, VmmError};
 use crate::vmm::{QemuHost, VmmConfig};
 
@@ -35,12 +36,16 @@ pub struct QemuMachine {
     /// The owner's run flag; cleared when the guest goes down.
     running: Arc<AtomicBool>,
     reset_requested: Arc<AtomicBool>,
+    shared_dns: Option<arcbox_net::dns::SharedDns>,
+    proxy_env: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
     /// This run's pidfile, under [`QemuHost::run_dir`].
     pidfile: PathBuf,
     /// Built by `initialize`, spent by `start`.
     launch: Option<Launch>,
     /// The host ends of `hvc0` and `hvc1`.
     consoles: Option<[OwnedFd; 2]>,
+    net_cancel: Option<tokio_util::sync::CancellationToken>,
+    inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
     process: Option<process::QemuProcess>,
     qmp: Option<qmp::Qmp>,
     /// Completed by the guest's power-off; see [`Self::wait_for_poweroff`].
@@ -74,14 +79,28 @@ impl QemuMachine {
             host,
             running,
             reset_requested: Arc::new(AtomicBool::new(false)),
+            shared_dns: None,
+            proxy_env: None,
             pidfile,
             launch: None,
             consoles: None,
+            net_cancel: None,
+            inbound_listener_manager: None,
             process: None,
             qmp: None,
             poweroff_rx: None,
             poweroff_observed: false,
         })
+    }
+
+    /// Sets the shared DNS policy. Must be called before [`Self::initialize`].
+    pub fn set_shared_dns(&mut self, dns: arcbox_net::dns::SharedDns) {
+        self.shared_dns = Some(dns);
+    }
+
+    /// Sets the egress proxy. Must be called before [`Self::initialize`].
+    pub fn set_proxy_env(&mut self, env: arcbox_fakeip::proxy_detect::ProxyEnvironment) {
+        self.proxy_env = Some(env);
     }
 
     /// Creates every channel into the guest and renders the command line.
@@ -110,9 +129,20 @@ impl QemuMachine {
             consoles.push(OwnedFd::from(ours));
         }
 
-        if self.config.networking {
-            tracing::warn!("QEMU backend: no NIC yet; booting without networking");
-        }
+        let net_fd = if self.config.networking {
+            // Untagged frames at the default MTU; QEMU's dgram netdev
+            // carries no virtio-net header, as VZ's file handle does not.
+            let nic =
+                darwin_net::GuestNic::new(1500, self.shared_dns.as_ref(), self.proxy_env.clone())?;
+            self.net_cancel = Some(nic.cancel);
+            self.inbound_listener_manager = Some(nic.inbound);
+            let fd = nic.guest_fd.as_raw_fd();
+            inherited.push(nic.guest_fd);
+            Some(fd)
+        } else {
+            None
+        };
+
         if !self.config.shared_dirs.is_empty() || self.config.vsock {
             tracing::warn!(
                 shares = self.config.shared_dirs.len(),
@@ -130,7 +160,7 @@ impl QemuMachine {
             pidfile: &self.pidfile,
             qmp_fd,
             console_fds,
-            net_fd: None,
+            net_fd,
             disks: &self.config.block_devices,
         })
         .map_err(VmmError::config)?;
@@ -229,6 +259,9 @@ impl QemuMachine {
         self.running.store(false, Ordering::SeqCst);
         // QEMU removes its pidfile on a clean exit only.
         let _ = std::fs::remove_file(&self.pidfile);
+        if let Some(cancel) = self.net_cancel.take() {
+            cancel.cancel();
+        }
         self.consoles = None;
         self.launch = None;
     }
@@ -290,6 +323,20 @@ impl QemuMachine {
             console: console.try_clone()?,
             agent_log: agent_log.try_clone()?,
         })
+    }
+
+    /// The port-forwarding listener manager, while the machine owns it.
+    pub const fn inbound_listener_manager(
+        &mut self,
+    ) -> Option<&mut arcbox_net::darwin::inbound_relay::InboundListenerManager> {
+        self.inbound_listener_manager.as_mut()
+    }
+
+    /// Takes the port-forwarding listener manager.
+    pub const fn take_inbound_listener_manager(
+        &mut self,
+    ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
+        self.inbound_listener_manager.take()
     }
 }
 
