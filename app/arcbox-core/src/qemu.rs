@@ -16,24 +16,38 @@ pub struct QemuConfig {
 
 /// Resolves the `qemu-system-aarch64` the QEMU backend runs.
 ///
+/// That is `[qemu] path` when set, else the build `assets.lock` pins once it
+/// is installed. System startup on QEMU installs that build first;
+/// `abctl qemu import` installs it from a local archive.
+///
 /// # Errors
 ///
-/// Returns [`CoreError`] `InvalidState` naming the setting when no usable
-/// binary is configured.
+/// Returns [`CoreError`] `InvalidState` saying what to do when neither is
+/// usable: a configured path that is not a file, a pinned build that is not
+/// installed, or a daemon that pins no build.
 pub async fn binary(config: &Config) -> Result<PathBuf> {
-    let Some(path) = &config.qemu.path else {
+    if let Some(path) = &config.qemu.path {
+        if !path.is_file() {
+            return Err(CoreError::invalid_state(format!(
+                "QEMU binary {} ([qemu] path / ARCBOX_QEMU_PATH) is not a file",
+                path.display()
+            )));
+        }
+        return Ok(path.clone());
+    }
+    let Some(runtime) = config.qemu_runtime()? else {
         return Err(CoreError::invalid_state(
-            "the QEMU backend needs a qemu-system-aarch64; \
-             set [qemu] path in config.toml or ARCBOX_QEMU_PATH to one",
+            "this ArcBox build pins no QEMU build yet; set [qemu] path in config.toml or \
+             ARCBOX_QEMU_PATH to a qemu-system-aarch64 from arcboxlabs/qemu",
         ));
     };
-    if !path.is_file() {
-        return Err(CoreError::invalid_state(format!(
-            "QEMU binary {} ([qemu] path / ARCBOX_QEMU_PATH) is not a file",
-            path.display()
-        )));
-    }
-    Ok(path.clone())
+    runtime.installed_executable().ok_or_else(|| {
+        CoreError::invalid_state(format!(
+            "QEMU {} is not installed; System startup on QEMU downloads it, or install it \
+             with `abctl qemu import <archive>`",
+            runtime.artifact().version
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -65,5 +79,40 @@ mod tests {
             Ok(())
         });
         assert_eq!(binary(&config).await.unwrap(), qemu);
+    }
+
+    /// Without `[qemu] path` the installed pinned build runs, and a
+    /// configured path still wins over it. A development override names the
+    /// build, since `assets.lock` pins none yet.
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn the_installed_build_runs_unless_a_path_is_configured() {
+        use arcbox_constants::env;
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::for_test(dir.path());
+        config.profile = arcbox_constants::paths::ArcboxProfile::Development;
+        let build = dir.path().join("runtime/qemu/0.1.0");
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        let installed = build.join("bin/qemu-system-aarch64");
+        std::fs::write(&installed, "").unwrap();
+        let own = dir.path().join("own-qemu");
+        std::fs::write(&own, "").unwrap();
+        let sha256 = "ab".repeat(32);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(env::QEMU_VERSION, "0.1.0");
+            jail.set_env(env::QEMU_SHA256, &sha256);
+            jail.set_env(env::QEMU_CDN, "https://example.invalid");
+            let error = runtime.block_on(binary(&config)).unwrap_err().to_string();
+            assert!(error.contains("abctl qemu import"), "{error}");
+            // What `arcbox_image::qemu` writes once a build is installed.
+            std::fs::write(build.join(".archive-sha256"), &sha256).unwrap();
+            assert_eq!(runtime.block_on(binary(&config)).unwrap(), installed);
+            config.qemu.path = Some(own.clone());
+            assert_eq!(runtime.block_on(binary(&config)).unwrap(), own);
+            Ok(())
+        });
     }
 }
