@@ -5,6 +5,7 @@
 //!
 //! Platform-specific logic lives in submodules:
 //! - `darwin`: macOS (Virtualization.framework) managed execution
+//! - `darwin_hv`: macOS (Hypervisor.framework) manual execution
 //! - `linux`: Linux (KVM) manual execution
 
 #[cfg(target_os = "macos")]
@@ -115,9 +116,19 @@ pub struct Vmm {
     /// VZ-side fd for the vmnet bridge NIC attachment.
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     vmnet_bridge_fd: Option<OwnedFd>,
-    /// Hypervisor.framework machine (`VmBackend::Hv` only).
+    /// The machine `config.backend` selected.
     #[cfg(target_os = "macos")]
-    hv: Option<darwin_hv::HvMachine>,
+    machine: Machine,
+}
+
+/// The machine a macOS [`Vmm`] drives, chosen by [`VmmConfig::backend`].
+///
+/// VZ keeps its state on the `Vmm` itself (`darwin_vm` and the network
+/// fields); HV owns its machine.
+#[cfg(target_os = "macos")]
+enum Machine {
+    Vz,
+    Hv(Box<darwin_hv::HvMachine>),
 }
 
 impl Vmm {
@@ -155,15 +166,13 @@ impl Vmm {
         );
 
         let running = Arc::new(AtomicBool::new(false));
-        // Every `self.hv` dispatch reads `None` as VZ, so this match is
-        // where a new backend has to choose its machine.
         #[cfg(target_os = "macos")]
-        let hv = match config.backend {
-            VmBackend::Hv => Some(darwin_hv::HvMachine::new(
+        let machine = match config.backend {
+            VmBackend::Vz => Machine::Vz,
+            VmBackend::Hv => Machine::Hv(Box::new(darwin_hv::HvMachine::new(
                 config.clone(),
                 Arc::clone(&running),
-            )),
-            VmBackend::Vz => None,
+            ))),
         };
 
         Ok(Self {
@@ -198,7 +207,7 @@ impl Vmm {
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge_fd: None,
             #[cfg(target_os = "macos")]
-            hv,
+            machine,
         })
     }
 
@@ -226,9 +235,9 @@ impl Vmm {
     /// and the configured suffix for relative names.
     #[cfg(target_os = "macos")]
     pub fn set_shared_dns(&mut self, dns: arcbox_net::dns::SharedDns) {
-        match self.hv {
-            Some(ref mut hv) => hv.set_shared_dns(dns),
-            None => self.shared_dns = Some(dns),
+        match self.machine {
+            Machine::Vz => self.shared_dns = Some(dns),
+            Machine::Hv(ref mut hv) => hv.set_shared_dns(dns),
         }
     }
 
@@ -238,9 +247,9 @@ impl Vmm {
     /// connects directly from the host.
     #[cfg(target_os = "macos")]
     pub fn set_proxy_env(&mut self, env: arcbox_fakeip::proxy_detect::ProxyEnvironment) {
-        match self.hv {
-            Some(ref mut hv) => hv.set_proxy_env(env),
-            None => self.proxy_env = Some(env),
+        match self.machine {
+            Machine::Vz => self.proxy_env = Some(env),
+            Machine::Hv(ref mut hv) => hv.set_proxy_env(env),
         }
     }
 
@@ -250,12 +259,13 @@ impl Vmm {
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     #[must_use]
     pub fn vmnet_interface_info(&self) -> Option<arcbox_vmnet::VmnetInterfaceInfo> {
-        if let Some(ref hv) = self.hv {
-            return hv.vmnet_interface_info();
+        match self.machine {
+            Machine::Vz => self
+                .vmnet_bridge
+                .as_ref()
+                .and_then(|v| v.interface_info().cloned()),
+            Machine::Hv(ref hv) => hv.vmnet_interface_info(),
         }
-        self.vmnet_bridge
-            .as_ref()
-            .and_then(|v| v.interface_info().cloned())
     }
 
     /// Initializes the VMM components.
@@ -285,9 +295,9 @@ impl Vmm {
         #[cfg(target_os = "macos")]
         {
             tracing::info!("VM backend: {:?}", self.config.backend);
-            match self.hv {
-                Some(ref mut hv) => hv.initialize()?,
-                None => self.initialize_darwin()?,
+            match self.machine {
+                Machine::Vz => self.initialize_darwin()?,
+                Machine::Hv(ref mut hv) => hv.initialize()?,
             }
         }
 
@@ -324,9 +334,9 @@ impl Vmm {
         // Linux: start vCPU threads for manual execution.
         #[cfg(target_os = "macos")]
         {
-            match self.hv {
-                Some(ref mut hv) => hv.start()?,
-                None => self.start_darwin_vm()?,
+            match self.machine {
+                Machine::Vz => self.start_darwin_vm()?,
+                Machine::Hv(ref mut hv) => hv.start()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -365,9 +375,9 @@ impl Vmm {
 
         #[cfg(target_os = "macos")]
         {
-            match self.hv {
-                Some(ref hv) => hv.pause()?,
-                None => self.pause_darwin_vm()?,
+            match self.machine {
+                Machine::Vz => self.pause_darwin_vm()?,
+                Machine::Hv(ref hv) => hv.pause()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -397,9 +407,9 @@ impl Vmm {
 
         #[cfg(target_os = "macos")]
         {
-            match self.hv {
-                Some(ref hv) => hv.resume()?,
-                None => self.resume_darwin_vm()?,
+            match self.machine {
+                Machine::Vz => self.resume_darwin_vm()?,
+                Machine::Hv(ref hv) => hv.resume()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -435,9 +445,9 @@ impl Vmm {
         // Linux: stop vCPU threads.
         #[cfg(target_os = "macos")]
         {
-            match self.hv {
-                Some(ref mut hv) => hv.stop()?,
-                None => self.stop_darwin_vm()?,
+            match self.machine {
+                Machine::Vz => self.stop_darwin_vm()?,
+                Machine::Hv(ref mut hv) => hv.stop()?,
             }
         }
         #[cfg(target_os = "linux")]
@@ -465,9 +475,10 @@ impl Vmm {
     pub fn reset_requested(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
-            self.hv
-                .as_ref()
-                .is_some_and(darwin_hv::HvMachine::reset_requested)
+            match self.machine {
+                Machine::Vz => false,
+                Machine::Hv(ref hv) => hv.reset_requested(),
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -486,8 +497,9 @@ impl Vmm {
     pub fn reboot(&mut self) -> Result<()> {
         tracing::info!("Rebooting VM: full teardown + fresh boot");
         #[cfg(target_os = "macos")]
-        if let Some(ref hv) = self.hv {
-            hv.clear_reset_requested();
+        match self.machine {
+            Machine::Vz => {}
+            Machine::Hv(ref hv) => hv.clear_reset_requested(),
         }
         self.stop()?;
         // `initialize()` requires the Created state; `stop()` left us Stopped
@@ -535,7 +547,10 @@ impl Vmm {
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn dax_stats(&self, share_idx: usize) -> Option<crate::dax::DaxStats> {
-        self.hv.as_ref()?.dax_stats(share_idx)
+        match self.machine {
+            Machine::Hv(ref hv) => hv.dax_stats(share_idx),
+            Machine::Vz => None,
+        }
     }
 
     /// Captures a debug snapshot of the VM's virtio MMIO devices:
@@ -548,7 +563,7 @@ impl Vmm {
     #[must_use]
     pub fn virtio_debug(&self) -> Vec<crate::device::DeviceDebug> {
         #[cfg(target_os = "macos")]
-        if let Some(ref hv) = self.hv {
+        if let Machine::Hv(ref hv) = self.machine {
             return hv.virtio_debug();
         }
         self.device_manager
@@ -566,11 +581,10 @@ impl Vmm {
         crate::vcpu_stats::VmDebugSnapshot {
             devices: self.virtio_debug(),
             #[cfg(target_os = "macos")]
-            vcpus: self
-                .hv
-                .as_ref()
-                .map(darwin_hv::HvMachine::vcpu_snapshots)
-                .unwrap_or_default(),
+            vcpus: match self.machine {
+                Machine::Hv(ref hv) => hv.vcpu_snapshots(),
+                Machine::Vz => Vec::new(),
+            },
             #[cfg(not(target_os = "macos"))]
             vcpus: Vec::new(),
             kick_broadcasts: 0,
@@ -690,10 +704,12 @@ impl Vmm {
                 self.state
             )));
         }
-        self.hv
-            .as_mut()
-            .ok_or_else(|| VmmError::Unsupported("checkpoint needs the HV backend".into()))?
-            .checkpoint(dir)
+        let Machine::Hv(ref mut hv) = self.machine else {
+            return Err(VmmError::Unsupported(
+                "checkpoint needs the HV backend".into(),
+            ));
+        };
+        hv.checkpoint(dir)
     }
 
     /// Starts this (not yet started) HV machine from the checkpoint in
@@ -712,18 +728,18 @@ impl Vmm {
                 self.state
             )));
         }
-        self.hv
-            .as_mut()
-            .ok_or_else(|| VmmError::Unsupported("restore needs the HV backend".into()))?
-            .prepare_restore(dir)?;
+        let Machine::Hv(ref mut hv) = self.machine else {
+            return Err(VmmError::Unsupported("restore needs the HV backend".into()));
+        };
+        hv.prepare_restore(dir)?;
         self.start()?;
-        match self.hv.as_mut().map(darwin_hv::HvMachine::finish_restore) {
-            Some(Err(e)) => {
-                let _ = self.stop();
-                Err(e)
-            }
-            _ => Ok(()),
+        if let Machine::Hv(ref mut hv) = self.machine
+            && let Err(e) = hv.finish_restore()
+        {
+            let _ = self.stop();
+            return Err(e);
         }
+        Ok(())
     }
 
     /// Runs the VMM until it exits.
@@ -785,9 +801,9 @@ impl Drop for Vmm {
         if self.state != VmmState::Stopped && self.state != VmmState::Created {
             #[cfg(target_os = "macos")]
             let skip = self.skip_hypervisor_stop
-                && match self.config.backend {
-                    VmBackend::Vz => true,
-                    VmBackend::Hv => false,
+                && match self.machine {
+                    Machine::Vz => true,
+                    Machine::Hv(_) => false,
                 };
             #[cfg(not(target_os = "macos"))]
             let skip = self.skip_hypervisor_stop;
