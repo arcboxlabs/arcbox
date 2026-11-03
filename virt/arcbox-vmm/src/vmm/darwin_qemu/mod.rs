@@ -7,5 +7,10 @@
 )]
 mod args;
 mod process;
+#[allow(
+    dead_code,
+    reason = "the QEMU machine drives it from the next commits on"
+)]
+mod qmp;
 
 pub use process::reap_orphaned_qemu;
