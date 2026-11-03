@@ -92,14 +92,21 @@ start_daemon() {
   echo "daemon start -> dockerd ready: $(since "$s" "$(now)")"
 }
 stop_daemon() {
-  local s left
+  local s left lines
   s=$(now)
+  lines=$(wc -l <"$log")
   kill -TERM "$daemon"
   wait "$daemon" || true
   daemon=
   left=$(qemu)
   echo "SIGTERM -> daemon exit: $(since "$s" "$(now)"), QEMU left: ${left:-none}"
   [ -z "$left" ] || fail "QEMU $left outlived the daemon"
+  # Shutdown waits for every System listener; one that ignores the token
+  # holds the stop for the whole drain timeout. grep reads all of tail's
+  # output: with -q, tail could die of SIGPIPE and pipefail hide the match.
+  if tail -n +"$((lines + 1))" "$log" | grep -F 'Server drain timed out' >/dev/null; then
+    fail "the daemon's server drain timed out"
+  fi
 }
 new_qemu() {
   local pid
