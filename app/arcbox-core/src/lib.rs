@@ -29,6 +29,7 @@ pub mod local_https;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod migration;
+pub mod qemu;
 #[cfg(target_os = "macos")]
 pub mod route_reconciler;
 pub mod runtime;
