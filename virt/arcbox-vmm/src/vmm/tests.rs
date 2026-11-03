@@ -156,9 +156,10 @@ for arg; do
   case $arg in socket,id=qmp,fd=*) qmp=${arg##*=} ;; esac
 done
 printf '{"QMP":{"version":{},"capabilities":[]}}\n' >&"$qmp"
-read -r _ <&"$qmp"
+read -r command <&"$qmp"
+id=$(printf '%s' "$command" | sed 's/.*"id":\([0-9]*\).*/\1/')
 printf '{"event":"SHUTDOWN","data":{"guest":true,"reason":"guest-shutdown"}}\n' >&"$qmp"
-printf '{"return":{}}\n' >&"$qmp"
+printf '{"return":{},"id":%s}\n' "$id" >&"$qmp"
 read -r _ <&"$qmp"
 "#;
 
