@@ -8,7 +8,7 @@
 //! - `linux`: Linux (KVM) manual execution
 
 #[cfg(target_os = "macos")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

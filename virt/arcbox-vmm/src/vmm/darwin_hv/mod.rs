@@ -189,6 +189,7 @@ mod tests {
     use std::os::unix::io::RawFd;
 
     use super::*;
+    use std::os::fd::FromRawFd;
 
     #[test]
     fn test_allocate_device_slot() {

@@ -199,88 +199,27 @@ impl Vmm {
 
     /// Creates the network device configuration for Darwin.
     ///
-    /// Sets up a socketpair for `VZFileHandleNetworkDeviceAttachment` and a
-    /// socket proxy that routes guest traffic through host OS sockets. No
-    /// utun device or pf NAT is needed — this works in any network environment
-    /// including VPNs.
+    /// Wires a socketpair to `VZFileHandleNetworkDeviceAttachment` and the
+    /// host network stack ([`darwin_net::GuestNic`]). No utun device or pf
+    /// NAT is needed — this works in any network environment including VPNs.
     ///
     /// Returns a `VirtioDeviceConfig` with the VZ-side FDs embedded.
     fn create_network_device(&mut self) -> Result<VirtioDeviceConfig> {
-        use arcbox_net::darwin::guest_nat::{self, GuestNat};
-
-        // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
-        let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: socketpair with valid parameters.
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(VmmError::Device(format!(
-                "socketpair failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // Prevent fd inheritance to child processes and enable non-blocking I/O.
-        darwin_net::set_nonblock_cloexec(fds[0])?;
-        darwin_net::set_nonblock_cloexec(fds[1])?;
-
-        // fds[0] = VZ framework side (read guest tx, write guest rx)
-        // fds[1] = host datapath side
-        //
-        // SAFETY: fds are valid file descriptors returned by socketpair.
-        let vz_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: fds are valid file descriptors returned by socketpair.
-        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        // Size both ends of the pair: the VZ side buffers bursts, and the host
-        // datapath side must be able to *send* a full enhanced-MTU frame to the
-        // guest (see NET_SOCKET_BUF_BYTES).
-        darwin_net::set_socket_buffers(vz_fd.as_raw_fd());
-        darwin_net::set_socket_buffers(host_fd.as_raw_fd());
-
         // NOTE(MTU): the MTU the VZ device will negotiate (1500 by default,
         // ABX-423; 4000 under ARCBOX_DIAG_NET_MTU_4000 — see
         // arcbox-vz/src/device/network.rs). The datapath fragments guest-bound
         // UDP datagrams to it (ABX-428); guest-bound TCP segments are bounded
         // by the peer's advertised MSS (TcpBridge peer_mss).
         let net_mtu = arcbox_hypervisor::darwin::desired_network_mtu();
+        let nic =
+            darwin_net::GuestNic::new(net_mtu, self.shared_dns.as_ref(), self.proxy_env.clone())?;
+        self.net_cancel = Some(nic.cancel);
+        self.inbound_listener_manager = Some(nic.inbound);
 
-        let GuestNat {
-            datapath,
-            inbound,
-            cancel,
-        } = GuestNat::new(
-            host_fd,
-            net_mtu,
-            self.shared_dns.as_ref(),
-            self.proxy_env.clone(),
-        );
-        self.net_cancel = Some(cancel);
-        self.inbound_listener_manager = Some(inbound);
-
-        tracing::info!(
-            "Custom network stack: socket proxy (gateway={}, guest={})",
-            guest_nat::GATEWAY_IP,
-            guest_nat::GUEST_IP,
-        );
-
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            VmmError::Device(format!(
-                "tokio runtime not available for network datapath: {e}"
-            ))
-        })?;
-
-        runtime.spawn(async move {
-            if let Err(e) = datapath.run().await {
-                tracing::error!("Network datapath exited with error: {}", e);
-            }
-        });
-
-        tracing::info!("Network datapath task spawned");
-
-        // 5. Keep ownership of the VZ-side fd for VM lifetime and pass the raw
+        // Keep ownership of the VZ-side fd for VM lifetime and pass the raw
         // fd into the hypervisor attachment config.
-        let vz_raw_fd = vz_fd.as_raw_fd();
-        self.net_vz_fd = Some(vz_fd);
+        let vz_raw_fd = nic.guest_fd.as_raw_fd();
+        self.net_vz_fd = Some(nic.guest_fd);
         Ok(VirtioDeviceConfig::network_file_handle(vz_raw_fd))
     }
 
@@ -290,6 +229,7 @@ impl Vmm {
     #[cfg(feature = "vmnet")]
     fn create_vmnet_bridge_nic(&mut self) -> Result<VirtioDeviceConfig> {
         use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetRelay};
+        use std::os::fd::FromRawFd;
 
         // Parse MAC from config.
         let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
