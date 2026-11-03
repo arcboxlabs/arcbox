@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2](https://github.com/arcboxlabs/arcbox/compare/v0.11.1...v0.11.2) (2026-11-03)
+
+
+### Features
+
+* **vmm:** give the QEMU System VM a vmnet bridge NIC ([a5576df](https://github.com/arcboxlabs/arcbox/commit/a5576dfef5bd4425f23525825292e04695a82ddb))
+
+
+### Bug Fixes
+
+* **api:** refuse sandbox event subscriptions where sandboxes cannot run ([add7577](https://github.com/arcboxlabs/arcbox/commit/add7577d7ad5a5ee0ae5f5c2da0cdb2630d39600))
+* **cli:** show the backend the System VM actually runs on ([90e563d](https://github.com/arcboxlabs/arcbox/commit/90e563de4e96635f8609e6aa7b47533f61a34919))
+* **daemon:** stop the Kubernetes API proxy on shutdown ([24b563d](https://github.com/arcboxlabs/arcbox/commit/24b563d78f3e78d33c9df3fd5fb97939dad18ee9))
+* **engine:** report a bridge MAC only for a bridge NIC the VM has ([8b91454](https://github.com/arcboxlabs/arcbox/commit/8b91454830a4a0bfb545bad61a04482368ac1a5d))
+
+
+### Code Refactoring
+
+* **vmm:** move the vmnet bridge NIC into the shared darwin_net ([3ce1c4b](https://github.com/arcboxlabs/arcbox/commit/3ce1c4b5a5a248233736cdbcd37da60a81828490))
+
+
+### Tests
+
+* **bench:** check container IPs from the host in the QEMU acceptance run ([b33d877](https://github.com/arcboxlabs/arcbox/commit/b33d8771fdd2d60beb2a23beaedc92703f673ff3))
+* **bench:** fail the QEMU acceptance run on a server drain timeout ([1b507b7](https://github.com/arcboxlabs/arcbox/commit/1b507b7ce97649dafe543b250fea7830d715fda5))
+
 ## [0.11.1](https://github.com/arcboxlabs/arcbox/compare/v0.11.0...v0.11.1) (2026-11-03)
 
 
