@@ -271,6 +271,17 @@ fn kick(fd: &OwnedFd) {
 /// is set up. With `REPLY_ACK` QEMU waits for the ack of all three. Returns
 /// the guest's ends of the kick and call pipes.
 fn start_queue(fe: &Frontend, guest: &Guest, base: u32) -> (OwnedFd, OwnedFd) {
+    let kick_wr = set_ring(fe, guest, base);
+    let (call_rd, call_wr) = pipe();
+    let index = u64::from(QUEUE).to_ne_bytes();
+    assert_eq!(fe.acked(13, &index, &[call_wr.as_raw_fd()]), 0); // SET_VRING_CALL
+    set_enabled(fe, true);
+    (kick_wr, call_rd)
+}
+
+/// Queue 1's layout, cursor and kick descriptor (`vhost_virtqueue_start`
+/// up to `SET_VRING_KICK`). Returns the guest's end of the kick pipe.
+fn set_ring(fe: &Frontend, guest: &Guest, base: u32) -> OwnedFd {
     fe.vring_state(8, QUEUE, u32::from(QUEUE_SIZE), 0); // SET_VRING_NUM
     fe.vring_state(10, QUEUE, base, 0); // SET_VRING_BASE
     let mut addr = QUEUE.to_ne_bytes().to_vec();
@@ -281,12 +292,20 @@ fn start_queue(fe: &Frontend, guest: &Guest, base: u32) -> (OwnedFd, OwnedFd) {
     addr.extend_from_slice(&0u64.to_ne_bytes());
     fe.send(9, 0, &addr, &[]); // SET_VRING_ADDR
     let (kick_rd, kick_wr) = pipe();
-    let (call_rd, call_wr) = pipe();
     let index = u64::from(QUEUE).to_ne_bytes();
     assert_eq!(fe.acked(12, &index, &[kick_rd.as_raw_fd()]), 0); // SET_VRING_KICK
-    assert_eq!(fe.acked(13, &index, &[call_wr.as_raw_fd()]), 0); // SET_VRING_CALL
-    set_enabled(fe, true);
-    (kick_wr, call_rd)
+    kick_wr
+}
+
+/// Guest RAM: one region at GPA_BASE, mapped by the front-end elsewhere.
+fn set_mem_table(fe: &Frontend, guest: &Guest) {
+    let mut table = 1u32.to_ne_bytes().to_vec();
+    table.extend_from_slice(&0u32.to_ne_bytes());
+    table.extend_from_slice(&GPA_BASE.to_ne_bytes());
+    table.extend_from_slice(&(RAM as u64).to_ne_bytes());
+    table.extend_from_slice(&guest.uva(GPA_BASE).to_ne_bytes());
+    table.extend_from_slice(&0u64.to_ne_bytes());
+    assert_eq!(fe.acked(5, &table, &[guest.file.as_raw_fd()]), 0);
 }
 
 /// `SET_VRING_ENABLE` for queue 1; QEMU always waits for its ack.
@@ -333,14 +352,7 @@ fn qemu_style_session_processes_rings_and_survives_a_restart() {
         &[],
     );
 
-    // Guest RAM: one region at GPA_BASE, mapped by the front-end elsewhere.
-    let mut table = 1u32.to_ne_bytes().to_vec();
-    table.extend_from_slice(&0u32.to_ne_bytes());
-    table.extend_from_slice(&GPA_BASE.to_ne_bytes());
-    table.extend_from_slice(&(RAM as u64).to_ne_bytes());
-    table.extend_from_slice(&guest.uva(GPA_BASE).to_ne_bytes());
-    table.extend_from_slice(&0u64.to_ne_bytes());
-    assert_eq!(fe.acked(5, &table, &[guest.file.as_raw_fd()]), 0);
+    set_mem_table(&fe, &guest);
 
     // A bad request with NEED_REPLY fails without dropping the connection.
     let mut bad = QUEUE.to_ne_bytes().to_vec();
@@ -430,6 +442,63 @@ fn qemu_style_session_processes_rings_and_survives_a_restart() {
         "RESET_DEVICE and disconnect"
     );
     drop(device);
+}
+
+/// QEMU re-sends a queue's call descriptor when the device starts only if the
+/// guest has the queue's MSI-X vector unmasked (`msix_set_vector_notifiers`).
+/// For a masked vector the back-end keeps the masked notifier QEMU installed
+/// before, and QEMU reads it when the guest unmasks the vector
+/// (`virtio_pci_one_vector_unmask`). A back-end that drops the descriptor on
+/// `RESET_DEVICE` loses every interrupt raised before that unmask.
+#[test]
+fn reset_device_keeps_the_call_descriptor() {
+    let (front, back) = UnixStream::pair().unwrap();
+    front
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let device = Upper {
+        acked: Arc::default(),
+        resets: Arc::default(),
+    };
+    let handle = Backend::new("test", device).spawn(back).unwrap();
+    let fe = Frontend { sock: front };
+    let guest = Guest::new();
+    fe.send(16, 0, &(P_MQ | P_REPLY_ACK).to_ne_bytes(), &[]);
+
+    // `vhost_virtqueue_init` installs the masked notifier; a reset follows.
+    // The test keeps its write end open, so the pipe turns readable only when
+    // the back-end writes to it, never because the back-end closed it.
+    let (masked_rd, masked_wr) = pipe();
+    let index = u64::from(QUEUE).to_ne_bytes();
+    assert_eq!(fe.acked(13, &index, &[masked_wr.as_raw_fd()]), 0); // SET_VRING_CALL
+    fe.send(34, 0, &[], &[]); // RESET_DEVICE
+
+    // The device starts while the vector is masked: no SET_VRING_CALL.
+    fe.send(
+        2,
+        0,
+        &(F_VERSION_1 | F_PROTOCOL_FEATURES).to_ne_bytes(),
+        &[],
+    );
+    set_mem_table(&fe, &guest);
+    let kick_wr = set_ring(&fe, &guest, 0);
+    set_enabled(&fe, true);
+    let out = guest.post(0, b"masked");
+    kick(&kick_wr);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while guest.u16_at(GPA_BASE + USED + 2) != 1 {
+        assert!(std::time::Instant::now() < deadline, "chain not consumed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(guest.read(out, 6), b"MASKED");
+    assert!(
+        wait_readable(&masked_rd),
+        "the completion did not interrupt on the masked notifier"
+    );
+
+    drop(fe);
+    handle.join().unwrap();
+    drop(masked_wr);
 }
 
 /// A device with an 8-byte config space, like vhost-user-vsock's guest CID.

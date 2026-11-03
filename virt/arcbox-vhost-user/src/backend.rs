@@ -119,6 +119,11 @@ impl<D: VhostUserDevice> Backend<D> {
         let mut guard = lock(&shared);
         guard.reset(&kq);
         guard.memory = None;
+        // The front-end is gone: release its call descriptors, which notifier
+        // clones a device keeps would otherwise hold open.
+        for vring in guard.vrings.iter_mut() {
+            let _ = vring.set_call(None);
+        }
         drop(guard);
         let device = Arc::into_inner(shared)
             .expect("worker joined; no other state owner")
@@ -363,7 +368,8 @@ impl<D: VhostUserDevice> State<D> {
     }
 
     /// Stops every ring and forgets the virtio features; the memory table
-    /// stays until the front-end replaces it. Protocol features survive: QEMU
+    /// stays until the front-end replaces it, the call descriptors until it
+    /// disconnects (see `Vring::reset`). Protocol features survive: QEMU
     /// negotiates them once per connection and keeps relying on them
     /// (`REPLY_ACK` above all — it blocks for the ack of the `SET_VRING_CALL`
     /// it sends right after a guest-driven `RESET_DEVICE`).
