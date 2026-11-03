@@ -509,8 +509,8 @@ impl VmLifecycleManager {
     }
 
     /// Returns the backend the System VM boots with on this host — the
-    /// configured one, unless a Mac without hardware virtualization falls
-    /// back to QEMU.
+    /// configured one, unless an Apple silicon Mac without hardware
+    /// virtualization falls back to QEMU.
     #[must_use]
     pub fn effective_backend(&self) -> arcbox_vmm::VmBackend {
         self.shared.effective_backend()

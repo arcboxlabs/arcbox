@@ -192,7 +192,7 @@ impl LifecycleShared {
     }
 
     /// The backend the System VM boots with on this host: the configured
-    /// one, or QEMU on a Mac without hardware virtualization
+    /// one, or QEMU on an Apple silicon Mac without hardware virtualization
     /// ([`arcbox_vmm::VmBackend::on_host`]). Never persisted: the machine
     /// record keeps [`Self::backend`].
     pub(super) fn effective_backend(&self) -> arcbox_vmm::VmBackend {
