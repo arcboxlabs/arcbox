@@ -886,11 +886,11 @@ impl Runtime {
     /// - **VZ** uses Apple Rosetta — requires Apple Silicon *and* the System
     ///   VM actually wiring the Rosetta share (`default_vm.rosetta`). If Rosetta
     ///   is disabled the VZ guest has no x86 `binfmt` handler.
-    /// - **HV** uses FEX, which requires the interpreter provisioned in the
-    ///   active boot generation's runtime assets and transported to the guest
-    ///   over the `arcbox` VirtioFS share. The guest agent registers the
-    ///   `binfmt_misc` handler after verifying and materializing FEX onto
-    ///   Btrfs.
+    /// - **HV** and **QEMU** use FEX, which requires the interpreter
+    ///   provisioned in the active boot generation's runtime assets and
+    ///   transported to the guest over the `arcbox` VirtioFS share. The guest
+    ///   agent registers the `binfmt_misc` handler after verifying and
+    ///   materializing FEX onto Btrfs.
     ///
     /// Fail-closed (ABX-375): when the active backend's translator is
     /// unavailable, amd64 requests must return a clear error rather than
@@ -902,7 +902,7 @@ impl Runtime {
                 cfg!(all(target_os = "macos", target_arch = "aarch64"))
                     && self.vm_lifecycle.config().default_vm.rosetta
             }
-            arcbox_vmm::VmBackend::Hv => {
+            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Qemu => {
                 let boot_assets = self.vm_lifecycle.boot_assets();
                 boot_assets
                     .cached_manifest_has_binary("FEX")

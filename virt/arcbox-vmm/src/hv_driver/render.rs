@@ -71,6 +71,7 @@ pub fn vmm_config(spec: &VmSpec) -> Result<VmmConfig> {
         bridge_nic_mac,
         backend: VmBackend::Hv,
         debug_console_socket: spec.debug_console.clone(),
+        qemu: None,
     })
 }
 

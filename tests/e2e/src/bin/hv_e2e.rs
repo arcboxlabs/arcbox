@@ -214,6 +214,7 @@ fn run() -> Result<(), String> {
         bridge_nic_mac: knobs.bridge.then(|| "02:AB:CD:00:00:99".to_string()),
         backend: VmBackend::Hv,
         debug_console_socket: None,
+        qemu: None,
     };
 
     let mut metrics = arcbox_e2e::metrics::RunMetrics::new(

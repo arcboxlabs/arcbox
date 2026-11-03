@@ -79,6 +79,18 @@ pub struct VmmConfig {
     /// — usable even when early boot hangs before networking. Debug aid; left
     /// `None` in production.
     pub debug_console_socket: Option<PathBuf>,
+    /// Where the QEMU backend finds its binary and run files. Required for
+    /// [`VmBackend::Qemu`], ignored by every other backend.
+    pub qemu: Option<QemuHost>,
+}
+
+/// The host side of the QEMU backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QemuHost {
+    /// The `qemu-system-aarch64` to run.
+    pub binary: PathBuf,
+    /// Directory each running QEMU keeps its pidfile in.
+    pub run_dir: PathBuf,
 }
 
 impl Default for VmmConfig {
@@ -102,6 +114,7 @@ impl Default for VmmConfig {
             bridge_nic_mac: None,
             backend: VmBackend::default(),
             debug_console_socket: None,
+            qemu: None,
         }
     }
 }
@@ -128,11 +141,12 @@ impl VmmConfig {
 /// VM backend selection for macOS.
 ///
 /// Selects whether the VMM uses Apple's Virtualization.framework (managed
-/// execution) or Hypervisor.framework (a custom VMM with manual vCPU
-/// execution). The two are parallel, directly-chosen backends — the choice is
-/// not inferred from workload "intent". Either backend can host amd64
-/// workloads; the in-guest x86_64 translator follows the backend (VZ → Apple
-/// Rosetta, HV → FEX) and is configured separately.
+/// execution), Hypervisor.framework (a custom VMM with manual vCPU
+/// execution), or QEMU's TCG software emulation, which needs no hardware
+/// virtualization. They are parallel, directly-chosen backends — the choice is
+/// not inferred from workload "intent". Every backend can host amd64 workloads; the in-guest x86_64 translator follows
+/// the backend (VZ → Apple Rosetta, HV and QEMU → FEX) and is configured
+/// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
@@ -144,15 +158,21 @@ pub enum VmBackend {
     /// The default: Apple-managed and stable.
     #[default]
     Vz = 1,
+    /// QEMU TCG in a child process, for Macs without hardware
+    /// virtualization. Plain computation runs near native speed; syscalls,
+    /// `fork` and memory copies run 13–70 times slower.
+    Qemu = 2,
 }
 
 impl VmBackend {
-    /// Stable lowercase label (`"hv"` / `"vz"`), matching the serde form.
+    /// Stable lowercase label (`"hv"` / `"vz"` / `"qemu"`), matching the
+    /// serde form.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hv => "hv",
             Self::Vz => "vz",
+            Self::Qemu => "qemu",
         }
     }
 
@@ -162,7 +182,27 @@ impl VmBackend {
         match s {
             "hv" => Some(Self::Hv),
             "vz" => Some(Self::Vz),
+            "qemu" => Some(Self::Qemu),
             _ => None,
+        }
+    }
+
+    /// Whether this backend needs the host's hardware virtualization.
+    ///
+    /// Off macOS every variant does: `Vmm::initialize` on Linux boots
+    /// through KVM whatever this field says.
+    #[must_use]
+    pub const fn needs_hardware_virtualization(self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            match self {
+                Self::Hv | Self::Vz => true,
+                Self::Qemu => false,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
         }
     }
 
@@ -176,7 +216,7 @@ impl VmBackend {
     /// backend out.
     ///
     /// Only macOS backends make this distinction — `VmBackend` selects
-    /// between Apple's two frameworks, and `Vmm::initialize` on Linux
+    /// among the macOS backends, and `Vmm::initialize` on Linux
     /// (`vmm/linux.rs`) always boots through KVM regardless of this field,
     /// so it is not even that platform's backend selector. Off macOS every
     /// variant defers entirely to the hardware probe, matching what the
@@ -186,7 +226,7 @@ impl VmBackend {
         #[cfg(target_os = "macos")]
         {
             match self {
-                Self::Hv => false,
+                Self::Hv | Self::Qemu => false,
                 Self::Vz => true,
             }
         }
@@ -205,9 +245,11 @@ impl TryFrom<u8> for VmBackend {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         const HV: u8 = VmBackend::Hv as u8;
         const VZ: u8 = VmBackend::Vz as u8;
+        const QEMU: u8 = VmBackend::Qemu as u8;
         match value {
             HV => Ok(Self::Hv),
             VZ => Ok(Self::Vz),
+            QEMU => Ok(Self::Qemu),
             unknown => Err(unknown),
         }
     }

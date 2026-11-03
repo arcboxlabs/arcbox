@@ -617,7 +617,7 @@ impl LifecycleShared {
         // console, guest rcS spawns no shell). Default: console always attached.
         let backend_has_debug_console = match self.backend() {
             arcbox_vmm::VmBackend::Hv => true,
-            arcbox_vmm::VmBackend::Vz => false,
+            arcbox_vmm::VmBackend::Vz | arcbox_vmm::VmBackend::Qemu => false,
         };
         if std::env::var_os("ARCBOX_NO_DEBUG_CONSOLE").is_some() {
             cmdline = cmdline
@@ -852,7 +852,9 @@ pub(super) fn with_network_config(
 pub(super) fn ensure_earlycon(cmdline: String, backend: arcbox_vmm::VmBackend) -> String {
     match backend {
         arcbox_vmm::VmBackend::Hv => {}
-        arcbox_vmm::VmBackend::Vz => return cmdline,
+        // QEMU's virt PL011 sits elsewhere and has no chardev; the guest's
+        // console is `hvc0`, as on VZ.
+        arcbox_vmm::VmBackend::Vz | arcbox_vmm::VmBackend::Qemu => return cmdline,
     }
     if cmdline
         .split_whitespace()

@@ -37,7 +37,7 @@ mod helpers;
 #[cfg(test)]
 mod tests;
 
-pub use config::{BlockDeviceConfig, SharedDirConfig, VmBackend, VmmConfig, VmmState};
+pub use config::{BlockDeviceConfig, QemuHost, SharedDirConfig, VmBackend, VmmConfig, VmmState};
 use helpers::placeholder_vcpu_snapshots;
 
 /// Virtual Machine Monitor.
@@ -173,6 +173,11 @@ impl Vmm {
                 config.clone(),
                 Arc::clone(&running),
             ))),
+            VmBackend::Qemu => {
+                return Err(VmmError::Unsupported(
+                    "the QEMU backend has no machine yet".to_string(),
+                ));
+            }
         };
 
         Ok(Self {
@@ -275,8 +280,8 @@ impl Vmm {
     /// # Errors
     ///
     /// Returns [`VmmError::PlatformUnsupported`], before touching any
-    /// hypervisor, on a host without hardware virtualization; otherwise an
-    /// error if initialization fails.
+    /// hypervisor, on a host without hardware virtualization for a backend
+    /// that needs it; otherwise an error if initialization fails.
     pub fn initialize(&mut self) -> Result<()> {
         if self.state != VmmState::Created {
             return Err(VmmError::invalid_state(format!(
@@ -284,9 +289,11 @@ impl Vmm {
                 self.state
             )));
         }
-        arcbox_hypervisor::host_virtualization()
-            .require()
-            .map_err(VmmError::PlatformUnsupported)?;
+        if self.config.backend.needs_hardware_virtualization() {
+            arcbox_hypervisor::host_virtualization()
+                .require()
+                .map_err(VmmError::PlatformUnsupported)?;
+        }
 
         self.state = VmmState::Initializing;
         tracing::info!("Initializing VMM");
@@ -621,6 +628,11 @@ impl Vmm {
                     "snapshot capture is not yet implemented for the HV backend".to_string(),
                 ));
             }
+            VmBackend::Qemu => {
+                return Err(VmmError::Unsupported(
+                    "snapshot capture is not implemented for the QEMU backend".to_string(),
+                ));
+            }
             VmBackend::Vz => {
                 if let Some(result) = self.capture_snapshot_darwin() {
                     return result;
@@ -674,6 +686,11 @@ impl Vmm {
             VmBackend::Hv => {
                 return Err(VmmError::Unsupported(
                     "snapshot restore is not yet implemented for the HV backend".to_string(),
+                ));
+            }
+            VmBackend::Qemu => {
+                return Err(VmmError::Unsupported(
+                    "snapshot restore is not implemented for the QEMU backend".to_string(),
                 ));
             }
             VmBackend::Vz => {

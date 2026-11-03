@@ -52,6 +52,7 @@ fn main() {
         bridge_nic_mac: None,
         backend: arcbox_vmm::VmBackend::default(),
         debug_console_socket: None,
+        qemu: None,
     };
 
     println!("VMM Configuration:");

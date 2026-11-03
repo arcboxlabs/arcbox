@@ -106,4 +106,4 @@ pub use snapshot::{
 };
 pub use vcpu::{DeviceManagerExitHandler, ExitHandler, VcpuManager};
 pub use vcpu_stats::{VcpuStats, VcpuStatsSnapshot, VmDebugSnapshot};
-pub use vmm::{BlockDeviceConfig, SharedDirConfig, VmBackend, Vmm, VmmConfig, VmmState};
+pub use vmm::{BlockDeviceConfig, QemuHost, SharedDirConfig, VmBackend, Vmm, VmmConfig, VmmState};
