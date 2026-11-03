@@ -191,6 +191,20 @@ impl LifecycleShared {
         })
     }
 
+    /// The backend the System VM boots with on this host: the configured
+    /// one, or QEMU on a Mac without hardware virtualization
+    /// ([`arcbox_vmm::VmBackend::on_host`]). Never persisted: the machine
+    /// record keeps [`Self::backend`].
+    pub(super) fn effective_backend(&self) -> arcbox_vmm::VmBackend {
+        self.backend()
+            .on_host(crate::host_virtualization().available)
+    }
+
+    /// `config.startup_timeout`, stretched for the effective backend.
+    pub(super) fn startup_timeout(&self) -> std::time::Duration {
+        self.config.startup_timeout * self.effective_backend().startup_timeout_factor()
+    }
+
     /// Gets the agent CID for this lifecycle's machine.
     fn get_cid(&self) -> Result<u32> {
         self.machine_manager
@@ -625,7 +639,7 @@ impl LifecycleActor {
                     machine,
                     VmEvent::Start {
                         create: false,
-                        timeout_ms: self.shared.config.startup_timeout.as_millis() as u64,
+                        timeout_ms: self.shared.startup_timeout().as_millis() as u64,
                     },
                 );
             }
@@ -848,7 +862,7 @@ impl LifecycleActor {
         let timeout = self
             .pending_timeout
             .take()
-            .unwrap_or(self.shared.config.startup_timeout);
+            .unwrap_or_else(|| self.shared.startup_timeout());
         let create = self.decide_create(state);
         self.dispatch(
             machine,
@@ -899,7 +913,7 @@ impl LifecycleActor {
         {
             tracing::info!("guest requested reboot (SYSTEM_RESET); rebooting VM in place");
             let timeout_ms =
-                u64::try_from(self.shared.config.startup_timeout.as_millis()).unwrap_or(u64::MAX);
+                u64::try_from(self.shared.startup_timeout().as_millis()).unwrap_or(u64::MAX);
             self.dispatch(machine, VmEvent::GuestReset { timeout_ms });
         }
     }

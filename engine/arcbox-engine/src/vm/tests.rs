@@ -116,7 +116,7 @@ fn replaced_or_dead_incarnations_cannot_take_the_next_manager() {
         let mut vms = manager.vms.write().unwrap();
         let entry = vms.get_mut(&id).unwrap();
         entry.begin_run().unwrap();
-        let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+        let vmm = Vmm::new(VmManager::build_vmm_config(entry, None)).unwrap();
         vmm.running_flag().store(true, Ordering::SeqCst);
         entry.vmm = Some(vmm);
         entry.info.state = MachineState::Running;
@@ -218,8 +218,12 @@ async fn expected_agent_connection_fences_replacement_and_selects_the_locked_bac
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::Ordering;
 
-    for backend in [arcbox_vmm::VmBackend::Hv, arcbox_vmm::VmBackend::Vz] {
-        let (manager, _dir) = test_vm_manager();
+    for backend in [
+        arcbox_vmm::VmBackend::Hv,
+        arcbox_vmm::VmBackend::Vz,
+        arcbox_vmm::VmBackend::Qemu,
+    ] {
+        let (manager, dir) = test_vm_manager();
         let id = manager
             .create(VmConfig {
                 backend,
@@ -231,7 +235,11 @@ async fn expected_agent_connection_fences_replacement_and_selects_the_locked_bac
             let mut vms = manager.vms.write().unwrap();
             let entry = vms.get_mut(&id).unwrap();
             entry.begin_run().unwrap();
-            let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+            let qemu = arcbox_vmm::QemuHost {
+                binary: "/nonexistent/qemu-system-aarch64".into(),
+                run_dir: dir.path().join("qemu"),
+            };
+            let vmm = Vmm::new(VmManager::build_vmm_config(entry, Some(qemu))).unwrap();
             vmm.running_flag().store(true, Ordering::SeqCst);
             entry.vmm = Some(vmm);
             entry.info.state = MachineState::Running;
@@ -309,7 +317,7 @@ impl VmManager {
         let mut vms = self.vms.write().unwrap();
         let entry = vms.get_mut(&id).unwrap();
         entry.begin_run().unwrap();
-        let vmm = Vmm::new(Self::build_vmm_config(entry)).unwrap();
+        let vmm = Vmm::new(Self::build_vmm_config(entry, None)).unwrap();
         vmm.running_flag().store(true, Ordering::SeqCst);
         entry.vmm = Some(vmm);
         entry.info.state = MachineState::Running;
@@ -369,7 +377,7 @@ fn graceful_completion_never_restores_or_stops_a_replacement_run() {
             let entry = vms.get_mut(&id).unwrap();
             assert!(entry.vmm.is_none());
             entry.begin_run().unwrap();
-            let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+            let vmm = Vmm::new(VmManager::build_vmm_config(entry, None)).unwrap();
             vmm.running_flag()
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             entry.vmm = Some(vmm);

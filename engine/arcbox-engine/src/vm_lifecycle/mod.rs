@@ -345,7 +345,7 @@ impl VmLifecycleManager {
     /// # Errors
     /// Returns an error if VM cannot be started or agent is not ready.
     pub async fn ensure_ready(&self) -> Result<u32> {
-        self.ensure_ready_with_timeout(self.shared.config.startup_timeout)
+        self.ensure_ready_with_timeout(self.shared.startup_timeout())
             .await
     }
 
@@ -502,10 +502,18 @@ impl VmLifecycleManager {
         self.request(Command::ForceStop { reply }, reply_rx).await
     }
 
-    /// Returns the System VM's current hypervisor backend.
+    /// Returns the System VM's configured hypervisor backend.
     #[must_use]
     pub fn backend(&self) -> arcbox_vmm::VmBackend {
         self.shared.backend()
+    }
+
+    /// Returns the backend the System VM boots with on this host — the
+    /// configured one, unless a Mac without hardware virtualization falls
+    /// back to QEMU.
+    #[must_use]
+    pub fn effective_backend(&self) -> arcbox_vmm::VmBackend {
+        self.shared.effective_backend()
     }
 
     /// Sets the hypervisor backend used on the next (re)boot of the System VM.
