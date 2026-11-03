@@ -7,11 +7,14 @@
 //! - Connection lifecycle (`connect` flag)
 //!
 //! The manager maintains a `backend_rxq` — a FIFO of connections with pending
-//! RX operations. The VMM's `poll_vsock_rx` drains this queue, filling guest
-//! RX descriptors from the highest-priority pending operation per connection.
+//! RX operations. `VirtioVsock::poll_rx_injection` drains this queue, filling
+//! guest RX descriptors from the highest-priority pending operation per
+//! connection. [`host_socketpair`] and [`relocate_daemon_end`] build the
+//! socketpair a host connect hands to [`VsockConnectionManager::allocate`].
 
 mod connection;
 mod host_connections;
+mod host_socket;
 mod ops;
 
 #[cfg(test)]
@@ -21,6 +24,7 @@ pub use connection::{
     CREDIT_UPDATE_THRESHOLD, TX_BUFFER_SIZE, VSOCK_SHUTDOWN_F_BOTH, VSOCK_SHUTDOWN_F_RECEIVE,
     VSOCK_SHUTDOWN_F_SEND, VsockConnection, VsockConnectionId,
 };
+pub use host_socket::{host_socketpair, relocate_daemon_end};
 pub use ops::RxOps;
 
 use std::collections::{HashMap, VecDeque};
