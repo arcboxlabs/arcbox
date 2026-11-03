@@ -1856,6 +1856,36 @@ fn unpublished_start_releases_its_vm() {
         .unwrap();
 }
 
+/// On HV and QEMU the bridge NIC exists only while vmnet runs, so a MAC
+/// for a VM without one sent route setup after a bridge that could never
+/// appear: 8 s of retries and a warning on every QEMU start.
+#[tokio::test]
+async fn bridge_mac_names_only_a_bridge_nic_the_vm_has() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let name = manager
+        .create(MachineConfig {
+            name: "default".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let vm_id = manager.get(&name).unwrap().vm_id;
+
+    manager
+        .set_boot_backend(&name, arcbox_vmm::VmBackend::Vz)
+        .unwrap();
+    assert_eq!(
+        manager.bridge_mac(&name),
+        Some(crate::vm::bridge_nic_mac_for_vm_id(&vm_id)),
+        "VZ attaches its NAT NIC with the stable MAC when vmnet is absent"
+    );
+    for backend in [arcbox_vmm::VmBackend::Hv, arcbox_vmm::VmBackend::Qemu] {
+        manager.set_boot_backend(&name, backend).unwrap();
+        assert_eq!(manager.bridge_mac(&name), None, "{backend:?}");
+    }
+}
+
 #[test]
 fn late_start_cannot_overwrite_restarted_or_stopping_machine() {
     let directory = tempdir().unwrap();

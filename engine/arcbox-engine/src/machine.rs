@@ -1072,11 +1072,25 @@ impl MachineManager {
         self.vm_manager.vmnet_interface_mac(&machine.vm_id)
     }
 
-    /// Returns the bridge NIC MAC address for a machine's VM.
+    /// Returns the MAC of a machine VM's bridge NIC (NIC2), when the VM has
+    /// one: the MAC the host finds the VM's bridge interface by.
+    ///
+    /// VZ always attaches one carrying the VM's stable bridge MAC, vmnet's
+    /// interface or, without vmnet, `VZNATNetworkDeviceAttachment`. HV and
+    /// QEMU attach one only while their vmnet interface runs; without it no
+    /// bridge interface can ever appear, and route setup must not wait for
+    /// one.
     pub fn bridge_mac(&self, name: &str) -> Option<String> {
-        let machines = self.machines.read().ok()?;
-        let machine = machines.get(name)?;
-        Some(crate::vm::bridge_nic_mac_for_vm_id(&machine.vm_id))
+        let vm_id = self.machines.read().ok()?.get(name)?.vm_id.clone();
+        match self.vm_manager.backend(&vm_id).ok()? {
+            arcbox_vmm::VmBackend::Vz => Some(crate::vm::bridge_nic_mac_for_vm_id(&vm_id)),
+            #[cfg(all(target_os = "macos", feature = "vmnet"))]
+            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Qemu => {
+                self.vmnet_interface_mac(name)
+            }
+            #[cfg(not(all(target_os = "macos", feature = "vmnet")))]
+            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Qemu => None,
+        }
     }
 
     /// Gets the vsock CID for a running machine.
