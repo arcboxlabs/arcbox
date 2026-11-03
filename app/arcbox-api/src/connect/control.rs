@@ -380,11 +380,16 @@ impl pb::SandboxService for SandboxServiceImpl {
         request: ServiceRequest<'_, pb::SandboxEventsRequest>,
     ) -> ServiceResult<ServiceStream<WatchEventsResponse>> {
         let machine = ctx.sandbox_machine_id()?;
-        let agent = self
-            .runtime
-            .ready()?
-            .get_agent(&machine)
-            .map_err(ApiError::from)?;
+        let runtime = self.runtime.ready()?;
+        // Where no sandbox can run, none can change: refuse the subscription
+        // with `Create`'s reason. The guest would accept the stream and end
+        // it with its missing-KVM error, which a client reads as a dropped
+        // stream to reconnect.
+        let capability = runtime.sandbox_nested_virt();
+        if !capability.supported {
+            return Err(super::sandbox_errors::nested_virt_unsupported(&capability));
+        }
+        let agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let rx = agent
             .sandbox_events(request.to_owned_message())
             .await

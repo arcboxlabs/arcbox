@@ -416,6 +416,64 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// HV cannot nest a sandbox's microVM on macOS, and neither can the QEMU
+    /// a Mac without hardware virtualization falls back to, so the event
+    /// subscription fails as `Create` does instead of opening a stream the
+    /// guest ends at once.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandbox_events_refuse_the_subscription_without_nested_virt() {
+        use arcbox_connect::sandbox_v1::{SandboxEventsRequest, SandboxService as _};
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+
+        let (directory, shared) = storage_runtime();
+        let runtime = Arc::clone(shared.get().unwrap());
+        runtime
+            .vm_lifecycle()
+            .set_backend(arcbox_core::VmBackend::Hv);
+        let expected = runtime.sandbox_nested_virt();
+        assert!(!expected.supported);
+        let service = control::SandboxServiceImpl::new(shared, Arc::default());
+
+        let bytes = bytes::Bytes::from(SandboxEventsRequest::default().encode_to_vec());
+        let view = SandboxEventsRequest::decode_view(&bytes).unwrap();
+        let error = service
+            .events(
+                RequestContext::new(Default::default()),
+                connectrpc::ServiceRequest::from_parts(&view, &bytes),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
+        assert_eq!(
+            error.message.as_deref(),
+            Some(format!("sandboxes cannot run on this host: {}", expected.reason).as_str())
+        );
+        // Desktop stops resubscribing on exactly this detail.
+        let [detail] = error.details.as_slice() else {
+            panic!("expected one detail, got {:?}", error.details);
+        };
+        assert_eq!(detail.type_url, "arcbox.sandbox.v1.ErrorInfo");
+        let bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(detail.value.as_deref().unwrap())
+                .unwrap()
+        };
+        let info = arcbox_connect::sandbox_v1::ErrorInfo::decode_from_slice(&bytes).unwrap();
+        assert_eq!(
+            info.code.as_known(),
+            Some(arcbox_connect::sandbox_v1::ErrorCode::NestedVirtUnsupported)
+        );
+        assert_eq!(
+            info.context.get("reason").map(String::as_str),
+            Some(expected.reason.as_str())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     /// Every request that would boot a VM is refused with the host's reason,
     /// and the System VM ones before they record a backend, write the config
     /// or download boot assets. Runs only on such a host (a Linux container
