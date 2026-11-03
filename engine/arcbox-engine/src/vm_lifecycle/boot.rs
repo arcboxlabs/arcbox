@@ -333,7 +333,16 @@ impl LifecycleShared {
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
-            match self.machine_manager.start(&self.machine_name).await {
+            // The record keeps the configured backend; this start boots the
+            // one the host can run.
+            let started = match self
+                .machine_manager
+                .set_boot_backend(&self.machine_name, self.effective_backend())
+            {
+                Ok(()) => self.machine_manager.start(&self.machine_name).await,
+                Err(e) => Err(e),
+            };
+            match started {
                 Ok(()) => {
                     tracing::info!("Default VM started successfully");
                     self.spawn_route_reconciler();
@@ -546,8 +555,9 @@ impl LifecycleShared {
         // Ensure an explicit earlycon directive so early boot output reaches the
         // host `guest_serial` log — but only on the custom-HV backend, whose PL011
         // emulator the directive targets (VZ has no such device). See
-        // `ensure_earlycon`.
-        cmdline = ensure_earlycon(cmdline, self.backend());
+        // `ensure_earlycon`. The cmdline follows the backend that boots, so a
+        // QEMU fallback reads the same cmdline as the VZ record it boots.
+        cmdline = ensure_earlycon(cmdline, self.effective_backend());
 
         // Inject guest docker vsock port if configured.
         if let Some(port) = self.config.guest_docker_vsock_port {
@@ -615,7 +625,7 @@ impl LifecycleShared {
         // Escape hatch to A/B-test the console's effect on the flaky HV cold
         // boot: `ARCBOX_NO_DEBUG_CONSOLE=1` strips any token (host attaches no
         // console, guest rcS spawns no shell). Default: console always attached.
-        let backend_has_debug_console = match self.backend() {
+        let backend_has_debug_console = match self.effective_backend() {
             arcbox_vmm::VmBackend::Hv => true,
             arcbox_vmm::VmBackend::Vz | arcbox_vmm::VmBackend::Qemu => false,
         };

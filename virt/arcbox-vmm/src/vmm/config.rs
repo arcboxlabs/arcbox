@@ -140,13 +140,24 @@ impl VmmConfig {
     }
 }
 
+/// [`VmBackend::startup_timeout_factor`] for QEMU.
+///
+/// On an idle M4 Pro, TCG boots the kernel to `/init` in 1.5 s and dockerd
+/// from exec to its API in 1.3–2 s, well inside the hardware budgets. The
+/// factor leaves room for a loaded host and for the syscall- and fork-heavy
+/// work TCG runs 13–55 times slower than native; measurements in
+/// `docs/logs/2026-11-02-qemu-tcg-host-backend.md`.
+const QEMU_STARTUP_TIMEOUT_FACTOR: u32 = 2;
+
 /// VM backend selection for macOS.
 ///
 /// Selects whether the VMM uses Apple's Virtualization.framework (managed
 /// execution), Hypervisor.framework (a custom VMM with manual vCPU
 /// execution), or QEMU's TCG software emulation, which needs no hardware
 /// virtualization. They are parallel, directly-chosen backends — the choice is
-/// not inferred from workload "intent". Every backend can host amd64 workloads; the in-guest x86_64 translator follows
+/// not inferred from workload "intent" — except that a Mac without hardware
+/// virtualization boots QEMU whatever was chosen ([`Self::on_host`]). Every
+/// backend can host amd64 workloads; the in-guest x86_64 translator follows
 /// the backend (VZ → Apple Rosetta, HV and QEMU → FEX) and is configured
 /// separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -205,6 +216,34 @@ impl VmBackend {
         #[cfg(not(target_os = "macos"))]
         {
             true
+        }
+    }
+
+    /// The backend a VM configured with `self` boots with on a host whose
+    /// hardware virtualization is `available`.
+    ///
+    /// A Mac without it — a macOS virtual machine — emulates with QEMU
+    /// instead. The fallback is the host's, not the user's: callers boot
+    /// with it and never record it as the configured backend, and only an
+    /// unavailable host triggers it, never a backend that failed to start.
+    /// Off macOS there is no emulator to fall back to, so a host without
+    /// KVM keeps `self` and `Vmm::initialize` refuses the start.
+    #[must_use]
+    pub const fn on_host(self, available: bool) -> Self {
+        if !available && cfg!(target_os = "macos") {
+            Self::Qemu
+        } else {
+            self
+        }
+    }
+
+    /// How many times longer than the hardware backends this one takes to
+    /// boot a guest to a ready agent, which scales every startup timeout.
+    #[must_use]
+    pub const fn startup_timeout_factor(self) -> u32 {
+        match self {
+            Self::Hv | Self::Vz => 1,
+            Self::Qemu => QEMU_STARTUP_TIMEOUT_FACTOR,
         }
     }
 

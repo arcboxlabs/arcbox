@@ -1610,6 +1610,25 @@ impl MachineManager {
             .map(|_| ())
     }
 
+    /// Sets the backend a stopped machine's next start boots on, without
+    /// recording it: the host's fallback ([`arcbox_vmm::VmBackend::on_host`])
+    /// rather than a choice to persist like [`Self::set_backend`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the machine is not found or is running.
+    pub fn set_boot_backend(&self, name: &str, backend: arcbox_vmm::VmBackend) -> Result<()> {
+        let vm_id = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name.to_string()))?
+            .vm_id
+            .clone();
+        self.vm_manager.set_backend(&vm_id, backend)
+    }
+
     /// Reports whether a machine's VM stopped on its own (guest-driven), and if
     /// so whether it was a reboot request. See [`VmManager::vm_self_stopped`].
     #[must_use]
@@ -1644,6 +1663,16 @@ impl MachineManager {
         // Reboot is a slow teardown+reboot; do it without holding the registry
         // lock so concurrent reads stay responsive.
         self.vm_manager.reboot(&vm_id)?;
+        // A backend with host console pipes (QEMU) opened new ones for the
+        // fresh boot; the old drain only sees their predecessors' EOF.
+        #[cfg(target_os = "macos")]
+        {
+            let readers = self
+                .vm_manager
+                .run_incarnation(&vm_id)
+                .and_then(|run| self.vm_manager.dup_serial_readers(&vm_id, &run));
+            self.start_serial_drain(name, readers);
+        }
         tracing::info!("Rebooted machine '{}'", name);
         Ok(())
     }

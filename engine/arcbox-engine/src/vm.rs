@@ -34,6 +34,8 @@ struct VmEntry {
 pub struct VmManager {
     vms: RwLock<HashMap<VmId, VmEntry>>,
     snapshot_manager: SnapshotManager,
+    /// Where VMs on the QEMU backend find QEMU; see [`Self::set_qemu_host`].
+    qemu: RwLock<Option<arcbox_vmm::QemuHost>>,
 }
 
 impl VmManager {
@@ -43,7 +45,20 @@ impl VmManager {
         Self {
             vms: RwLock::new(HashMap::new()),
             snapshot_manager: SnapshotManager::new(snapshot_dir),
+            qemu: RwLock::new(None),
         }
+    }
+
+    /// Sets the QEMU every later start on the QEMU backend runs. A host
+    /// setting, not a VM's: the composer resolves the binary before it boots
+    /// a VM on that backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock is poisoned.
+    pub fn set_qemu_host(&self, host: arcbox_vmm::QemuHost) -> Result<()> {
+        *self.qemu.write().map_err(|_| EngineError::LockPoisoned)? = Some(host);
+        Ok(())
     }
 
     /// Creates a new VM.
@@ -165,7 +180,7 @@ impl VmManager {
         Ok(())
     }
 
-    fn build_vmm_config(entry: &VmEntry) -> VmmConfig {
+    fn build_vmm_config(entry: &VmEntry, qemu: Option<arcbox_vmm::QemuHost>) -> VmmConfig {
         let shared_dirs: Vec<VmmSharedDirConfig> = entry
             .config
             .shared_dirs
@@ -229,7 +244,7 @@ impl VmManager {
             // the System VM between backends.
             backend: entry.config.backend,
             debug_console_socket,
-            qemu: None,
+            qemu,
         }
     }
 
@@ -254,7 +269,12 @@ impl VmManager {
 
         entry.begin_run()?;
 
-        let vmm_config = Self::build_vmm_config(entry);
+        let qemu = self
+            .qemu
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?
+            .clone();
+        let vmm_config = Self::build_vmm_config(entry, qemu);
 
         // Create and start VMM. On failure, roll back state so retries can proceed.
         let mut vmm = match Vmm::new(vmm_config) {
@@ -1091,7 +1111,12 @@ impl VmManager {
         let entry = vms
             .get(id)
             .ok_or_else(|| EngineError::not_found(id.to_string()))?;
-        Ok(Self::build_vmm_config(entry))
+        let qemu = self
+            .qemu
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?
+            .clone();
+        Ok(Self::build_vmm_config(entry, qemu))
     }
 }
 
