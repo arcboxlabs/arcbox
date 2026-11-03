@@ -374,8 +374,9 @@ impl Vmm {
     /// Waits for the guest VM to reach the Stopped state.
     ///
     /// The shutdown RPC initiates guest teardown. HV completion comes from
-    /// PSCI SYSTEM_OFF; VZ completion comes from the framework's stopped state.
-    /// Exclusive access prevents concurrent consumption of the HV completion.
+    /// PSCI SYSTEM_OFF, QEMU's from its guest-shutdown event; VZ completion
+    /// comes from the framework's stopped state. Exclusive access prevents
+    /// concurrent consumption of the HV completion.
     ///
     /// Returns `Ok(true)` if the VM stopped within `timeout`, `Ok(false)` on timeout.
     pub fn wait_for_stopped(&mut self, timeout: Duration) -> Result<bool> {
@@ -383,6 +384,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => {}
             Machine::Hv(ref mut hv) => return hv.wait_for_poweroff(timeout, running),
+            Machine::Qemu(ref mut qemu) => return qemu.wait_for_poweroff(timeout, running),
         }
 
         if self.state != VmmState::Running {
@@ -416,6 +418,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => {}
             Machine::Hv(ref hv) => return hv.connect_vsock(port),
+            Machine::Qemu(ref qemu) => return qemu.connect_vsock(port),
         }
         let vm = self
             .darwin_vm
@@ -424,7 +427,7 @@ impl Vmm {
         vm.connect_vsock(port).map_err(VmmError::Hypervisor)
     }
 
-    /// Duplicates the host read ends of the VZ console pipes for the
+    /// Duplicates the host read ends of the guest's `hvc0` and `hvc1` for the
     /// engine's serial drain. `None` on the HV backend, whose console is a
     /// virtio device this VMM drains itself (`guest_console` target).
     pub fn dup_serial_readers(&self) -> Result<Option<arcbox_hypervisor::darwin::SerialReaders>> {
@@ -435,6 +438,7 @@ impl Vmm {
                 .map(|vm| vm.dup_serial_readers().map_err(VmmError::Hypervisor))
                 .transpose(),
             Machine::Hv(_) => Ok(None),
+            Machine::Qemu(ref qemu) => qemu.dup_serial_readers().map(Some),
         }
     }
 
@@ -475,6 +479,11 @@ impl Vmm {
         match self.machine {
             Machine::Vz => {}
             Machine::Hv(ref hv) => return hv.set_balloon_target(target_bytes),
+            Machine::Qemu(_) => {
+                return Err(VmmError::Unsupported(
+                    "the QEMU backend has no balloon".to_string(),
+                ));
+            }
         }
         let vm = self
             .darwin_vm
@@ -500,6 +509,7 @@ impl Vmm {
                 .as_ref()
                 .map_or(0, DarwinVm::get_balloon_target_memory),
             Machine::Hv(ref hv) => hv.balloon_bytes().0,
+            Machine::Qemu(_) => 0,
         }
     }
 
@@ -511,6 +521,7 @@ impl Vmm {
         let (target_bytes, current_bytes) = match self.machine {
             Machine::Vz => (self.get_balloon_target(), 0),
             Machine::Hv(ref hv) => hv.balloon_bytes(),
+            Machine::Qemu(_) => (0, 0),
         };
         arcbox_hypervisor::BalloonStats {
             target_bytes,
@@ -526,6 +537,8 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.inbound_listener_manager.as_mut(),
             Machine::Hv(ref mut hv) => hv.inbound_listener_manager(),
+            // No NIC yet.
+            Machine::Qemu(_) => None,
         }
     }
 
@@ -539,6 +552,7 @@ impl Vmm {
         match self.machine {
             Machine::Vz => self.inbound_listener_manager.take(),
             Machine::Hv(ref mut hv) => hv.take_inbound_listener_manager(),
+            Machine::Qemu(_) => None,
         }
     }
 
