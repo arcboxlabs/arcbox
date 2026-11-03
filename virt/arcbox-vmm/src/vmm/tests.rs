@@ -127,7 +127,10 @@ fn hv_stop_wait_requires_guest_poweroff_and_retains_completion() {
     })
     .unwrap();
     let (poweroff, receiver) = crossbeam_channel::unbounded();
-    vmm.hv.as_mut().unwrap().hv_poweroff_rx = Some(receiver);
+    let Machine::Hv(ref mut hv) = vmm.machine else {
+        panic!("an HV config builds an HV machine");
+    };
+    hv.hv_poweroff_rx = Some(receiver);
     vmm.state = VmmState::Running;
 
     // Host stop and vCPU failures also clear running; neither proves guest poweroff.
@@ -154,7 +157,10 @@ fn hv_stop_wait_rejects_vcpu_exit_without_guest_poweroff() {
     })
     .unwrap();
     let (poweroff, receiver) = crossbeam_channel::unbounded();
-    vmm.hv.as_mut().unwrap().hv_poweroff_rx = Some(receiver);
+    let Machine::Hv(ref mut hv) = vmm.machine else {
+        panic!("an HV config builds an HV machine");
+    };
+    hv.hv_poweroff_rx = Some(receiver);
     vmm.state = VmmState::Running;
     drop(poweroff);
 

@@ -380,8 +380,9 @@ impl Vmm {
     /// Returns `Ok(true)` if the VM stopped within `timeout`, `Ok(false)` on timeout.
     pub fn wait_for_stopped(&mut self, timeout: Duration) -> Result<bool> {
         let running = self.state == VmmState::Running;
-        if let Some(ref mut hv) = self.hv {
-            return hv.wait_for_poweroff(timeout, running);
+        match self.machine {
+            Machine::Vz => {}
+            Machine::Hv(ref mut hv) => return hv.wait_for_poweroff(timeout, running),
         }
 
         if self.state != VmmState::Running {
@@ -412,8 +413,9 @@ impl Vmm {
             )));
         }
 
-        if let Some(ref hv) = self.hv {
-            return hv.connect_vsock(port);
+        match self.machine {
+            Machine::Vz => {}
+            Machine::Hv(ref hv) => return hv.connect_vsock(port),
         }
         let vm = self
             .darwin_vm
@@ -426,10 +428,14 @@ impl Vmm {
     /// engine's serial drain. `None` on the HV backend, whose console is a
     /// virtio device this VMM drains itself (`guest_console` target).
     pub fn dup_serial_readers(&self) -> Result<Option<arcbox_hypervisor::darwin::SerialReaders>> {
-        self.darwin_vm
-            .as_ref()
-            .map(|vm| vm.dup_serial_readers().map_err(VmmError::Hypervisor))
-            .transpose()
+        match self.machine {
+            Machine::Vz => self
+                .darwin_vm
+                .as_ref()
+                .map(|vm| vm.dup_serial_readers().map_err(VmmError::Hypervisor))
+                .transpose(),
+            Machine::Hv(_) => Ok(None),
+        }
     }
 
     /// Reads console output (hvc0) from the VM.
@@ -466,8 +472,9 @@ impl Vmm {
             )));
         }
 
-        if let Some(ref hv) = self.hv {
-            return hv.set_balloon_target(target_bytes);
+        match self.machine {
+            Machine::Vz => {}
+            Machine::Hv(ref hv) => return hv.set_balloon_target(target_bytes),
         }
         let vm = self
             .darwin_vm
@@ -487,12 +494,12 @@ impl Vmm {
             return 0;
         }
 
-        match self.hv {
-            Some(ref hv) => hv.balloon_bytes().0,
-            None => self
+        match self.machine {
+            Machine::Vz => self
                 .darwin_vm
                 .as_ref()
                 .map_or(0, DarwinVm::get_balloon_target_memory),
+            Machine::Hv(ref hv) => hv.balloon_bytes().0,
         }
     }
 
@@ -501,9 +508,9 @@ impl Vmm {
     /// Returns current balloon stats including target, current, and configured memory sizes.
     #[must_use]
     pub fn get_balloon_stats(&self) -> arcbox_hypervisor::BalloonStats {
-        let (target_bytes, current_bytes) = match self.hv {
-            Some(ref hv) => hv.balloon_bytes(),
-            None => (self.get_balloon_target(), 0),
+        let (target_bytes, current_bytes) = match self.machine {
+            Machine::Vz => (self.get_balloon_target(), 0),
+            Machine::Hv(ref hv) => hv.balloon_bytes(),
         };
         arcbox_hypervisor::BalloonStats {
             target_bytes,
@@ -516,9 +523,9 @@ impl Vmm {
     pub const fn inbound_listener_manager(
         &mut self,
     ) -> Option<&mut arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        match self.hv {
-            Some(ref mut hv) => hv.inbound_listener_manager(),
-            None => self.inbound_listener_manager.as_mut(),
+        match self.machine {
+            Machine::Vz => self.inbound_listener_manager.as_mut(),
+            Machine::Hv(ref mut hv) => hv.inbound_listener_manager(),
         }
     }
 
@@ -529,9 +536,9 @@ impl Vmm {
     pub const fn take_inbound_listener_manager(
         &mut self,
     ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        match self.hv {
-            Some(ref mut hv) => hv.take_inbound_listener_manager(),
-            None => self.inbound_listener_manager.take(),
+        match self.machine {
+            Machine::Vz => self.inbound_listener_manager.take(),
+            Machine::Hv(ref mut hv) => hv.take_inbound_listener_manager(),
         }
     }
 
