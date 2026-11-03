@@ -416,61 +416,105 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    /// HV cannot nest a sandbox's microVM on macOS, and neither can the QEMU
-    /// a Mac without hardware virtualization falls back to, so the event
-    /// subscription fails as `Create` does instead of opening a stream the
-    /// guest ends at once.
-    #[cfg(target_os = "macos")]
+    /// Where no sandbox can run, every sandbox RPC that would reach the
+    /// guest refuses before dialing it with `Create`'s reason: the guest's
+    /// own missing-KVM error describes the guest (it advises VZ on a Mac
+    /// that cannot run VZ), and `Events` would open a stream the guest ends
+    /// at once.
     #[tokio::test]
-    async fn sandbox_events_refuse_the_subscription_without_nested_virt() {
-        use arcbox_connect::sandbox_v1::{SandboxEventsRequest, SandboxService as _};
+    async fn sandbox_rpcs_refuse_up_front_without_nested_virt() {
+        use arcbox_connect::sandbox_v1::{self as pb, SandboxService as _};
         use buffa::Message as _;
         use connectrpc::HasMessageView as _;
 
+        /// The error `$service.$method` answers for `pb::$request { .. }`,
+        /// defaulted when no fields are given.
+        macro_rules! refusal {
+            ($service:ident.$method:ident(pb::$request:ident)) => {
+                refusal!($service.$method(pb::$request { ..Default::default() }))
+            };
+            ($service:ident.$method:ident(pb::$request:ident { $($field:tt)* })) => {{
+                let bytes = bytes::Bytes::from(pb::$request { $($field)* }.encode_to_vec());
+                let view = pb::$request::decode_view(&bytes).unwrap();
+                let context = RequestContext::new(Default::default());
+                let request = connectrpc::ServiceRequest::from_parts(&view, &bytes);
+                (stringify!($service.$method), $service.$method(context, request).await.err())
+            }};
+        }
+
+        // QEMU never nests on macOS. Elsewhere every backend defers to the
+        // host's KVM, and a host that can nest has nothing to refuse.
+        #[cfg(not(target_os = "macos"))]
+        if arcbox_computer::nested_virt_for_backend(arcbox_core::VmBackend::Qemu).supported {
+            return;
+        }
         let (directory, shared) = storage_runtime();
         let runtime = Arc::clone(shared.get().unwrap());
         runtime
             .vm_lifecycle()
-            .set_backend(arcbox_core::VmBackend::Hv);
+            .set_backend(arcbox_core::VmBackend::Qemu);
         let expected = runtime.sandbox_nested_virt();
         assert!(!expected.supported);
-        let service = control::SandboxServiceImpl::new(shared, Arc::default());
+        let control = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
 
-        let bytes = bytes::Bytes::from(SandboxEventsRequest::default().encode_to_vec());
-        let view = SandboxEventsRequest::decode_view(&bytes).unwrap();
-        let error = service
-            .events(
-                RequestContext::new(Default::default()),
-                connectrpc::ServiceRequest::from_parts(&view, &bytes),
-            )
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
-        assert_eq!(
-            error.message.as_deref(),
-            Some(format!("sandboxes cannot run on this host: {}", expected.reason).as_str())
-        );
-        // Desktop stops resubscribing on exactly this detail.
-        let [detail] = error.details.as_slice() else {
-            panic!("expected one detail, got {:?}", error.details);
-        };
-        assert_eq!(detail.type_url, "arcbox.sandbox.v1.ErrorInfo");
-        let bytes = {
-            use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(detail.value.as_deref().unwrap())
-                .unwrap()
-        };
-        let info = arcbox_connect::sandbox_v1::ErrorInfo::decode_from_slice(&bytes).unwrap();
-        assert_eq!(
-            info.code.as_known(),
-            Some(arcbox_connect::sandbox_v1::ErrorCode::NestedVirtUnsupported)
-        );
-        assert_eq!(
-            info.context.get("reason").map(String::as_str),
-            Some(expected.reason.as_str())
-        );
+        // Answered host-side, so it is the one call that still succeeds.
+        let (_, error) = refusal!(control.get_capabilities(pb::GetCapabilitiesRequest));
+        assert!(error.is_none(), "{error:?}");
+        let refusals = [
+            refusal!(control.create(pb::CreateSandboxRequest)),
+            refusal!(control.stop(pb::StopSandboxRequest)),
+            refusal!(control.remove(pb::RemoveSandboxRequest)),
+            refusal!(control.pause(pb::PauseSandboxRequest)),
+            refusal!(control.resume(pb::ResumeSandboxRequest)),
+            refusal!(control.set_lifecycle(pb::SetLifecycleRequest)),
+            refusal!(control.inspect(pb::InspectSandboxRequest)),
+            refusal!(control.list(pb::ListSandboxesRequest)),
+            refusal!(control.expose_port(pb::ExposePortRequest {
+                sandbox_port: 8080,
+                ..Default::default()
+            })),
+            refusal!(control.list_exposed_ports(pb::ListExposedPortsRequest)),
+            refusal!(control.unexpose_port(pb::UnexposePortRequest {
+                sandbox_port: 8080,
+                ..Default::default()
+            })),
+            refusal!(control.events(pb::SandboxEventsRequest)),
+        ];
+        for (rpc, error) in refusals {
+            let error = error.unwrap_or_else(|| panic!("{rpc} succeeded"));
+            assert_eq!(
+                error.code,
+                connectrpc::ErrorCode::FailedPrecondition,
+                "{rpc}"
+            );
+            assert_eq!(
+                error.message.as_deref(),
+                Some(format!("sandboxes cannot run on this host: {}", expected.reason).as_str()),
+                "{rpc}"
+            );
+            // Desktop shows its unsupported state on exactly this detail.
+            let [detail] = error.details.as_slice() else {
+                panic!("{rpc}: expected one detail, got {:?}", error.details);
+            };
+            assert_eq!(detail.type_url, "arcbox.sandbox.v1.ErrorInfo", "{rpc}");
+            let bytes = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD_NO_PAD
+                    .decode(detail.value.as_deref().unwrap())
+                    .unwrap()
+            };
+            let info = pb::ErrorInfo::decode_from_slice(&bytes).unwrap();
+            assert_eq!(
+                info.code.as_known(),
+                Some(pb::ErrorCode::NestedVirtUnsupported),
+                "{rpc}"
+            );
+            assert_eq!(
+                info.context.get("reason").map(String::as_str),
+                Some(expected.reason.as_str()),
+                "{rpc}"
+            );
+        }
         std::fs::remove_dir_all(directory).unwrap();
     }
 
