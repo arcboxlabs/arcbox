@@ -5,21 +5,14 @@
 # small-file trees under /Users and /private) and EXEC_ROUNDS.
 . /arcbox/probe/env
 bb=/bin/busybox
-X=/dev/.probe
-rpc=$X/agent-rpc
+rpc=/arcbox/bin/agent-rpc
 R=/run/arcbox/data/runtime
 RT=/arcbox/runtime/$G
 say() { $bb printf 'PROBE %s\n' "$*" > /dev/console; }
 up() { $bb cut -d' ' -f1 /proc/uptime; }
 drop() { echo 3 > /proc/sys/vm/drop_caches; }
 
-# The helpers run from devtmpfs too; see wrapper.sh.
-$bb mkdir -p $X
-for b in agent-rpc exec-coherence; do
-  $bb cat /arcbox/bin/$b > $X/$b
-  $bb chmod 755 $X/$b
-done
-say "$($X/exec-coherence /arcbox/probe/ret2.bin /arcbox/probe/exec $EXEC_ROUNDS 2>&1)"
+say "$(/arcbox/bin/exec-coherence /arcbox/probe/ret2.bin /arcbox/probe/exec $EXEC_ROUNDS 2>&1)"
 
 i=0
 until $rpc 1 > /run/p-ping 2>&1; do

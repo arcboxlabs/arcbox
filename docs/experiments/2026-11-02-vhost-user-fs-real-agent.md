@@ -136,7 +136,9 @@ passed. From the devtmpfs copy: 4 of 4 passed.
 - Commits: the probe commits under `virt/arcbox-vhost-user/examples/`,
   and `fix(fs): read guest open flags as Linux flags`, which this probe
   found ([log](../logs/2026-11-02-fuse-open-flags.md)).
-- Open: the QEMU fix for finding 5; rerun the probe on the patched QEMU,
-  where the last check should pass with the agent run straight from the
-  share.
+- Closed 2026-11-03: rerun on arcboxlabs/qemu `aa1c259` with `-cpu
+  max,pauth-impdef=on,dic=off`, `guest/wrapper.sh` now running the agent
+  and helpers straight from the share. Every check passed, exec coherence
+  included (`buffered=2 direct=2 share-stale=0/16`); EnsureRuntime until
+  ready 7.01 s, QEMU wall time 18.5 s.
 - Open: HV's DAX window for `/arcbox` is never used (finding 1).
