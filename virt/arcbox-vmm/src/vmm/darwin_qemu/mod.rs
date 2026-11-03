@@ -6,6 +6,10 @@
     reason = "the QEMU machine renders it from the next commits on"
 )]
 mod args;
+#[allow(
+    dead_code,
+    reason = "the QEMU machine spawns it from the next commit on"
+)]
 mod process;
 #[allow(
     dead_code,
