@@ -124,31 +124,30 @@ impl QemuProcess {
 
     /// Whether QEMU has exited.
     pub(super) fn has_exited(&self) -> bool {
-        self.wait_exit(Some(Duration::ZERO))
+        self.wait_exit(Duration::ZERO)
     }
 
-    /// Waits up to `timeout` (`None`: for good) for QEMU to exit; `true`
-    /// once it has.
-    pub(super) fn wait_exit(&self, timeout: Option<Duration>) -> bool {
+    /// Waits up to `timeout` for QEMU to exit; `true` once it has.
+    fn wait_exit(&self, timeout: Duration) -> bool {
         let (lock, cvar) = &*self.exit;
         let Ok(slot) = lock.lock() else { return true };
-        let running = |status: &mut Option<i32>| status.is_none();
-        match timeout {
-            Some(timeout) => cvar
-                .wait_timeout_while(slot, timeout, running)
-                .map_or(true, |(slot, _)| slot.is_some()),
-            None => cvar.wait_while(slot, running).is_ok(),
-        }
+        cvar.wait_timeout_while(slot, timeout, |status| status.is_none())
+            .map_or(true, |(slot, _)| slot.is_some())
     }
 
     /// Ends QEMU: `quit` (the caller's closure, over QMP) first, then
     /// SIGTERM, then SIGKILL, each given [`EXIT_GRACE`]. Returns QEMU's
     /// last stderr lines once the process is gone and its threads joined.
-    pub(super) fn terminate(mut self, quit: impl FnOnce()) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Gives the process back when it outlives SIGKILL, stuck in host I/O,
+    /// so the caller keeps tracking it and a later stop tries again.
+    pub(super) fn terminate(mut self, quit: impl FnOnce()) -> std::result::Result<String, Self> {
         if !self.has_exited() {
             quit();
             for signal in [libc::SIGTERM, libc::SIGKILL] {
-                if self.wait_exit(Some(EXIT_GRACE)) {
+                if self.wait_exit(EXIT_GRACE) {
                     break;
                 }
                 tracing::warn!(pid = self.pid, signal, "QEMU still running; signalling it");
@@ -156,12 +155,15 @@ impl QemuProcess {
                 // have been reused.
                 unsafe { libc::kill(self.pid, signal) };
             }
-            self.wait_exit(None);
+            if !self.wait_exit(EXIT_GRACE) {
+                tracing::error!(pid = self.pid, "QEMU survived SIGKILL");
+                return Err(self);
+            }
         }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
-        self.stderr_tail()
+        Ok(self.stderr_tail())
     }
 }
 

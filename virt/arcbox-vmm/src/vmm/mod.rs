@@ -476,7 +476,7 @@ impl Vmm {
             match self.machine {
                 Machine::Vz => self.stop_darwin_vm()?,
                 Machine::Hv(ref mut hv) => hv.stop()?,
-                Machine::Qemu(ref mut qemu) => qemu.stop(),
+                Machine::Qemu(ref mut qemu) => qemu.stop()?,
             }
         }
         #[cfg(target_os = "linux")]
