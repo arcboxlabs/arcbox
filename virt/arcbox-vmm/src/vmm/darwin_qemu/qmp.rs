@@ -1,7 +1,8 @@
 //! QMP, QEMU's JSON control protocol, over the monitor socketpair.
 //!
 //! One reader thread owns the read half: replies go to the command waiting
-//! for them, events update [`GuestEvents`]. With `-no-reboot` a guest reset
+//! for them, matched by the `id` each command carries, and events update
+//! [`GuestEvents`]. With `-no-reboot` a guest reset
 //! arrives as `SHUTDOWN` with reason `guest-reset` and QEMU then exits, so
 //! the machine looks like HV after a PSCI SYSTEM_RESET: stopped, with the
 //! reset flagged for the lifecycle to reboot it. A `STOP` that the host did
@@ -12,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -33,12 +34,23 @@ pub(super) struct GuestEvents {
 
 /// A QMP session past capability negotiation.
 pub(super) struct Qmp {
-    /// The write half and the replies, taken together by each command.
-    commands: Mutex<(
-        UnixStream,
-        mpsc::Receiver<std::result::Result<Value, String>>,
-    )>,
+    commands: Mutex<Commands>,
     reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The write half and the replies, taken together by each command.
+struct Commands {
+    stream: UnixStream,
+    replies: mpsc::Receiver<Reply>,
+    /// The `id` of the last command sent.
+    last_id: u64,
+}
+
+/// QEMU's answer to the command whose `id` it echoes.
+#[derive(Debug, PartialEq)]
+struct Reply {
+    id: Option<u64>,
+    result: std::result::Result<Value, String>,
 }
 
 impl Qmp {
@@ -56,7 +68,11 @@ impl Qmp {
             .name("qemu-qmp".into())
             .spawn(move || read_messages(read_half, &replies_tx, &events))?;
         let qmp = Self {
-            commands: Mutex::new((stream, replies_rx)),
+            commands: Mutex::new(Commands {
+                stream,
+                replies: replies_rx,
+                last_id: 0,
+            }),
             reader: Some(reader),
         };
         qmp.execute("qmp_capabilities")?;
@@ -68,26 +84,43 @@ impl Qmp {
     /// # Errors
     ///
     /// Returns QEMU's error, or an error when it does not answer within
-    /// [`COMMAND_TIMEOUT`].
+    /// [`COMMAND_TIMEOUT`]. A reply that comes after its command timed out
+    /// is dropped when it arrives, never taken for a later command's.
     pub(super) fn execute(&self, command: &str) -> Result<Value> {
         let mut guard = self
             .commands
             .lock()
             .map_err(|_| VmmError::Device("QMP lock poisoned".into()))?;
-        let (stream, replies) = &mut *guard;
-        let mut line = serde_json::to_vec(&serde_json::json!({ "execute": command }))
+        let commands = &mut *guard;
+        commands.last_id += 1;
+        let id = commands.last_id;
+        let mut line = serde_json::to_vec(&serde_json::json!({ "execute": command, "id": id }))
             .map_err(|e| VmmError::Device(format!("QMP encode: {e}")))?;
         line.push(b'\n');
-        stream.write_all(&line)?;
-        match replies.recv_timeout(COMMAND_TIMEOUT) {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(message)) => Err(VmmError::Device(format!("QMP {command}: {message}"))),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(VmmError::Device(format!(
-                "QMP {command}: no reply within {COMMAND_TIMEOUT:?}"
-            ))),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(VmmError::Device(format!(
-                "QMP {command}: QEMU closed the monitor"
-            ))),
+        commands.stream.write_all(&line)?;
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match commands.replies.recv_timeout(remaining) {
+                Ok(reply) if reply.id == Some(id) => {
+                    return reply
+                        .result
+                        .map_err(|message| VmmError::Device(format!("QMP {command}: {message}")));
+                }
+                Ok(late) => {
+                    tracing::debug!(id = ?late.id, "QMP: dropping a reply nobody waits for");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(VmmError::Device(format!(
+                        "QMP {command}: no reply within {COMMAND_TIMEOUT:?}"
+                    )));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(VmmError::Device(format!(
+                        "QMP {command}: QEMU closed the monitor"
+                    )));
+                }
+            }
         }
     }
 
@@ -99,11 +132,7 @@ impl Qmp {
     }
 }
 
-fn read_messages(
-    stream: UnixStream,
-    replies: &mpsc::Sender<std::result::Result<Value, String>>,
-    events: &GuestEvents,
-) {
+fn read_messages(stream: UnixStream, replies: &mpsc::Sender<Reply>, events: &GuestEvents) {
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
         let message: Value = match serde_json::from_str(&line) {
@@ -127,7 +156,7 @@ fn read_messages(
 #[derive(Debug, PartialEq)]
 enum Message {
     Greeting,
-    Reply(std::result::Result<Value, String>),
+    Reply(Reply),
     Event(Event),
 }
 
@@ -147,15 +176,22 @@ fn classify(message: &Value) -> Message {
     if message.get("QMP").is_some() {
         return Message::Greeting;
     }
+    let id = message.get("id").and_then(Value::as_u64);
     if let Some(value) = message.get("return") {
-        return Message::Reply(Ok(value.clone()));
+        return Message::Reply(Reply {
+            id,
+            result: Ok(value.clone()),
+        });
     }
     if let Some(error) = message.get("error") {
         let desc = error
             .get("desc")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        return Message::Reply(Err(desc.to_owned()));
+        return Message::Reply(Reply {
+            id,
+            result: Err(desc.to_owned()),
+        });
     }
     let name = message
         .get("event")
@@ -248,6 +284,29 @@ mod tests {
         assert!(!events.running.load(Ordering::SeqCst));
     }
 
+    /// A reply that comes after its command timed out carries that command's
+    /// `id`; the command waiting now must get its own reply instead.
+    #[test]
+    fn a_late_reply_is_not_taken_for_a_later_command() {
+        let (host, qemu) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut writer = qemu.try_clone().unwrap();
+            let mut lines = BufReader::new(qemu).lines();
+            writeln!(writer, r#"{{"QMP":{{"version":{{}},"capabilities":[]}}}}"#).unwrap();
+            for answer in ["{}", r#""running""#] {
+                let command: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+                let id = command["id"].as_u64().unwrap();
+                writeln!(writer, r#"{{"return":"late","id":{}}}"#, id - 1).unwrap();
+                writeln!(writer, r#"{{"return":{answer},"id":{id}}}"#).unwrap();
+            }
+        });
+        let (events, _poweroff) = guest_events();
+        let qmp = Qmp::connect(host, events).unwrap();
+        assert_eq!(qmp.execute("query-status").unwrap(), json!("running"));
+        fake.join().unwrap();
+        qmp.join();
+    }
+
     #[test]
     fn replies_and_greetings_are_told_from_events() {
         assert_eq!(
@@ -255,12 +314,18 @@ mod tests {
             Message::Greeting
         );
         assert_eq!(
-            classify(&json!({ "return": {} })),
-            Message::Reply(Ok(json!({})))
+            classify(&json!({ "return": {}, "id": 7 })),
+            Message::Reply(Reply {
+                id: Some(7),
+                result: Ok(json!({}))
+            })
         );
         assert_eq!(
             classify(&json!({ "error": { "class": "GenericError", "desc": "nope" } })),
-            Message::Reply(Err("nope".into()))
+            Message::Reply(Reply {
+                id: None,
+                result: Err("nope".into())
+            })
         );
         assert_eq!(
             classify(&json!({ "event": "STOP", "timestamp": {} })),
