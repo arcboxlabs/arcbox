@@ -179,7 +179,7 @@ impl VmManager {
             arcbox_vmm::VmBackend::Hv if cfg!(target_os = "macos") => {
                 AgentClient::from_fd_blocking(cid, fd)
             }
-            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Vz => {
+            arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Vz | arcbox_vmm::VmBackend::Qemu => {
                 AgentClient::from_fd_async(cid, fd)
             }
         }

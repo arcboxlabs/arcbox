@@ -270,6 +270,7 @@ fn backend_to_proto(backend: arcbox_core::VmBackend) -> SystemVmBackend {
     match backend {
         arcbox_core::VmBackend::Hv => SystemVmBackend::Hv,
         arcbox_core::VmBackend::Vz => SystemVmBackend::Vz,
+        arcbox_core::VmBackend::Qemu => SystemVmBackend::Qemu,
     }
 }
 

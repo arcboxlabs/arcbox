@@ -82,6 +82,7 @@ fn main() {
         bridge_nic_mac: None,
         backend: arcbox_vmm::VmBackend::Hv, // Force HV backend
         debug_console_socket: None,
+        qemu: None,
     };
 
     println!("[config] backend: HV (Hypervisor.framework)");

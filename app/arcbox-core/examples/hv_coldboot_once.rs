@@ -132,6 +132,7 @@ fn run() -> Result<Outcome, Failure> {
         bridge_nic_mac: None,
         backend: VmBackend::Hv,
         debug_console_socket: None,
+        qemu: None,
     };
 
     let mut vmm = Vmm::new(config).map_err(|e| Failure::Error {

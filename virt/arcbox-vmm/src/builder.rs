@@ -314,6 +314,7 @@ impl VmBuilder {
             bridge_nic_mac: None,
             backend: crate::VmBackend::default(),
             debug_console_socket: None,
+            qemu: None,
         };
 
         tracing::info!(

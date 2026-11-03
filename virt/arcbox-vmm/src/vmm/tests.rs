@@ -46,13 +46,14 @@ fn test_vmm_requires_guest_cid_when_vsock_enabled() {
 
 #[test]
 fn every_backend_decodes_from_its_discriminant() {
-    for backend in [VmBackend::Hv, VmBackend::Vz] {
+    for backend in [VmBackend::Hv, VmBackend::Vz, VmBackend::Qemu] {
         // Exhaustive on purpose: a new backend fails to compile here until it
         // joins the list above, then fails below until `TryFrom<u8>` decodes it.
         match backend {
-            VmBackend::Hv | VmBackend::Vz => {}
+            VmBackend::Hv | VmBackend::Vz | VmBackend::Qemu => {}
         }
         assert_eq!(VmBackend::try_from(backend as u8), Ok(backend));
+        assert_eq!(VmBackend::from_str_ascii(backend.as_str()), Some(backend));
     }
     assert_eq!(VmBackend::try_from(u8::MAX), Err(u8::MAX));
 }

@@ -1100,13 +1100,16 @@ impl MachineManager {
         let backend = self.vm_manager.backend(&vm_id)?;
         let fd = self.connect_vsock_port(name, AGENT_PORT)?;
         // The transport must follow the backend, not the fd's socket domain:
-        // both backends hand over unnamed AF_UNIX fds, but only the HV
+        // every backend hands over unnamed AF_UNIX fds, but only the HV
         // socketpair needs the blocking transport (tokio/kqueue stalls on
         // rapid connect/teardown cycles), and only the async transport
-        // supports the streaming sandbox RPCs VZ clients rely on.
+        // supports the streaming sandbox RPCs VZ clients rely on. QEMU's
+        // vhost-user vsock hands over a stream like VZ's.
         let client = match backend {
             arcbox_vmm::VmBackend::Hv => AgentClient::from_fd_blocking(cid, fd),
-            arcbox_vmm::VmBackend::Vz => AgentClient::from_fd_async(cid, fd),
+            arcbox_vmm::VmBackend::Vz | arcbox_vmm::VmBackend::Qemu => {
+                AgentClient::from_fd_async(cid, fd)
+            }
         }?;
         client.with_scope(&self.agent_connections)
     }

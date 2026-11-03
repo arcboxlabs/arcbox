@@ -204,7 +204,7 @@ impl VmManager {
             enable_rosetta: entry.config.rosetta
                 && match entry.config.backend {
                     arcbox_vmm::VmBackend::Vz => true,
-                    arcbox_vmm::VmBackend::Hv => false,
+                    arcbox_vmm::VmBackend::Hv | arcbox_vmm::VmBackend::Qemu => false,
                 },
             nested_virt: entry.config.nested_virt,
             serial_console: true,
@@ -226,9 +226,10 @@ impl VmManager {
             bridge_nic_mac: Some(bridge_nic_mac_for_vm_id(&entry.info.id)),
             // Backend is set per-machine on the `VmConfig`, read here at start.
             // `VmManager::set_backend` can change it on a stopped VM to switch
-            // the System VM between HV and VZ.
+            // the System VM between backends.
             backend: entry.config.backend,
             debug_console_socket,
+            qemu: None,
         }
     }
 
