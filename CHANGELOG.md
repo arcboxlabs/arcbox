@@ -5,6 +5,137 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/arcboxlabs/arcbox/compare/v0.10.5...v0.11.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runner:** rename Fleet to ArcBox Runners
+
+### Features
+
+* **api:** report hardware virtualization and effective backend ([3e739b4](https://github.com/arcboxlabs/arcbox/commit/3e739b493eb5a0ce363b65efbb8694edacc90917))
+* **api:** report on-demand component downloads in SystemRuntimeStatus ([c3a70dd](https://github.com/arcboxlabs/arcbox/commit/c3a70dd85d7a7d1da2cca3c569c4f2375b25f0be))
+* **asset:** resume interrupted downloads ([dca372a](https://github.com/arcboxlabs/arcbox/commit/dca372ad0252da52c44ed802d780344375ac4f54))
+* **cli:** import the QEMU build from a local archive ([9d987e9](https://github.com/arcboxlabs/arcbox/commit/9d987e994615665e505804b691334b503ef18a3f))
+* **daemon:** download QEMU when the System VM falls back to emulation ([58daac2](https://github.com/arcboxlabs/arcbox/commit/58daac2d46917a0d376999341e3008d13f76d259))
+* **daemon:** skip System startup without hardware virtualization ([a46ee2c](https://github.com/arcboxlabs/arcbox/commit/a46ee2c3ed550233ba08ad44eb03632cf9695b55))
+* **hv:** capture and restore vCPU, GIC and timer state ([7ebe148](https://github.com/arcboxlabs/arcbox/commit/7ebe148296e2043069b9ccafa86ba4cb67fdf0a2))
+* **image:** clear quarantine and keep only the pinned QEMU build ([ed80ad6](https://github.com/arcboxlabs/arcbox/commit/ed80ad6cdac7f1f7be8ac1cfb238b6e11d213c2f))
+* **image:** download the QEMU build on demand ([a236024](https://github.com/arcboxlabs/arcbox/commit/a236024ab5bcedf0db90a621a823516c3d627b27))
+* **image:** install the QEMU build from its archive ([3627ba3](https://github.com/arcboxlabs/arcbox/commit/3627ba351ff74166fe674f8d2233c60f78b1c4bb))
+* **image:** pin the QEMU build in assets.lock ([e0e1cb9](https://github.com/arcboxlabs/arcbox/commit/e0e1cb950b1facf3f7f1882d30c079fc523dda77))
+* **image:** require ArcBox's code signature on the QEMU build ([0c04d67](https://github.com/arcboxlabs/arcbox/commit/0c04d675adad6f2c232ec45c23b1d9fdfafaca92))
+* **net:** DatapathControl for aborting and injecting TCP resets ([e3c3092](https://github.com/arcboxlabs/arcbox/commit/e3c3092d90ee867c7435e940b3a8bb3f78b23ad9))
+* **net:** integrate IPv6 lifecycle with silent TCP rejection ([a13f5c5](https://github.com/arcboxlabs/arcbox/commit/a13f5c57b491e29e3f19df23ec82e5a6792b7726))
+* **splicetcp:** abandon inspected relays without TCP close ([774d027](https://github.com/arcboxlabs/arcbox/commit/774d02702908b1b9a69f01ec8db9f547f2353ee3))
+* **splicetcp:** support silent TCP handshake rejection ([fe36394](https://github.com/arcboxlabs/arcbox/commit/fe363946a7620d549ff2c83d30133de96683256e))
+* **vhost-user:** answer feature negotiation and config requests ([653baac](https://github.com/arcboxlabs/arcbox/commit/653baac27f71f55d57bcbccf8a6f024c94333a3e))
+* **vhost-user:** framed messages with SCM_RIGHTS descriptors ([b8d4d3a](https://github.com/arcboxlabs/arcbox/commit/b8d4d3a144702d10111da285f3d99d5ce1fd17c1))
+* **vhost-user:** let devices register descriptors and wakers ([c49b000](https://github.com/arcboxlabs/arcbox/commit/c49b0003bdddcd300b490ae4d166a969ce7c80ea))
+* **vhost-user:** map guest memory from SET_MEM_TABLE ([6eccd87](https://github.com/arcboxlabs/arcbox/commit/6eccd876c6db93d933c78b1914203de78c9568a5))
+* **vhost-user:** message header and request codes ([0041a64](https://github.com/arcboxlabs/arcbox/commit/0041a642896293da8965f746bd7659007389fba9))
+* **vhost-user:** payload codecs for rings, memory tables and config ([475c493](https://github.com/arcboxlabs/arcbox/commit/475c493e9986271cf2c2c4ce6c4c30daab6f2120))
+* **vhost-user:** process rings on a kqueue worker thread ([53591f1](https://github.com/arcboxlabs/arcbox/commit/53591f171444331794e321531fd5aff3a36c3e49))
+* **vhost-user:** ring cursors, call notifiers and the device queue API ([135c330](https://github.com/arcboxlabs/arcbox/commit/135c33078878fd2c2b198f7a8fe0e6be26c9df98))
+* **vhost-user:** serve virtio-fs shares through FsServer ([224e87d](https://github.com/arcboxlabs/arcbox/commit/224e87d6c8ad653a814da954730ad85075fcc8e7))
+* **vhost-user:** set up vrings over guest memory ([ae6e2d1](https://github.com/arcboxlabs/arcbox/commit/ae6e2d19b30355d1724944e09ca61f4878739155))
+* **vhost-user:** watch the guest's kick pipes ([e82fdb2](https://github.com/arcboxlabs/arcbox/commit/e82fdb2ae2e77d3f19454f1b094e0c6f547a20fa))
+* **vm-driver:** carry the macOS engine surface on the port ([eb859f3](https://github.com/arcboxlabs/arcbox/commit/eb859f33ba768178bdb5a60bbbec0177604b50d9))
+* **vmm:** carry net and vsock through HV checkpoints ([bc55bbc](https://github.com/arcboxlabs/arcbox/commit/bc55bbc9d1e24dd983b3b556197bef032e5bafb9))
+* **vmm:** fail fast without hardware virtualization ([c88e64a](https://github.com/arcboxlabs/arcbox/commit/c88e64a0ed81a1b65113c7d87f20b6077f7406db))
+* **vmm:** HV checkpoint restore ([58faebb](https://github.com/arcboxlabs/arcbox/commit/58faebb46c8c1f396f69eafad82a7b25d9e3aec5))
+* **vmm:** HV checkpoint save ([1d574be](https://github.com/arcboxlabs/arcbox/commit/1d574beb02aa8d7fc734c562f372f8adc811e4dc))
+* **vmm:** serve the VM driver port over HvMachine (R4b) ([83a7c44](https://github.com/arcboxlabs/arcbox/commit/83a7c440f619a91cb835372b7443c4299fdc01cd))
+* **vsock:** post TRANSPORT_RESET and hold injection until handled ([f5e2f3e](https://github.com/arcboxlabs/arcbox/commit/f5e2f3e493c9c8559a93f52683a5f5fcdaf49717))
+* **vz-driver:** add the Virtualization.framework adapter (R4a) ([be55711](https://github.com/arcboxlabs/arcbox/commit/be557118505b1b1954a94386ec12832cfe8c75fc))
+* **vz:** save/restore and machine identifier in the shim ([1b435d8](https://github.com/arcboxlabs/arcbox/commit/1b435d866b06caa9d5ad1f04180d123d05ba2f83))
+
+
+### Bug Fixes
+
+* **agent:** link arcbox-transport on every target ([1ab3ab0](https://github.com/arcboxlabs/arcbox/commit/1ab3ab0f63e63751f64a2911a45ff80a5b2a4d2e))
+* **agent:** require hyper 1.11 for declared HTTP/1 trailers ([4e1751e](https://github.com/arcboxlabs/arcbox/commit/4e1751e4c1620139765bdf9853d71478bf865080))
+* **agent:** run nfsdcld so nfsd skips the NFSv4 grace period ([3284c1c](https://github.com/arcboxlabs/arcbox/commit/3284c1c71165b8e60b9c4660eec532c755eb7847))
+* **api:** refuse VM starts up front without hardware virtualization ([843b3e8](https://github.com/arcboxlabs/arcbox/commit/843b3e8ddc3fedb3a9a2c0ea60bd50ceead0a9ec))
+* **build:** align Clippy configuration with Rust 1.96 ([7829cc2](https://github.com/arcboxlabs/arcbox/commit/7829cc234564089f8e7f9cf5c751642012377729))
+* **daemon:** keep System startup retryable without hardware virtualization ([c0e0663](https://github.com/arcboxlabs/arcbox/commit/c0e066375857501f253e48fbf9e01ea2c8cbc014))
+* **daemon:** raise the open-file soft limit at startup ([7d4f3ce](https://github.com/arcboxlabs/arcbox/commit/7d4f3ce7486e1eaf14178405db0bf45294819ccb))
+* **docker:** retry container archive and start requests on a busy overlay ([cf6c37d](https://github.com/arcboxlabs/arcbox/commit/cf6c37dcf415799fc4a50523f0a89fdb998185bb))
+* **e2e:** require successful daemon finalization ([6958d54](https://github.com/arcboxlabs/arcbox/commit/6958d54db05f2d6b8cef1105ab3d17cd8b5671c3))
+* **fs:** cap the read size a guest asks for ([6a18210](https://github.com/arcboxlabs/arcbox/commit/6a18210a487a19abd90c80deff587f7b9cf4602b))
+* **fs:** read guest open flags as Linux flags ([f05201e](https://github.com/arcboxlabs/arcbox/commit/f05201e4783f6650e222feca97ce6bc1e337b0c8))
+* **fs:** release a FUSE session's files and inodes when it ends ([1d41796](https://github.com/arcboxlabs/arcbox/commit/1d41796c9cb9ded18a70dfe71f785d79dcff170b))
+* **splicetcp:** preserve recovery during host-first close ([#760](https://github.com/arcboxlabs/arcbox/issues/760)) ([ce82383](https://github.com/arcboxlabs/arcbox/commit/ce82383d16bd2b81462854432e4985c347c240a6))
+* **splicetcp:** reset guest segments of untracked flows ([764ceec](https://github.com/arcboxlabs/arcbox/commit/764ceec50d92be121d024824f1a8b39982b0996a))
+* **vhost-user:** keep guest memory mapped while any writer lives ([fee2bbb](https://github.com/arcboxlabs/arcbox/commit/fee2bbb6798d47df2a14ff03a272dcd9ee317448))
+* **vhost-user:** refuse memory regions that run past their backing object ([bfc67f7](https://github.com/arcboxlabs/arcbox/commit/bfc67f79bdd6567aeb7fc8933568d056407f6bae))
+* **vhost-user:** refuse virtio-fs requests longer than any FUSE request ([b079209](https://github.com/arcboxlabs/arcbox/commit/b079209df28b0880e284441a1959ab2cc5641992))
+* **vhost-user:** shut the front-end socket down whenever serve returns ([6856418](https://github.com/arcboxlabs/arcbox/commit/685641824599a51814a853df80a8b7eb76d47d15))
+* **vmm:** stop capping HV vsock connections at 64 descriptors ([93c272f](https://github.com/arcboxlabs/arcbox/commit/93c272fa3e9799574433c383ffa7c32a34495a84))
+
+
+### Code Refactoring
+
+* **api:** convert System VM restart errors through From ([33663b9](https://github.com/arcboxlabs/arcbox/commit/33663b98e440d2f4c4a3754a1bbe4db7ce618efb))
+* **core:** drop the engine and image compatibility re-exports ([cd19fe7](https://github.com/arcboxlabs/arcbox/commit/cd19fe7d20452b0b79c0275d8499bc35c63b9597))
+* **fleet:** restore the archived Fleet agent verbatim ([e111259](https://github.com/arcboxlabs/arcbox/commit/e111259eebb27bb7097f3b0eb95c1075552f3d7e))
+* **net:** build the guest NAT datapath in one place ([7d8088a](https://github.com/arcboxlabs/arcbox/commit/7d8088a50d6eb046b7a74d68c8cb5cf9a276c583))
+* **runner:** rename Fleet to ArcBox Runners ([1c544b7](https://github.com/arcboxlabs/arcbox/commit/1c544b7f959d38a5a8ed6b72b31e99c7b6e6bb5a))
+* **virtio:** derive avail cursors from used.idx ([02dc17d](https://github.com/arcboxlabs/arcbox/commit/02dc17d66f690fde217cbd426ad6caf5b611bdfa))
+* **virt:** remove the consumerless arcbox-net-virtio crate ([26ffceb](https://github.com/arcboxlabs/arcbox/commit/26ffcebc3783d4ec8eaf85982de136e1d484dfc2))
+* **vmm:** complete async I/O through one IoCompletion ([fa94e11](https://github.com/arcboxlabs/arcbox/commit/fa94e119afdf246674b6c19d0f625929d01a2a92))
+* **vmm:** create HV vCPUs in id order, split boot-image loading ([6db0990](https://github.com/arcboxlabs/arcbox/commit/6db0990386db576a0759b504f58b6d6af3793f22))
+* **vmm:** match VmBackend exhaustively ([2c1e446](https://github.com/arcboxlabs/arcbox/commit/2c1e446063fb9ce319aef3257c2c36fb9c7ae640))
+* **vmm:** move Hypervisor.framework state into HvMachine ([e652373](https://github.com/arcboxlabs/arcbox/commit/e6523730b15027ab1a789128ccd4eb3c549ec4cb))
+
+
+### Tests
+
+* **bench:** QEMU download scenarios against a local CDN ([b1e347b](https://github.com/arcboxlabs/arcbox/commit/b1e347ba8736edba09027435ed838deadb96bf0e))
+* **daemon:** build test runtimes without system proxy probes ([f4b6a83](https://github.com/arcboxlabs/arcbox/commit/f4b6a835d10c5bcaa4c551c27240c8ff33d387d0))
+* **engine:** accept a reset when the client closes on a bad acknowledgement ([7e9b711](https://github.com/arcboxlabs/arcbox/commit/7e9b7117c46cb0af038cde85608826ec0fbb12db))
+* **hv:** bare-metal checkpoint probe ([77715e8](https://github.com/arcboxlabs/arcbox/commit/77715e82b59aaed34dc90abbef37f3f40e926713))
+* **splicetcp:** cover abandonment races and ACK overhead ([b5508fd](https://github.com/arcboxlabs/arcbox/commit/b5508fd78275e1b55c07e685d1a50dfbfc32ca0a))
+* **vhost-user:** boot the System VM from a vhost-user virtio-fs share ([c6bf2a8](https://github.com/arcboxlabs/arcbox/commit/c6bf2a8d9ed12c876b8fdf1fd29737c75aeec510))
+* **vhost-user:** boot the System VM under QEMU with the real agent ([b74ce68](https://github.com/arcboxlabs/arcbox/commit/b74ce68182b30d01cf1e9672584e50f045874192))
+* **vhost-user:** check the System VM probe's results ([a3e5e5f](https://github.com/arcboxlabs/arcbox/commit/a3e5e5f708c807b72f794826da71579455ac92a8))
+* **vhost-user:** config space through a fake front-end ([9d410c8](https://github.com/arcboxlabs/arcbox/commit/9d410c8cc318637825f1343f28d0f4264a2df883))
+* **vhost-user:** count the small files the System VM probe reads ([393105d](https://github.com/arcboxlabs/arcbox/commit/393105dd42570e9e4b3ef6840c3393a73514b027))
+* **vhost-user:** drive rings the way QEMU does ([cd32beb](https://github.com/arcboxlabs/arcbox/commit/cd32beb7f3965d16a52d6976b173068ff4ab8bd6))
+* **vhost-user:** guest side of the QEMU System VM probe ([9039d61](https://github.com/arcboxlabs/arcbox/commit/9039d616273cfad46f78f8b2ebea41274fae809e))
+* **vhost-user:** keep the System VM probe's logs when a back-end fails ([5101d1e](https://github.com/arcboxlabs/arcbox/commit/5101d1e81807d929d3cdd6452179394e16c2bedc))
+* **vhost-user:** share the QEMU probes' socketpair and vsock stub ([7fb9ee1](https://github.com/arcboxlabs/arcbox/commit/7fb9ee1642992c2b9d522af0a6c1b36b11ced1a0))
+* **vhost-user:** time the share and realize vhost-user-vsock in the probe ([64de6bb](https://github.com/arcboxlabs/arcbox/commit/64de6bbb5523c3d4897f59d40bcbf1aa4c07dbf1))
+* **vmm:** Linux checkpoint probe ([b4b071d](https://github.com/arcboxlabs/arcbox/commit/b4b071dbfc86f0fd61cd9fb8260911b4d5da1201))
+* **vmm:** multi-vCPU virtio-blk checkpoint probe ([bb1d431](https://github.com/arcboxlabs/arcbox/commit/bb1d43174df399234427d1b451f95503ac660515))
+* **vz:** VZ checkpoint probe ([8239e08](https://github.com/arcboxlabs/arcbox/commit/8239e08eade51a8070b3ec14959a9867a525bb72))
+
+
+### Documentation
+
+* **adr:** restore self-hosted runners as ArcBox Runners ([fd02175](https://github.com/arcboxlabs/arcbox/commit/fd02175a6c370aa9ec028b28c5f49aa878ab3f93))
+* **agents:** align project structure with the charter ([e130e01](https://github.com/arcboxlabs/arcbox/commit/e130e01e7fc9e43026f5698d3bfb36975d169fea))
+* **architecture:** add the R4 seam map and refresh the R4 gate ([9054214](https://github.com/arcboxlabs/arcbox/commit/905421468ef955a3be1a26a5d6dff2a297501289))
+* **charter:** park runtime crates behind an activation condition ([98c99fb](https://github.com/arcboxlabs/arcbox/commit/98c99fb2c452b194b5ca4b1f421004b14165e152))
+* record the daemon open-file limit fix ([d93903b](https://github.com/arcboxlabs/arcbox/commit/d93903b79391c7f4f42bd585429d537c184adc05))
+* record the no-virtualization host fix ([364be3a](https://github.com/arcboxlabs/arcbox/commit/364be3ad8a6f5540cd8101a79ec7d5b9fbbfa8dd))
+* record the on-demand QEMU download ([1b77a88](https://github.com/arcboxlabs/arcbox/commit/1b77a887cf82f6d6ae6af237ac3fd7f56872d763))
+* record vhost-user-fs with the real System VM agent ([8b0898b](https://github.com/arcboxlabs/arcbox/commit/8b0898b0a578e2c852a5834afb0a0b3c451c44d4))
+* restore the ArcBox Runners sections ([18fb66c](https://github.com/arcboxlabs/arcbox/commit/18fb66c97d87ff539581ab81311d662dddb8244a))
+* **splicetcp:** describe discard retention without product references ([3ff31a0](https://github.com/arcboxlabs/arcbox/commit/3ff31a0b6abc51a4e2c07e1a610754f6737c5053))
+* **vhost-user:** vhost-user on macOS experiment and ADR 0010 ([4b3bb46](https://github.com/arcboxlabs/arcbox/commit/4b3bb464aece3247fbd10a9f991592bfc6ce9454))
+
+
+### Build System
+
+* **fs:** depend on the fs and core VirtIO crates, not the umbrella ([e97ddc8](https://github.com/arcboxlabs/arcbox/commit/e97ddc8995c6969791e483e1f5fea44caaff90ff))
+
+
+### Miscellaneous Chores
+
+* **boot:** bump boot assets to 0.8.12 ([0903eb5](https://github.com/arcboxlabs/arcbox/commit/0903eb512d01678b24367b7511a6289064b78e8a))
+
 ## [0.10.5](https://github.com/arcboxlabs/arcbox/compare/v0.10.4...v0.10.5) (2026-10-22)
 
 
