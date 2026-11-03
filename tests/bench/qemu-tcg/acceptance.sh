@@ -32,8 +32,10 @@ daemon=
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
 since() { perl -e 'printf "%.2f s", $ARGV[1] - $ARGV[0]' "$1" "$2"; }
 # This data directory's System VM, whichever binary runs it: the daemon
-# gives every QEMU it boots a pidfile under <data-dir>/run/qemu.
-qemu() { pgrep -f -- "-pidfile $data/run/qemu/" | head -1 || true; }
+# gives every QEMU it boots a pidfile under <data-dir>/run/qemu. pgrep takes
+# an extended regex, so the path's metacharacters are escaped.
+qemu_re=$(printf '%s' "-pidfile $data/run/qemu/" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+qemu() { pgrep -f -- "$qemu_re" | head -1 || true; }
 fail() {
   echo "FAIL: $*" >&2
   failures=$((failures + 1))
