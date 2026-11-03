@@ -49,6 +49,12 @@ impl NestedVirtCapability {
 #[must_use]
 pub fn nested_virt_for_backend(backend: VmBackend) -> NestedVirtCapability {
     if !backend.supports_nested_virt() {
+        // A Mac without hardware virtualization boots QEMU whatever the
+        // chosen backend, so switching to VZ would change nothing.
+        let host = arcbox_engine::host_virtualization();
+        if backend == VmBackend::Qemu && !host.available {
+            return NestedVirtCapability::unsupported(host.reason);
+        }
         return NestedVirtCapability::unsupported(format!(
             "the {} backend does not support nested virtualization; switch to the VZ backend \
              (`abctl system backend vz`)",
@@ -100,7 +106,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn off_macos_every_backend_defers_to_the_hardware_probe() {
-        for backend in [VmBackend::Hv, VmBackend::Vz] {
+        for backend in [VmBackend::Hv, VmBackend::Vz, VmBackend::Qemu] {
             let capability = nested_virt_for_backend(backend);
             assert_eq!(capability.supported, host_nested_virt().supported);
             assert_eq!(capability.supported, capability.reason.is_empty());
@@ -113,7 +119,7 @@ mod tests {
     // sandboxes …". Keep the reason a bare cause.
     #[test]
     fn the_reason_never_supplies_its_own_subject() {
-        for backend in [VmBackend::Hv, VmBackend::Vz] {
+        for backend in [VmBackend::Hv, VmBackend::Vz, VmBackend::Qemu] {
             let reason = nested_virt_for_backend(backend).reason;
             assert!(
                 !reason.to_lowercase().contains("sandbox"),

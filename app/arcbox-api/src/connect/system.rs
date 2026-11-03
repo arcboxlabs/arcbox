@@ -244,12 +244,10 @@ fn backend_from_proto(backend: SystemVmBackend) -> Result<arcbox_core::VmBackend
     match backend {
         SystemVmBackend::Hv => Ok(arcbox_core::VmBackend::Hv),
         SystemVmBackend::Vz => Ok(arcbox_core::VmBackend::Vz),
-        SystemVmBackend::Qemu => Err(ConnectError::unimplemented(
-            "the QEMU backend is not available in this ArcBox version",
+        SystemVmBackend::Qemu => Ok(arcbox_core::VmBackend::Qemu),
+        SystemVmBackend::Unspecified => Err(ConnectError::invalid_argument(
+            "backend must be HV, VZ or QEMU",
         )),
-        SystemVmBackend::Unspecified => {
-            Err(ConnectError::invalid_argument("backend must be HV or VZ"))
-        }
     }
 }
 
@@ -802,8 +800,6 @@ mod tests {
         assert_eq!(drain(&mut updates), []);
     }
 
-    /// QEMU is on the wire before any daemon can run it, so a request for it
-    /// is refused rather than mapped onto a backend that exists.
     #[test]
     fn requested_backends_map_only_onto_runnable_backends() {
         use arcbox_core::VmBackend;
@@ -816,8 +812,8 @@ mod tests {
             VmBackend::Vz
         );
         assert_eq!(
-            backend_from_proto(SystemVmBackend::Qemu).unwrap_err().code,
-            connectrpc::ErrorCode::Unimplemented
+            backend_from_proto(SystemVmBackend::Qemu).unwrap(),
+            VmBackend::Qemu
         );
         assert_eq!(
             backend_from_proto(SystemVmBackend::Unspecified)
