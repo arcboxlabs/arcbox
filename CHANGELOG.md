@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3](https://github.com/arcboxlabs/arcbox/compare/v0.11.2...v0.11.3) (2026-11-03)
+
+
+### Bug Fixes
+
+* **api:** refuse sandbox control RPCs where sandboxes cannot run ([e0e1561](https://github.com/arcboxlabs/arcbox/commit/e0e1561685eaed6f095cc19c7c18eb4d0e1413bc))
+* **api:** refuse sandbox data-plane RPCs where sandboxes cannot run ([772579b](https://github.com/arcboxlabs/arcbox/commit/772579bcddf53094471ae72532be4e81299cc499))
+
 ## [0.11.2](https://github.com/arcboxlabs/arcbox/compare/v0.11.1...v0.11.2) (2026-11-03)
 
 
