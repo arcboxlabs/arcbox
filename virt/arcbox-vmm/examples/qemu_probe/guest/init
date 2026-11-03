@@ -1,0 +1,69 @@
+#!/bin/busybox sh
+# The probe guest's /init. `probe=` on the kernel command line picks what
+# it does; every line it prints goes to hvc0. See ../main.rs.
+/bin/busybox mkdir -p /proc /sys /dev /etc /tmp /usr/bin /usr/sbin /sbin
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+exec >/dev/hvc0 2>&1
+up() { cut -d' ' -f1 /proc/uptime; }
+echo "PROBE: init mode=${probe} uptime=$(up)"
+case "$probe" in
+sleep)
+    while :; do sleep 3600; done ;;
+reset)
+    reboot -f ;;
+bench)
+    for i in 1 2; do /bin/bench; done
+    poweroff -f ;;
+touch)
+    mkdir -p /mnt && mount -t tmpfs -o size=7g tmpfs /mnt
+    sleep 3
+    echo "PROBE: touching 3 GiB"
+    dd if=/dev/zero of=/mnt/x bs=1M count=3072 2>/dev/null
+    echo "PROBE: touched"
+    sleep 5
+    rm /mnt/x
+    echo "PROBE: freed"
+    sleep 6
+    poweroff -f ;;
+docker)
+    mkdir -p /sys/fs/cgroup /var /run
+    mount -t cgroup2 none /sys/fs/cgroup
+    mount -t tmpfs tmpfs /var
+    mount -t tmpfs tmpfs /run
+    mkdir -p /var/lib/docker /var/run
+    echo "127.0.0.1 localhost" >/etc/hosts
+    export PATH=/usr/local/bin:$PATH
+    t0=$(up)
+    dockerd --iptables=false --ip6tables=false --bridge=none --userland-proxy=false \
+        --storage-driver=overlay2 >/tmp/dockerd.log 2>&1 &
+    pid=$!
+    until grep -q "API listen on" /tmp/dockerd.log; do
+        kill -0 $pid 2>/dev/null || { echo "PROBE: dockerd died"; tail -n 5 /tmp/dockerd.log; break; }
+        sleep 0.2
+    done
+    echo "PROBE: dockerd exec at $t0, API ready at $(up)"
+    poweroff -f ;;
+esac
+# probe: devices, network, consoles.
+for d in vda vdb vdc; do
+    echo "PROBE: $d sectors=$(cat /sys/block/$d/size) ro=$(cat /sys/block/$d/ro)" \
+        "discard_max=$(cat /sys/block/$d/queue/discard_max_bytes)" \
+        "pci=$(basename "$(readlink -f /sys/block/$d/device/..)")"
+done
+echo "PROBE: vda magic=$(dd if=/dev/vda bs=1 skip=1024 count=4 2>/dev/null | hexdump -e '4/1 "%02x"')"
+dd if=/dev/urandom of=/dev/vdb bs=1M count=64 seek=1024 conv=fsync 2>/dev/null
+echo "PROBE: wrote 64 MiB to vdb"
+sleep 2
+blkdiscard -o 1073741824 -l 67108864 /dev/vdb && sync && echo "PROBE: discarded them"
+sleep 2
+ip link set lo up
+ip link set eth0 up
+udhcpc -i eth0 -n -q -t 5 -s /udhcpc.sh || echo "PROBE: dhcp failed"
+ip route | sed 's/^/PROBE: route /'
+nslookup example.com 2>&1 | grep -m1 -A1 '^Name' | sed 's/^/PROBE: dns /'
+wget -q -O - http://example.com/ | grep -o '<title>[^<]*' | sed 's/^/PROBE: http /'
+echo "PROBE: hello from hvc1" >/dev/hvc1
+poweroff -f
