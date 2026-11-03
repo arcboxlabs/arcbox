@@ -13,8 +13,11 @@
 //! cargo run --release -p arcbox-e2e --bin qemu_vsock_e2e -- \
 //!     --qemu <qemu>/bin/qemu-system-aarch64 --data-dir "$DATA" \
 //!     --agent target/aarch64-unknown-linux-musl/release/arcbox-agent \
-//!     [--gvproxy <gvproxy>] [--smp 4] [--memory-mib 4096] [--exec-from-share]
+//!     [--gvproxy <gvproxy>] [--smp 4] [--memory-mib 4096]
 //! ```
+//!
+//! The agent runs straight from the share, so the default `--cpu` carries
+//! `dic=off` and needs arcboxlabs/qemu; a stock QEMU refuses the property.
 //!
 //! The data directory becomes the `arcbox` share, as `~/.arcbox` is for the
 //! daemon; use a scratch directory. The Docker checks need `--gvproxy` (the
@@ -88,15 +91,12 @@ mod probe {
         let mut args = std::env::args().skip(1);
         let (mut qemu, mut data_dir, mut agent, mut gvproxy) = (None, None, None, None);
         let (mut smp, mut memory_mib) = (4, 4096);
-        // Implementation-defined pointer auth is the cheap one in TCG.
-        let mut cpu = String::from("max,pauth-impdef=on");
+        // The daemon's CPU (`darwin_qemu::args::CPU`): implementation-defined
+        // pointer auth is the cheap one in TCG, and `dic=off` makes the guest
+        // invalidate code the vhost-user-fs back-end wrote behind TCG's back.
+        let mut cpu = String::from("max,pauth-impdef=on,dic=off");
         let mut accel = String::from("tcg,thread=multi");
-        let mut exec_from_share = false;
         while let Some(flag) = args.next() {
-            if flag == "--exec-from-share" {
-                exec_from_share = true;
-                continue;
-            }
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
             match flag.as_str() {
                 "--qemu" => qemu = Some(PathBuf::from(value()?)),
@@ -124,7 +124,6 @@ mod probe {
             smp,
             memory_mib,
             gvproxy,
-            exec_from_share,
             log_dir,
         })
     }

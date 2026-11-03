@@ -3,10 +3,9 @@
 //! Shaped the way the daemon shapes it: EROFS rootfs on vda, the Docker
 //! data and metadata images on vdb and vdc, the `arcbox` share served over
 //! vhost-user-fs and vsock over vhost-user-vsock, both from the calling
-//! process. A harness until the QEMU backend boots the System VM itself;
-//! `qemu_vsock_e2e` is the first user.
-
-pub mod fs;
+//! process. The agent runs straight from the share, which needs a QEMU
+//! that honours `dic=off` (arcboxlabs/qemu); `qemu_vsock_e2e` is the
+//! user.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -21,10 +20,8 @@ use arcbox_constants::cmdline::{
 };
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::devices::DOCKER_METADATA_BLOCK_DEVICE;
-use arcbox_vhost_user::{Backend, BackendHandle};
+use arcbox_vhost_user::fs::{FsBackend, FsShare};
 use arcbox_virtio_vsock::vhost_user::VhostUserVsock;
-
-use fs::FsDevice;
 
 /// The daemon's Docker image sizes (`vm_lifecycle/mod.rs`); both sparse.
 const DATA_IMAGE_BYTES: u64 = 8 << 40;
@@ -42,17 +39,13 @@ pub struct VmOptions {
     pub memory_mib: u64,
     /// gvproxy binary serving the NIC (`-listen-qemu`); no NIC without it.
     pub gvproxy: Option<PathBuf>,
-    /// Execute the agent straight from the vhost-user-fs share instead of
-    /// from a copy the guest wrote (see `AGENT_LAUNCHER`). Reproduces the
-    /// stale-translation crash under TCG.
-    pub exec_from_share: bool,
     pub log_dir: PathBuf,
 }
 
 pub struct Vm {
     pub qemu: Child,
     pub vsock: Arc<VhostUserVsock>,
-    fs: BackendHandle<FsDevice>,
+    fs: FsBackend,
     gvproxy: Option<Reaped>,
     log_dir: PathBuf,
 }
@@ -79,11 +72,7 @@ impl Vm {
             .map(|bin| spawn_gvproxy(bin, &options.log_dir))
             .transpose()?;
         let (fs_ours, fs_theirs) = chardev_pair()?;
-        let fs = Backend::new(
-            "vhost-fs-arcbox",
-            FsDevice::new("arcbox", &options.data_dir)?,
-        )
-        .spawn(fs_ours)?;
+        let fs = FsShare::new("arcbox", &options.data_dir).spawn(fs_ours)?;
         let (vsock_ours, vsock_theirs) = chardev_pair()?;
         let vsock = Arc::new(VhostUserVsock::spawn(options.cid, vsock_ours)?);
 
@@ -252,42 +241,10 @@ fn stage_share(options: &VmOptions) -> Result<()> {
     }
     let bin = options.data_dir.join("bin");
     std::fs::create_dir_all(&bin)?;
-    let _ = std::fs::remove_file(bin.join(AGENT_IMAGE));
-    let _ = std::fs::remove_file(bin.join("arcbox-agent"));
-    if options.exec_from_share {
-        std::fs::copy(&options.agent, bin.join("arcbox-agent")).context("stage the agent")?;
-    } else {
-        std::fs::copy(&options.agent, bin.join(AGENT_IMAGE)).context("stage the agent")?;
-        std::fs::write(bin.join("arcbox-agent"), AGENT_LAUNCHER)?;
-        std::fs::set_permissions(
-            bin.join("arcbox-agent"),
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )?;
-    }
+    std::fs::copy(&options.agent, bin.join("arcbox-agent")).context("stage the agent")?;
     std::fs::create_dir_all(options.data_dir.join("data"))?;
     Ok(())
 }
-
-/// The agent binary the launcher copies; see [`AGENT_LAUNCHER`].
-const AGENT_IMAGE: &str = "arcbox-agent.image";
-
-/// Runs the agent (`init` from rcS and the respawned server) from a copy the
-/// guest CPU wrote, on a tmpfs over the rootfs's empty `/mnt`.
-///
-/// TCG keys translated code by guest physical page and drops it only when
-/// its own softmmu sees a store to that page (`IC IVAU` is a no-op in system
-/// mode, and `-cpu max` reports DIC). The vhost-user-fs back-end fills
-/// page-cache pages through shared memory, which TCG never sees, so code
-/// executed straight from the share runs translations of whatever those pages
-/// held before, a guest reboot included. `VmOptions::exec_from_share`
-/// reproduces it.
-const AGENT_LAUNCHER: &str = "#!/bin/busybox sh
-/bin/busybox grep -q ' /mnt tmpfs ' /proc/mounts ||
-  /bin/busybox mount -t tmpfs -o size=64m,mode=0700 tmpfs /mnt || exit 1
-/bin/busybox cp /arcbox/bin/arcbox-agent.image /mnt/arcbox-agent.new || exit 1
-/bin/busybox mv -f /mnt/arcbox-agent.new /mnt/arcbox-agent || exit 1
-exec /mnt/arcbox-agent \"$@\"
-";
 
 const GVPROXY_SOCKET: &str = "gvproxy-qemu.sock";
 
