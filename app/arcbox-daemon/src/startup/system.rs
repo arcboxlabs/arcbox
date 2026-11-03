@@ -18,21 +18,23 @@ pub(super) async fn run(
     supervise(&ctx, &runtime, || initialize(&ctx, &runtime, assets)).await
 }
 
-/// This host cannot run the System VM: a Linux host without KVM, since a Mac
-/// without hardware virtualization boots it on QEMU instead. A property of
-/// the host, not a fault, so it is reported in the System status rather than
-/// as an error event. Startup still waits for a storage recovery like after
-/// any other failure: the host can pass the probe once the KVM module loads.
+/// This host cannot run the System VM's backend: a Linux host without KVM, or
+/// an Intel Mac without hardware virtualization or configured for QEMU (an
+/// Apple silicon Mac without it boots QEMU instead). A property of the host
+/// and its configuration, not a fault, so it is reported in the System status
+/// rather than as an error event. Startup still waits for a storage recovery
+/// like after any other failure: the host can pass the probe once the KVM
+/// module loads.
 #[derive(Debug)]
-struct NoHardwareVirtualization(&'static str);
+struct SystemVmUnsupported(&'static str);
 
-impl std::fmt::Display for NoHardwareVirtualization {
+impl std::fmt::Display for SystemVmUnsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "System VM cannot start: {}", self.0)
     }
 }
 
-impl std::error::Error for NoHardwareVirtualization {}
+impl std::error::Error for SystemVmUnsupported {}
 
 async fn supervise<F: Future<Output = Result<SystemServiceHandles>>>(
     ctx: &DaemonContext,
@@ -78,7 +80,7 @@ async fn supervise<F: Future<Output = Result<SystemServiceHandles>>>(
                 if ctx.shutdown.is_cancelled() {
                     return Ok(());
                 }
-                if error.is::<NoHardwareVirtualization>() {
+                if error.is::<SystemVmUnsupported>() {
                     tracing::warn!(%error, "System VM unavailable on this host; Machine host remains available");
                     ctx.setup_state
                         .set_system_runtime(State::Failed, &error.to_string());
@@ -133,8 +135,8 @@ async fn initialize(
 ) -> Result<SystemServiceHandles> {
     // Checked before any asset download or disk image work it would waste.
     // A Mac without hardware virtualization still boots it, on QEMU.
-    if runtime.effective_system_vm_backend().is_none() {
-        return Err(NoHardwareVirtualization(arcbox_engine::host_virtualization().reason).into());
+    if let Err(reason) = runtime.effective_system_vm_backend() {
+        return Err(SystemVmUnsupported(reason).into());
     }
     // QEMU gets the pinned build, downloaded only here, unless the user names
     // their own binary. The boot still takes it from `[qemu] path` or
@@ -272,7 +274,7 @@ mod tests {
     async fn host_without_virtualization_reports_its_reason_and_keeps_waiting() {
         let (_directory, ctx, runtime) = fixture(true).await;
         let mut task = pin!(supervise(&ctx, &runtime, || async {
-            Err(NoHardwareVirtualization("no hypervisor here").into())
+            Err(SystemVmUnsupported("no hypervisor here").into())
         }));
         assert!(matches!(futures::poll!(&mut task), Poll::Pending));
         let status = ctx.setup_state.current();

@@ -58,6 +58,44 @@ fn every_backend_decodes_from_its_discriminant() {
     assert_eq!(VmBackend::try_from(u8::MAX), Err(u8::MAX));
 }
 
+/// A refused backend names what the user must change: the architecture
+/// before the missing hardware virtualization.
+#[test]
+fn a_refused_backend_reports_why() {
+    use arcbox_hypervisor::HostVirtualization;
+    let with = HostVirtualization {
+        available: true,
+        reason: "",
+    };
+    let without = HostVirtualization {
+        available: false,
+        reason: "no hypervisor here",
+    };
+    for backend in [VmBackend::Hv, VmBackend::Vz] {
+        assert_eq!(backend.require_host(with), Ok(()));
+        assert_eq!(backend.require_host(without), Err("no hypervisor here"));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        assert_eq!(VmBackend::Qemu.require_host(with), Ok(()));
+        assert_eq!(VmBackend::Qemu.require_host(without), Ok(()));
+    }
+    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+    {
+        let arch = VmBackend::Qemu.arch_unsupported().unwrap();
+        assert_eq!(VmBackend::Qemu.require_host(with), Err(arch));
+        assert_eq!(VmBackend::Qemu.require_host(without), Err(arch));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert_eq!(VmBackend::Qemu.require_host(with), Ok(()));
+        assert_eq!(
+            VmBackend::Qemu.require_host(without),
+            Err("no hypervisor here")
+        );
+    }
+}
+
 /// Hosts without hardware virtualization include the CI runners (a Linux
 /// container without `/dev/kvm`, a macOS VM), so this runs there.
 #[test]

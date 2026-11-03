@@ -253,6 +253,26 @@ impl VmBackend {
         }
     }
 
+    /// `Err` carrying why a host whose hardware virtualization is `host`
+    /// cannot run this backend: the [`Self::arch_unsupported`] reason
+    /// first, then the probe's when this backend needs what the host lacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the host cannot run this backend.
+    pub const fn require_host(
+        self,
+        host: arcbox_hypervisor::HostVirtualization,
+    ) -> Result<(), &'static str> {
+        if let Some(reason) = self.arch_unsupported() {
+            return Err(reason);
+        }
+        if self.needs_hardware_virtualization() {
+            return host.require();
+        }
+        Ok(())
+    }
+
     /// How many times longer than the hardware backends this one takes to
     /// boot a guest to a ready agent, which scales every startup timeout.
     #[must_use]
