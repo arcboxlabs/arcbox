@@ -419,9 +419,9 @@ mod tests {
     /// Every request that would boot a VM is refused with the host's reason,
     /// and the System VM ones before they record a backend, write the config
     /// or download boot assets. Runs only on such a host (a Linux container
-    /// without `/dev/kvm`, a macOS VM). A Mac boots the System VM on QEMU
-    /// instead, so there those requests are refused for the QEMU this test
-    /// leaves unconfigured.
+    /// without `/dev/kvm`, a macOS VM). An Apple silicon Mac boots the System
+    /// VM on QEMU instead, so there those requests are refused for the QEMU
+    /// this test leaves unconfigured.
     #[tokio::test]
     async fn vm_starts_are_refused_up_front_without_hardware_virtualization() {
         use arcbox_connect::v1::{self as pb, MachineService as _, SystemService as _};
@@ -489,7 +489,7 @@ mod tests {
 
         for error in system_errors {
             let error = error.expect("refused");
-            if cfg!(target_os = "macos") {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                 let message = error.message.unwrap_or_default();
                 assert!(message.contains("ARCBOX_QEMU_PATH"), "{message}");
             } else {

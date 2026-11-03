@@ -134,7 +134,8 @@ async fn initialize(
     assets: super::assets::PreparedAssets,
 ) -> Result<SystemServiceHandles> {
     // Checked before any asset download or disk image work it would waste.
-    // A Mac without hardware virtualization still boots it, on QEMU.
+    // An Apple silicon Mac without hardware virtualization still boots it,
+    // on QEMU.
     if let Err(reason) = runtime.effective_system_vm_backend() {
         return Err(SystemVmUnsupported(reason).into());
     }
