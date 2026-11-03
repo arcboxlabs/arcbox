@@ -28,12 +28,21 @@ serves.)
 `acceptance.sh <data-dir> [restarts]` is the plan's acceptance run on a Mac
 without hardware virtualization: the fallback to QEMU, cold start to dockerd
 ready, warm `docker run`, a `python:3.13-slim` pull, `exec` and `logs`, an
-amd64 container through FEX, the agent's executable path in the guest, a
-guest reboot, and SIGTERM with no QEMU left after each restart. Set
+amd64 container through FEX, the agent's executable path in the guest, the
+host reaching an nginx container at its own IP through the bridge NIC, a
+guest reboot, and SIGTERM with no QEMU left after each restart; the
+daemon's log must show no route retry. A development daemon gets the bridge
+NIC only as root, and its routes go through `arcbox-helper`: start
+`sudo -b env ARCBOX_HELPER_SOCKET=/tmp/helper.sock target/debug/arcbox-helper`,
+build, then run the script under
+`sudo -E env PATH="$PATH" ARCBOX_HELPER_SOCKET=/tmp/helper.sock`. Without
+root it reports the missing NIC and skips the container-IP check; as root a
+missing NIC fails the run. Set
 `ARCBOX_AGENT` to a musl build of this tree's agent to stage it over the
 boot assets' one. Without `ARCBOX_QEMU_PATH` the daemon installs the build
 `assets.lock` pins, so the run also covers the download. Results:
-`docs/logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md`.
+`docs/logs/2026-11-03-qemu-tcg-system-vm-to-dockerd.md` and
+`docs/logs/2026-11-03-qemu-bridge-nic.md`.
 
 Both need an arcboxlabs/qemu build (the CPU carries `dic=off`).
 

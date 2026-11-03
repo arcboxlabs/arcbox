@@ -2,11 +2,18 @@
 # Acceptance run of the System VM on QEMU, on a Mac without hardware
 # virtualization: the daemon falls back to QEMU, dockerd comes up, Docker
 # works (amd64 through FEX too), a guest reboot recovers, and SIGTERM stops
-# the daemon with no QEMU left. Prints one timing line per step and exits
+# the daemon with no QEMU left. The host reaches a container at its own
+# address through the bridge NIC when vmnet starts, and the daemon's log has
+# no route retry. Prints one timing line per step and exits
 # non-zero when any check fails. See README.md.
 #
 #   [ARCBOX_QEMU_PATH=<qemu-system-aarch64>] [ARCBOX_AGENT=<agent>] \
 #     acceptance.sh <data-dir> [restarts]
+#
+# vmnet needs root in a development build: build as yourself, then run this
+# under `sudo -E env PATH="$PATH"` with ARCBOX_HELPER_SOCKET naming a running
+# arcbox-helper (the routes go through it). As root the script does not build,
+# and a missing bridge NIC fails the run.
 #
 # <data-dir> is a development data directory with the System VM's assets
 # (`abctl boot prefetch --data-dir`), not the ~/.arcbox of a running
@@ -19,13 +26,17 @@ data=$(cd "${1:?data directory}" && pwd)
 restarts=${2:-3}
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
-cargo build -p arcbox-daemon -p arcbox-cli >&2
+if [ "$(id -u)" -ne 0 ]; then
+  cargo build -p arcbox-daemon -p arcbox-cli >&2
+fi
 export ARCBOX_HOST_MOUNT_DIR=$data/ArcBox DOCKER_HOST=unix://$data/run/docker.sock
 if [ -n "${ARCBOX_AGENT:-}" ]; then
   for dir in "$data"/boot/*/; do cp "$ARCBOX_AGENT" "$dir/arcbox-agent"; done
 fi
 log=$data/acceptance.log
 out=$data/acceptance.out
+# The log checks at the end read this run only.
+: >"$log"
 failures=0
 daemon=
 
@@ -107,6 +118,9 @@ new_qemu() {
   [ -n "$pid" ] && [ "$pid" != "$before" ]
 }
 container_runs() { docker run --rm alpine echo back | grep -q back; }
+container_ip() {
+  docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"
+}
 guest_agent() {
   docker run --rm --privileged --pid=host alpine sh -c 'for p in /proc/[0-9]*; do
     case $(readlink "$p/exe" 2>/dev/null) in
@@ -141,6 +155,24 @@ timed -e x86_64 docker run --rm --platform linux/amd64 alpine uname -m
 # The agent runs from /arcbox/bin, the `arcbox` share, not from a copy.
 timed -e ': /arcbox/bin/arcbox-agent' guest_agent
 
+# The bridge NIC's route takes the host to a container's own address. A
+# daemon vmnet refused says so once and boots without the NIC, which only a
+# run that is not root expects.
+if grep -q 'no bridge NIC' "$log"; then
+  why=$(grep -o 'vmnet start failed.*' "$log" | head -1 | cut -c1-100)
+  if [ "$(id -u)" -eq 0 ]; then
+    fail "no bridge NIC as root: $why"
+  else
+    echo "bridge NIC: none (not root): $why"
+  fi
+else
+  docker rm -f acceptance-web >/dev/null 2>&1 || true
+  timed docker run -d --name acceptance-web nginx:alpine
+  timed -e 'Welcome to nginx' curl -sS -m 5 --retry 10 --retry-connrefused \
+    --retry-delay 1 "http://$(container_ip acceptance-web)/"
+  docker rm -f acceptance-web >/dev/null
+fi
+
 # A reboot from inside: QEMU exits on the reset and the daemon starts a
 # new one.
 before=$(qemu)
@@ -160,6 +192,10 @@ for _ in $(seq 1 "$restarts"); do
   start_daemon
 done
 stop_daemon
+for line in 'route install failed' 'failed to install container route'; do
+  n=$(grep -cF "$line" "$log" || true)
+  [ "$n" -eq 0 ] || fail "the daemon logged \"$line\" $n time(s)"
+done
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2
   exit 1
