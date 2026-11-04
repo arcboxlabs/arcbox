@@ -22,10 +22,20 @@ use arcbox_computer::locks::SandboxOperationLocks;
 use arcbox_computer::ports;
 
 /// Why Create refuses `RUN_LOCATION_HOST` and `GetCapabilities` reports
-/// the host unavailable: the daemon composed no host location (another
-/// platform, or its composition failed at startup — the daemon log says
-/// why).
+/// the host unavailable when the host can run VMs: the daemon composed no
+/// host location (`[sandbox] enabled = false`, another platform, or its
+/// composition failed at startup — the daemon log says why).
 const HOST_UNAVAILABLE: &str = "this daemon does not run host sandboxes";
+
+/// Why the host location is absent: the host's own reason when it cannot
+/// run a VM at all (the System VM then runs on QEMU), [`HOST_UNAVAILABLE`]
+/// otherwise.
+fn host_unavailable_reason() -> &'static str {
+    arcbox_engine::host_virtualization()
+        .require()
+        .err()
+        .unwrap_or(HOST_UNAVAILABLE)
+}
 
 /// One entry per run location. The nested location answers what it always
 /// has: it pauses whenever it runs, publishes ports through guest DNAT, and
@@ -36,12 +46,13 @@ const HOST_UNAVAILABLE: &str = "this daemon does not run host sandboxes";
 fn location_capabilities(
     nested: &arcbox_computer::NestedVirtCapability,
     host: Option<HostSandboxCapabilities>,
+    host_unavailable: &str,
 ) -> Vec<pb::LocationCapability> {
     let host = host.map_or_else(
         || pb::LocationCapability {
             location: pb::RunLocation::Host.into(),
-            unavailable_reason: HOST_UNAVAILABLE.to_owned(),
-            pause_unavailable_reason: HOST_UNAVAILABLE.to_owned(),
+            unavailable_reason: host_unavailable.to_owned(),
+            pause_unavailable_reason: host_unavailable.to_owned(),
             ..Default::default()
         },
         |host| pb::LocationCapability {
@@ -122,7 +133,7 @@ impl pb::SandboxService for SandboxServiceImpl {
                 let host = self
                     .runtime
                     .host()
-                    .ok_or_else(|| ConnectError::failed_precondition(HOST_UNAVAILABLE))?;
+                    .ok_or_else(|| ConnectError::failed_precondition(host_unavailable_reason()))?;
                 (host, HOST_SANDBOX_ROUTE.to_owned())
             }
             Some(pb::RunLocation::Nested) => {
@@ -313,7 +324,11 @@ impl pb::SandboxService for SandboxServiceImpl {
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
-            locations: location_capabilities(&nested, runtime.host_sandbox_capabilities()),
+            locations: location_capabilities(
+                &nested,
+                runtime.host_sandbox_capabilities(),
+                host_unavailable_reason(),
+            ),
             nested_virt: pb::NestedVirtCapability {
                 supported: nested.supported,
                 reason: nested.reason,
@@ -538,7 +553,7 @@ mod tests {
             supported: false,
             reason: "M1 has no nested virtualization".to_owned(),
         };
-        let [host, nested] = location_capabilities(&unsupported, None)
+        let [host, nested] = location_capabilities(&unsupported, None, HOST_UNAVAILABLE)
             .try_into()
             .unwrap();
         assert_eq!(host.location, pb::RunLocation::Host);
@@ -553,7 +568,9 @@ mod tests {
             supported: true,
             reason: String::new(),
         };
-        let [_, nested] = location_capabilities(&supported, None).try_into().unwrap();
+        let [_, nested] = location_capabilities(&supported, None, HOST_UNAVAILABLE)
+            .try_into()
+            .unwrap();
         assert!(nested.available && nested.pause_available && nested.port_publishing);
         assert_eq!(nested.backend, "fc");
         assert!(nested.unavailable_reason.is_empty() && !nested.bind_mounts);
@@ -575,7 +592,7 @@ mod tests {
             port_publishing: false,
             bind_mounts: false,
         };
-        let [host, _] = location_capabilities(&nested, Some(locked))
+        let [host, _] = location_capabilities(&nested, Some(locked), HOST_UNAVAILABLE)
             .try_into()
             .unwrap();
         assert!(host.available && host.pause_resume && !host.pause_available);

@@ -71,6 +71,12 @@ fn compose(runtime: &Arc<Runtime>) -> anyhow::Result<HostSandboxes> {
         .custom_kernel
         .clone()
         .unwrap_or_else(|| boot.version_cache_dir().join("kernel"));
+    // Without hardware virtualization (the System VM falls back to QEMU)
+    // neither host driver can create a VM; GetCapabilities reports the
+    // host's reason.
+    arcbox_engine::host_virtualization()
+        .require()
+        .map_err(anyhow::Error::msg)?;
     let backend = match config.sandbox.backend {
         VmBackend::Hv => Backend::Hv,
         VmBackend::Vz => Backend::Vz,
