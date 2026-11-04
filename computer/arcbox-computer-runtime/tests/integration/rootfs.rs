@@ -225,19 +225,18 @@ async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
         2
     );
 
-    std::fs::create_dir_all(layer.join("diff/etc/resolv.conf")).unwrap();
-    let error = builder
+    // The conversion writes the link itself, so whatever the layer put at
+    // /etc/resolv.conf, a directory included, is replaced like any lower
+    // layer's entry.
+    std::fs::create_dir_all(layer.join("diff/etc/resolv.conf/nested")).unwrap();
+    builder
         .build_rootfs(RootfsSpec {
             source: RootfsSource::Directory(layer),
             out: image.clone(),
             size,
         })
         .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("replace /etc/resolv.conf"),
-        "{error}"
-    );
+        .unwrap();
     assert_eq!(
         std::fs::read_dir(image.parent().unwrap()).unwrap().count(),
         2
