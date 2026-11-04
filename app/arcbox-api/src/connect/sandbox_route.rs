@@ -1,4 +1,4 @@
-//! Which run location a Sandbox API request goes to (ADR 0010).
+//! Which run location a Sandbox API request goes to (ADR 0011).
 //!
 //! The nested location is the System VM's agent, reached through the
 //! runtime the System stage admits; the host location is the daemon's own

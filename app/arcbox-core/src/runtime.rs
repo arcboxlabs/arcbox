@@ -72,7 +72,7 @@ const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 const HOST_DNS_OWNER: &str = "system:host";
 
 /// The name [`Runtime::get_agent`] takes for the host sandbox location
-/// (ADR 0010), where the Sandbox API is otherwise routed by machine. No
+/// (ADR 0011), where the Sandbox API is otherwise routed by machine. No
 /// machine can have it: `$` is not a machine-name character.
 pub const HOST_SANDBOX_ROUTE: &str = "$host";
 
@@ -242,7 +242,7 @@ pub struct Runtime {
     /// Generation fence for cleanup racing RPC-created host state.
     /// ponytail: keep one fence until unrelated cleanup retries are measurable.
     sandbox_host_state: TokioMutex<u64>,
-    /// The host sandbox location (ADR 0010), once the daemon composed it.
+    /// The host sandbox location (ADR 0011), once the daemon composed it.
     /// Reached as the agent of [`HOST_SANDBOX_ROUTE`].
     #[cfg(target_os = "macos")]
     host_sandboxes: OnceLock<Arc<arcbox_host_sandbox::HostSandboxes>>,

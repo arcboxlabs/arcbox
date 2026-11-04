@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description       = "The host sandbox location (ADR 0010): the Sandbox API over a ComputerManager of HV or VZ VMs on the Mac, composed for the daemon."
+description       = "The host sandbox location (ADR 0011): the Sandbox API over a ComputerManager of HV or VZ VMs on the Mac, composed for the daemon."
 
 [dependencies]
 anyhow.workspace = true

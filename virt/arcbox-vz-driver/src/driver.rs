@@ -39,7 +39,7 @@ impl VzDriver {
 
     /// Why a checkpoint cannot be taken right now, or `None` when it can.
     ///
-    /// A VZ save needs the console user's session unlocked (ADR 0010,
+    /// A VZ save needs the console user's session unlocked (ADR 0011,
     /// decision 6), so a runtime asks before it schedules one — an idle
     /// pause, a template capture — rather than pausing a guest only to
     /// have the save refused. A checkpoint asked for anyway fails with

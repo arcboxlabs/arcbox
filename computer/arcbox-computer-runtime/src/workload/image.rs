@@ -115,7 +115,7 @@ pub struct PulledImage {
 /// from the user's Docker config.
 ///
 /// A registry that does not have the image fails here; exporting it from
-/// the System VM's dockerd instead (ADR 0010 D5) is the composer's call.
+/// the System VM's dockerd instead (ADR 0011 D5) is the composer's call.
 #[cfg(feature = "remote-image")]
 pub async fn pull(image: &ImageRef) -> Result<PulledImage, WorkloadError> {
     let source = oci2rootfs::RemoteRef::new(image.as_str())

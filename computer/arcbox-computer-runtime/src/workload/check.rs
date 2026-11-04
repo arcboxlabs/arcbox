@@ -6,7 +6,7 @@ use arcbox_oci::{Process, Spec};
 use super::WorkloadError;
 
 /// OCI fields that ask for in-guest isolation, rejected because the VM is
-/// the boundary (ADR 0010, decision 9).
+/// the boundary (ADR 0011, decision 9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejected {
     /// `hooks`

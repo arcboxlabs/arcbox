@@ -297,7 +297,7 @@ jobs:
             target/release/arcbox-daemon
           codesign -v --deep --strict target/release/arcbox-daemon
 
-      # The host sandbox location's per-sandbox HV VMM process (ADR 0010).
+      # The host sandbox location's per-sandbox HV VMM process (ADR 0011).
       # It runs a VM, so it carries the daemon's entitlements, and ships
       # next to the daemon, where the daemon spawns it from.
       - name: Codesign arcbox-hv-vmm

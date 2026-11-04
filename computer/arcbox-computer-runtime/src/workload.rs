@@ -6,7 +6,7 @@
 //! computer can honor and translates it into the [`StartCommand`] the guest
 //! agent runs.
 //!
-//! The VM is the isolation boundary (ADR 0010, decision 9): nothing inside
+//! The VM is the isolation boundary (ADR 0011, decision 9): nothing inside
 //! it enforces OCI namespaces, seccomp, capabilities, rlimits, devices or
 //! hooks, so a spec that asks for one is rejected rather than run without
 //! it. `Spec::validate` checks none of these, which is why the check lives

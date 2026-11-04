@@ -3,7 +3,7 @@
 //!
 //! Hypervisor.framework allows one VM per process, and the daemon already
 //! holds the System VM, so every VM this driver runs lives in its own
-//! `arcbox-hv-vmm` process (ADR 0010, "Process model"). The process runs
+//! `arcbox-hv-vmm` process (ADR 0011, "Process model"). The process runs
 //! `arcbox_vmm::hv_driver::HvMachineDriver` on itself and serves the port
 //! to this driver over a Unix socket in the VM's runtime dir.
 //!

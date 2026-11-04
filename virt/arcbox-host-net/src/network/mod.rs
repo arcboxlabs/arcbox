@@ -55,7 +55,7 @@ pub enum DatapathPlacement {
 /// Every guest boots on the same fixed link — `10.0.2.2/24` behind
 /// `10.0.2.1`, which is also its resolver — alone behind its own datapath,
 /// so there is no host bridge between guests and no guest can address
-/// another (ADR 0010, D1), and a checkpoint restores into any lease. The
+/// another (ADR 0011, D1), and a checkpoint restores into any lease. The
 /// lease's pool address is the VM's identity on the host: it is what the
 /// [`DnsPublisher`] publishes and what the sandbox API reports, and it is
 /// never routed.

@@ -61,7 +61,7 @@ restructure plan and its locked decisions live in
   vm-stack-redesign R3 moved it here; the in-sandbox init is
   `arcbox-vm-agent` and the wire vocabulary `arcbox-vm-proto`, both still
   under `virt/`. Its own README has the crate map.
-  - **Workload contract** (`workload` module, ADR 0010): an image config
+  - **Workload contract** (`workload` module, ADR 0011): an image config
     and a create request become one OCI `config.json` through
     `arcbox-oci` (`bundle_spec`), and `Workload::from_spec` translates a
     spec into the guest agent's `StartCommand`. The VM is the isolation
@@ -102,7 +102,7 @@ restructure plan and its locked decisions live in
 - `arcbox-oci` — the OCI runtime-spec model (`config.json`, bundle
   directory, OCI state, hooks), host-side and `std`-only. It moved here
   from `runtime/` when the workload contract became its one consumer
-  (ADR 0010, `docs/architecture/charter.md`). It is not image code: no
+  (ADR 0011, `docs/architecture/charter.md`). It is not image code: no
   manifest, layer or pull lives here. Hooks are parsed but never run and
   `Spec::validate` is shallow, so neither is a security boundary; the
   consumer's check is. Its own rules are in

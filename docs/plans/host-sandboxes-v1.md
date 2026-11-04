@@ -2,7 +2,7 @@
 
 Status: **active** (2026-11-01). Executes
 [the host sandboxes design](../architecture/host-sandboxes.md) under
-[ADR 0010](../adr/0010-sandboxes-run-on-the-host.md). The design's decisions
+[ADR 0011](../adr/0011-sandboxes-run-on-the-host.md). The design's decisions
 are locked; this file only splits the work.
 
 ## How the work is split

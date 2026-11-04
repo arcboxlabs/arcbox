@@ -6,7 +6,7 @@
   `computer/arcbox-sandbox-service`, `computer/arcbox-computer-runtime`,
   `engine/arcbox-snapshot`, `tests/e2e` (`host_sandbox`)
 - Commits / PRs: host sandboxes workstream W8, branch `hs-w8-daemon`
-- Related: [ADR 0010](../adr/0010-sandboxes-run-on-the-host.md),
+- Related: [ADR 0011](../adr/0011-sandboxes-run-on-the-host.md),
   [host sandboxes design](../architecture/host-sandboxes.md),
   [plan](../plans/host-sandboxes-v1.md) W8,
   [HV driver log](2026-11-01-hv-driver-process-per-vm.md)

@@ -1,4 +1,4 @@
-//! Host sandbox e2e: a sandbox in a VM of its own on the Mac (ADR 0010).
+//! Host sandbox e2e: a sandbox in a VM of its own on the Mac (ADR 0011).
 //!
 //! Per backend, against an isolated `--no-linux-vm` daemon: GetCapabilities
 //! reports the host location → Create (`RUN_LOCATION_HOST`, a `docker:<ref>`

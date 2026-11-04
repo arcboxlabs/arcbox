@@ -1,4 +1,4 @@
-//! Two VMs' datapaths cannot reach each other (ADR 0010, D1).
+//! Two VMs' datapaths cannot reach each other (ADR 0011, D1).
 //!
 //! Each test plays two guests on the VMM ends of the sockets `HostNetwork`
 //! hands its driver, with real datapaths behind them. A guest's own

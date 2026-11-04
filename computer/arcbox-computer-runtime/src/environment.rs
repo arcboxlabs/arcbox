@@ -85,7 +85,7 @@ pub struct Placement {
     /// nothing, which is the nested location's behavior.
     pub os_build: Option<String>,
     /// Whether a checkpoint may be taken right now. VZ saves need an
-    /// unlocked session (ADR 0010, decision 6), so a composer running VZ
+    /// unlocked session (ADR 0011, decision 6), so a composer running VZ
     /// supplies the driver's lock query here; `None` means a save is never refused for the moment it is asked.
     pub checkpoint_gate: Option<Arc<dyn CheckpointGate>>,
     /// Whether the guest network, rather than the driver, hands out port

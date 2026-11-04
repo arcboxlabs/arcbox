@@ -2,7 +2,7 @@
 
 Status: **locked** (2026-11-01). The product decision and the rules a later
 change must not undo silently are recorded in
-[ADR 0010](../adr/0010-sandboxes-run-on-the-host.md).
+[ADR 0011](../adr/0011-sandboxes-run-on-the-host.md).
 
 ## Summary
 
@@ -243,7 +243,7 @@ nested entry's availability for older SDKs. The contract is in
 
 ## Documents this changes
 
-- [ADR 0010](../adr/0010-sandboxes-run-on-the-host.md) records the product
+- [ADR 0011](../adr/0011-sandboxes-run-on-the-host.md) records the product
   decision. It supersedes `vm-stack-redesign.md`'s "sandboxes stay inside the
   System VM" row and its in-process `HvDriver` for sandboxes.
 - `docs/architecture/charter.md` "`runtime/` … is parked" and

@@ -1,4 +1,4 @@
-//! Composes the host sandbox location (ADR 0010) and keeps its cleanup
+//! Composes the host sandbox location (ADR 0011) and keeps its cleanup
 //! stream served.
 //!
 //! The location is part of the Machine host, not of the System VM: it is

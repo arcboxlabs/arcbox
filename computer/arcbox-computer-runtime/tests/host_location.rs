@@ -242,7 +242,7 @@ async fn a_vz_pause_is_refused_while_the_session_is_locked() {
 }
 
 /// The idle detector is held to the same rule: nothing schedules a VZ save
-/// while the Mac is locked (ADR 0010, decision 6). The computer stays up.
+/// while the Mac is locked (ADR 0011, decision 6). The computer stays up.
 #[tokio::test(start_paused = true)]
 async fn an_idle_vz_pause_does_not_save_while_the_session_is_locked() {
     let lock = Arc::new(SessionLock(AtomicBool::new(true)));

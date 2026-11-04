@@ -5,7 +5,7 @@
 //! holds the System VM, so nothing in the daemon boots through this driver.
 //! It is the engine of `arcbox-hv-driver`'s per-VM process
 //! (`arcbox-hv-vmm`), which serves the same port to the daemon over a
-//! socket (ADR 0010).
+//! socket (ADR 0011).
 //!
 //! - `render` — [`VmSpec`] → [`VmmConfig`](crate::VmmConfig), and a
 //!   checkpoint's spec with a [`RestoreSpec`] applied; pure and tested.

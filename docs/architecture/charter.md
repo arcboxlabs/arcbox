@@ -92,7 +92,7 @@ arcbox/
 ```
 
 `arcbox-oci` was activated on 2026-11-01 by the host sandboxes work
-([ADR 0010](../adr/0010-sandboxes-run-on-the-host.md)): the workload
+([ADR 0011](../adr/0011-sandboxes-run-on-the-host.md)): the workload
 contract in `computer/arcbox-computer-runtime` (`src/workload/`) builds a
 sandbox's OCI `config.json` from an image config and a create request, and
 translates it into the agent's start command. The crate moved to

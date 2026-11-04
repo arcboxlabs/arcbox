@@ -1,6 +1,6 @@
 # arcbox-host-net
 
-The macOS guest network for VMs that run on the host — the adapter of [`arcbox-vm-driver`](../arcbox-vm-driver)'s `GuestNetwork` port for host sandboxes ([ADR 0010](../../docs/adr/0010-sandboxes-run-on-the-host.md)), and the macOS counterpart of [`arcbox-tap-net`](../arcbox-tap-net). One `HostNetwork` owns:
+The macOS guest network for VMs that run on the host — the adapter of [`arcbox-vm-driver`](../arcbox-vm-driver)'s `GuestNetwork` port for host sandboxes ([ADR 0011](../../docs/adr/0011-sandboxes-run-on-the-host.md)), and the macOS counterpart of [`arcbox-tap-net`](../arcbox-tap-net). One `HostNetwork` owns:
 
 - an IPv4 `Pool` (`.1` is the gateway, `.2` onwards are leased lowest first). The pool address names a VM on the host — DNS, the sandbox API's `ip_address` — and nothing routes to it;
 - one userspace NAT datapath per VM (`arcbox_net::darwin::guest_nat`), so every guest boots on the same fixed link, `10.0.2.2/24` behind `10.0.2.1` (also its resolver), with no host bridge between guests (D1). That is `identity` under `AttachMode::Invariant`; `LegacySnapshot` is refused, since no host checkpoint predates the fixed link;

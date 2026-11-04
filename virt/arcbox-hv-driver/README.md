@@ -1,6 +1,6 @@
 # arcbox-hv-driver
 
-The Hypervisor.framework adapter for the [`arcbox-vm-driver`](../arcbox-vm-driver) port, one VMM process per VM. Hypervisor.framework allows one VM per process, and the daemon holds the System VM, so each VM this driver runs lives in its own `arcbox-hv-vmm` process ([ADR 0010](../../docs/adr/0010-sandboxes-run-on-the-host.md)). The process runs `arcbox_vmm::hv_driver::HvMachineDriver` on itself and serves it to the driver over `<runtime dir>/vmm.sock`; it logs to `<runtime dir>/vmm.log`.
+The Hypervisor.framework adapter for the [`arcbox-vm-driver`](../arcbox-vm-driver) port, one VMM process per VM. Hypervisor.framework allows one VM per process, and the daemon holds the System VM, so each VM this driver runs lives in its own `arcbox-hv-vmm` process ([ADR 0011](../../docs/adr/0011-sandboxes-run-on-the-host.md)). The process runs `arcbox_vmm::hv_driver::HvMachineDriver` on itself and serves it to the driver over `<runtime dir>/vmm.sock`; it logs to `<runtime dir>/vmm.log`.
 
 | Capability | How |
 |---|---|

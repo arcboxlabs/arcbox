@@ -3,7 +3,7 @@
 - Type: change
 - Area: `virt/arcbox-vmm` (`hv_driver`), `virt/arcbox-hv-driver`
 - Commits / PRs: host sandboxes workstream W1, branch `hs-w1-hv-driver`
-- Related: [ADR 0010](../adr/0010-sandboxes-run-on-the-host.md),
+- Related: [ADR 0011](../adr/0011-sandboxes-run-on-the-host.md),
   [host sandboxes design](../architecture/host-sandboxes.md),
   [plan](../plans/host-sandboxes-v1.md) W1,
   [HV checkpoint spike 3](../experiments/2026-10-31-hv-checkpoint-linux-spike.md)

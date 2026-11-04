@@ -86,7 +86,7 @@ pub struct Config {
     pub storage: StorageConfig,
     /// QEMU backend configuration.
     pub qemu: crate::qemu::QemuConfig,
-    /// Host sandbox location configuration (ADR 0010).
+    /// Host sandbox location configuration (ADR 0011).
     pub sandbox: SandboxConfig,
 }
 
@@ -609,7 +609,7 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Host sandbox location configuration (`[sandbox]`, ADR 0010).
+/// Host sandbox location configuration (`[sandbox]`, ADR 0011).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {

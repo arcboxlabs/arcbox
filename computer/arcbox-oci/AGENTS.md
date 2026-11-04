@@ -13,7 +13,7 @@ and `engine/arcbox-image`.
   computer's `config.json` from an image config and a create request
   (`bundle_spec`) and translates a spec into the guest agent's
   `StartCommand` (`Workload::from_spec`). Activated 2026-11-01 under
-  ADR 0010; the history is the `runtime/` paragraph of
+  ADR 0011; the history is the `runtime/` paragraph of
   `docs/architecture/charter.md`.
 - The VM is the isolation boundary. The consumer **rejects** hooks,
   namespaces, seccomp, capabilities, rlimits and devices, and every other

@@ -380,7 +380,7 @@ configuration.
     checkpointed`. No location accepts `mounts` in V1 yet (see `Create`),
     so this applies once one does.
   - **VZ while the session is locked**: a VZ save needs an unlocked macOS
-    console session (ADR 0010, decision 6). While the Mac is locked, or
+    console session (ADR 0011, decision 6). While the Mac is locked, or
     nobody is logged in at the console, a `Pause` and a `Checkpoint` on a
     VZ host sandbox are refused and the message names the session state
     (for example `vz: checkpoints need an unlocked console session; the

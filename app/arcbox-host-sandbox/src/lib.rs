@@ -1,4 +1,4 @@
-//! `arcbox-host-sandbox` — the host sandbox location (ADR 0010).
+//! `arcbox-host-sandbox` — the host sandbox location (ADR 0011).
 //!
 //! Composes the Sandbox API (`arcbox-sandbox-service`) over a
 //! `ComputerManager` whose computers are VMs on the Mac itself, next to the
@@ -79,7 +79,7 @@ pub enum Backend {
     #[default]
     Hv,
     /// Virtualization.framework, in the daemon's process. Checkpoints need
-    /// an unlocked console session (ADR 0010, decision 6).
+    /// an unlocked console session (ADR 0011, decision 6).
     Vz,
 }
 

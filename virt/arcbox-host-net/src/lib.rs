@@ -1,7 +1,7 @@
 //! `arcbox-host-net` — the macOS guest network for VMs that run on the host.
 //!
 //! The adapter of [`arcbox_vm_driver`]'s `GuestNetwork` port for host
-//! sandboxes (ADR 0010), the macOS counterpart of `arcbox-tap-net`. Each VM
+//! sandboxes (ADR 0011), the macOS counterpart of `arcbox-tap-net`. Each VM
 //! gets its own userspace NAT datapath (`arcbox_net::darwin::guest_nat`),
 //! so every guest boots on the same fixed link and no two guests share one
 //! (D1); the lease's pool address names the VM on the host and is published

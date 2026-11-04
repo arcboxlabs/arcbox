@@ -1,4 +1,4 @@
-# ADR 0010: Sandboxes run on the host, one VM each, with checkpoints in v1
+# ADR 0011: Sandboxes run on the host, one VM each, with checkpoints in v1
 
 - Status: accepted (2026-11-01); supersedes the sandbox rows of `docs/architecture/vm-stack-redesign.md` (the desktop row's "sandboxes stay inside the System VM" and the in-process `HvDriver` for sandboxes)
 - Deciders: ArcBox maintainers
