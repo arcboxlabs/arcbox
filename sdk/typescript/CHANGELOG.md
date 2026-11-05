@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/arcboxlabs/arcbox/compare/sdk-typescript-v0.1.6...sdk-typescript-v0.1.7) (2026-11-05)
+
+
+### Features
+
+* **sdk:** add run locations and per-location capabilities to the TypeScript SDK ([57c86c3](https://github.com/arcboxlabs/arcbox/commit/57c86c3ed5c322041175975da8dff34058e2b404))
+
 ## [0.1.6](https://github.com/arcboxlabs/arcbox/compare/sdk-typescript-v0.1.5...sdk-typescript-v0.1.6) (2026-10-07)
 
 
