@@ -2,7 +2,7 @@
 
 - Type: experiment
 - Area: `virt/arcbox-vz` (shim save/restore exports, `GenericPlatform` machine identifier); input to the host-side sandbox checkpoint design
-- Outcome: open (spike), stopped by a host condition. Every device set the production System VM attaches supports save/restore. Saving failed every time it was tried, because the Mac's screen was locked. Decision: **a VZ checkpoint is available only while the user's session is unlocked**. Follow-up 2026-11-01: with the session unlocked the same probe saves (16 MiB, ~130 ms for an idle 1 GiB guest) and restores, one state file restores into four VMs at once, and `VzDriver` passes the driver contract's checkpoint checks
+- Outcome: open (spike), stopped by a host condition. Every device set the production System VM attaches supports save/restore. Saving failed every time it was tried, because the Mac's screen was locked. Decision: **a VZ checkpoint is available only while the user's session is unlocked**. Follow-up 2026-11-01: with the session unlocked the same probe saves (16 MiB, ~130 ms for an idle 1 GiB guest) and restores, one state file restores into four VMs at once, and `VzDriver` passes the driver contract's checkpoint checks. Follow-up 2026-11-02 (locked): restore fails with "permission denied", one save 20 s after the lock succeeded, and the driver refuses both before touching the guest
 - Probe: `virt/arcbox-vz/examples/checkpoint_vz_spike.rs`, with the guest of [the HV Linux spike](2026-10-31-hv-checkpoint-linux-spike.md)
 - Follows: [the HV TCP-reset spike](2026-10-31-hv-checkpoint-tcp-reset-spike.md)
 - Host / guest: Apple M5 Pro (Mac17,9), 48 GB, macOS 26.5 (25F71). Release
@@ -200,8 +200,35 @@ In the helper's log, every save first loads a stored Secure Enclave key
 
 ### Still open
 
-- A save and a restore while locked through the new code
-  (`checkpoint_probe locked <dir>`, `checkpoint_probe restore <dir> <n>`):
-  the driver refuses a save with `Error::Unavailable` before it pauses
-  the guest, and whether VZ can restore while locked is unmeasured.
 - Restore on another Mac or user account.
+
+## Follow-up (2026-11-02): the locked runs
+
+Same host, build, guest and probes. A watcher polled `ioreg` every 10 s,
+waited until `IOConsoleLocked` had been true for 20 s, then ran each
+probe once, unattended. The session locked at 01:47:42
+(`IOConsoleLocked` and `CGSSessionScreenIsLocked` both true) and was
+still locked when the last probe finished at 01:47:52.
+
+| Run | Result |
+|---|---|
+| spike `restore` of an unlocked save | refused: `restore_state`: "failed to restore with error “permission denied”" |
+| spike `save`, idle guest | OK; pause 0.2 ms, save 136 ms, 16 MiB state file, disk fsync + clone 10 ms |
+| driver `checkpoint_probe locked` | `checkpoint_blocker()` is `Some(Locked)`; the checkpoint returns `Unavailable` after 0.1 ms and the guest keeps running (ticks 1 → 4, no failures) |
+| driver `checkpoint_probe restore`, 2 clones of an unlocked image | both refused with `Unavailable` before VZ is called |
+
+### Findings
+
+9. **Restore needs an unlocked session.** VZ refuses a valid state file
+   while locked with "permission denied", the same file the unlocked runs
+   restored. Finding 3's first consequence holds.
+10. **A save right after the lock can succeed.** This save ran 20–30 s
+    after the lock and wrote a normal state file, unlike every save in the
+    first runs, where the session had been locked far longer. A grace
+    period after locking would explain both, but one run cannot show it,
+    and nothing says how long it lasts. The decision stands unchanged:
+    the driver refuses a save while locked rather than rely on a window
+    it cannot see.
+11. **The driver's gate works as built.** A locked save fails before the
+    guest is paused and leaves it running; a locked restore fails before
+    VZ is asked.
