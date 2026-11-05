@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4](https://github.com/arcboxlabs/arcbox/compare/v0.11.3...v0.11.4) (2026-11-05)
+
+
+### Features
+
+* **computer:** await the guest clock push on the host location ([9d312a5](https://github.com/arcboxlabs/arcbox/commit/9d312a5f7d9cf5e136af83398c5f253a31da9d15))
+* **computer:** build a computer's OCI spec from image config and request ([ccf8669](https://github.com/arcboxlabs/arcbox/commit/ccf8669b76b8bd951552b9ca6fdc57cc087645a2))
+* **computer:** convert a pulled image into a cached rootfs ([b144732](https://github.com/arcboxlabs/arcbox/commit/b1447328f20ae63a8bd0fa45c4a702afb2fcbc02))
+* **computer:** key the warm cache by the macOS build ([4b482c9](https://github.com/arcboxlabs/arcbox/commit/4b482c95a3406924c90a3171c3160cc4a73c9848))
+* **computer:** locate and check the vm-agent a computer boots ([7ca35d3](https://github.com/arcboxlabs/arcbox/commit/7ca35d3dc2c3ef620593aa403a649fac23d16282))
+* **computer:** reject OCI isolation fields in the workload contract ([e23aa73](https://github.com/arcboxlabs/arcbox/commit/e23aa739d8bfd9c45dc309a7af9bbeaca2178b6e))
+* **computer:** resolve docker:&lt;ref&gt; templates and pull them from the registry ([ccbcf59](https://github.com/arcboxlabs/arcbox/commit/ccbcf591559a021259e690243a348a812c1d8211))
+* **computer:** translate an OCI spec into the agent's start command ([9f6d746](https://github.com/arcboxlabs/arcbox/commit/9f6d74600af04e92e9a17af8a6875bb872bddfbc))
+* **computer:** write vm-agent into the rootfs while converting it ([84bf97c](https://github.com/arcboxlabs/arcbox/commit/84bf97c3849bb9c3973633d186fd238d352cea2d))
+* **core:** reach the host sandbox location through get_agent ([de49a92](https://github.com/arcboxlabs/arcbox/commit/de49a925b946f2d189569c8000d3ef89401ac1b9))
+* **daemon:** compose the host sandbox location at host admission ([5d719b5](https://github.com/arcboxlabs/arcbox/commit/5d719b57f4a8e421dfa9c0d14e6d7de11aabb8fb))
+* **daemon:** let [sandbox] enabled = false skip the host location ([e95038a](https://github.com/arcboxlabs/arcbox/commit/e95038afb763aae6a2cbfb28d8d399d49afb4313))
+* **dhcp:** unicast replies to clients with an address ([a44657c](https://github.com/arcboxlabs/arcbox/commit/a44657c60535ba095fba997d4e67b3882d9f4198))
+* **host-net:** add the host sandbox address pool and DNS seam ([1a6d48d](https://github.com/arcboxlabs/arcbox/commit/1a6d48dc4e32d99dbdfe7539c9ee74a5f2c0226b))
+* **host-net:** lease host sandbox NICs over a per-VM datapath ([e5107c4](https://github.com/arcboxlabs/arcbox/commit/e5107c489d825061a9af3221df8668d9a329357c))
+* **host-net:** run the datapath for VZ sandboxes in the network ([7e47add](https://github.com/arcboxlabs/arcbox/commit/7e47add97b912f9bf0a8fcbaaf3cbb78d6b1bb8f))
+* **host-net:** run the quarantine protocol and the GuestNetwork contract ([24af584](https://github.com/arcboxlabs/arcbox/commit/24af584838671d29061f403c8289d34a9cff7253))
+* **host-sandbox:** compose the host sandbox location ([f30fb0e](https://github.com/arcboxlabs/arcbox/commit/f30fb0e7faee05f66ea8d92755424fb49e4024f4))
+* **host-sandbox:** export docker:&lt;ref&gt; images from the System VM (D5) ([7731df2](https://github.com/arcboxlabs/arcbox/commit/7731df2a590cff4c5cc0122093294d215b83ef75))
+* **hv-driver:** boot, prepare and adopt VMs in arcbox-hv-vmm processes ([17e0798](https://github.com/arcboxlabs/arcbox/commit/17e0798ccfc1f4cdb006cec82c6facaec8dff8b0))
+* **hv-driver:** carry the guest console out of the VMM process ([55051fe](https://github.com/arcboxlabs/arcbox/commit/55051febf19ad6cb7859e3a17bbcdda03143cf02))
+* **hv-driver:** checkpoint, balloon, port forward and debug over the socket ([217deef](https://github.com/arcboxlabs/arcbox/commit/217deef605f81b727b12923e6dc0f2d990db76c9))
+* **hv-driver:** define the VMM process control protocol ([f78f314](https://github.com/arcboxlabs/arcbox/commit/f78f314215144a1f6da6ec1d192c4ee7e8e732c5))
+* **hv-driver:** frame the VMM control socket with descriptor passing ([6228021](https://github.com/arcboxlabs/arcbox/commit/62280215e74ce027500a7b269baef72fe6ed13e9))
+* **hv-driver:** serve one HV VM per arcbox-hv-vmm process ([f6d8b5a](https://github.com/arcboxlabs/arcbox/commit/f6d8b5ab2301cb2abbf6c3f5faf40e9e3f4afa53))
+* **hv-driver:** serve PreparedVm and VmHandle over the control socket ([dc63122](https://github.com/arcboxlabs/arcbox/commit/dc6312203c0e4b7c5d082eb0babba317d78615eb))
+* **hv-driver:** track a VMM process and call its control socket ([55c8715](https://github.com/arcboxlabs/arcbox/commit/55c87157541d36680289513754081d58300cd2b2))
+* **sandbox-api:** report capabilities per run location and accept run_location ([bbd5710](https://github.com/arcboxlabs/arcbox/commit/bbd5710f343d0aebfd70b62cdd66a75d797c0b8c))
+* **sandbox-api:** route Sandbox API requests to the host location ([bfdf1f8](https://github.com/arcboxlabs/arcbox/commit/bfdf1f8e31458ee47a31d76c91235756c26f3112))
+* **sandbox:** bind checkpoints to the macOS build they were written on ([fb2215b](https://github.com/arcboxlabs/arcbox/commit/fb2215ba6d998036bf07d5eb9bf8a6016e200603))
+* **sandbox:** let the composer say which side publishes host ports ([8f42da6](https://github.com/arcboxlabs/arcbox/commit/8f42da6749bbb132628d31ebd1bbdefe8eaee8c7))
+* **sandbox:** report host capabilities and refuse pauses that cannot run ([185fe3e](https://github.com/arcboxlabs/arcbox/commit/185fe3ed99903de3b5f5ca7537e6b6c4ce01bf0c))
+* **sandbox:** run computers on drivers without Prepare ([6643236](https://github.com/arcboxlabs/arcbox/commit/6643236dac1c60d2f99b0c93ce7c8a7aa9c13948))
+* **sandbox:** run computers on drivers without Staging ([b75401c](https://github.com/arcboxlabs/arcbox/commit/b75401c83990b87c92d075f513e8d08a022e2e9a))
+* **sdk:** add run locations and per-location capabilities to the Rust SDK ([33ede81](https://github.com/arcboxlabs/arcbox/commit/33ede815f061a6007127e4d202c62c2747834827))
+* **snapshot:** clonefile copy-on-write backend for host sandboxes ([0009ede](https://github.com/arcboxlabs/arcbox/commit/0009edeadb64c75bddf230132e7ef97fb09187a0))
+* **snapshot:** recover half-made clones on the host CoW backend ([a039ae2](https://github.com/arcboxlabs/arcbox/commit/a039ae2acbd99e97970f26cf7898adfde51b6ca0))
+* **virtio:** checkpointed config and used-index cursors ([71ab070](https://github.com/arcboxlabs/arcbox/commit/71ab0706973cf0a465296b26635e513c76fbbda5))
+* **vmm:** apply a RestoreSpec to a checkpointed HV spec ([d020573](https://github.com/arcboxlabs/arcbox/commit/d020573b85ca269258fe7f6ccadbb7ec8ab2a501))
+* **vmm:** checkpoint and restore through the in-process HV driver ([e053ebf](https://github.com/arcboxlabs/arcbox/commit/e053ebfa96bc96b4a2bacfeb22aff16d51cb43ef))
+* **vmm:** HV checkpoint saves device config, MAC, macOS build ([6ddd02d](https://github.com/arcboxlabs/arcbox/commit/6ddd02de790681d96d5c62e634115bd074f875e8))
+* **vz-driver:** checkpoint VZ VMs into vz/v1 images ([5689d0b](https://github.com/arcboxlabs/arcbox/commit/5689d0bd2ef16fc7db534f61934e6fd225de5318))
+* **vz-driver:** restore vz/v1 checkpoints ([65c4720](https://github.com/arcboxlabs/arcbox/commit/65c47205a75b302f05f7c005abb4f6f996b56f26))
+* **vz:** report the console session before a VM state save ([cdcfb6f](https://github.com/arcboxlabs/arcbox/commit/cdcfb6fea938f03b8569467bb7d863a02f143a1c))
+
+
+### Bug Fixes
+
+* **computer:** ask for dirty tracking only where Firecracker runs ([d8bb6dc](https://github.com/arcboxlabs/arcbox/commit/d8bb6dc924587fc2db20232c0aa302a1bccfa3d8))
+* **computer:** name the missing oci2rootfs API when a host build injects vm-agent ([566a830](https://github.com/arcboxlabs/arcbox/commit/566a830e6650cc26c3ef9a52eed5a14c05fcb495))
+* **computer:** reach HV guests from the host location ([ac35239](https://github.com/arcboxlabs/arcbox/commit/ac35239d53321278720fc3f401224ad8af3ce0a3))
+* **computer:** restore a template's snapshot on the host location ([8b1908c](https://github.com/arcboxlabs/arcbox/commit/8b1908cadf19f4c8dc375d5cadeda5a8ea244108))
+* **docker:** forward publishes to the guest on the host port ([1d4320e](https://github.com/arcboxlabs/arcbox/commit/1d4320efb1ccb70e21c99921a67b28be6eccfdc3))
+* **host-net:** accept forwards whose host port differs from the guest's ([43d4405](https://github.com/arcboxlabs/arcbox/commit/43d44054e054c71d9c3fdda0ea875f52d1d7e162))
+* **host-sandbox:** leave the host location off where the Mac cannot run a VM ([46aeb3a](https://github.com/arcboxlabs/arcbox/commit/46aeb3a9d274819e0c8f2264d46a210768391de4))
+* **host-sandbox:** stop publishing host sandbox names nothing routes to ([6d9e907](https://github.com/arcboxlabs/arcbox/commit/6d9e907dd18f5fe51530d98abcf356d5224dcf5d))
+* **net:** deliver inbound forwards on the rule's guest port ([49912ac](https://github.com/arcboxlabs/arcbox/commit/49912ac42c494f7402fef037e7d020f72850b157))
+* **sandbox:** keep a reinstated pause's checkpoint across a failed resume ([1c2b791](https://github.com/arcboxlabs/arcbox/commit/1c2b7919adc6be0db9f7aa5d274894f32d8fbced))
+* **sdk:** clear the Rust SDK's cached capabilities when a refresh fails ([56ee74c](https://github.com/arcboxlabs/arcbox/commit/56ee74c3b23060e6a158c3a0e766da887ac5bc59))
+* **snapshot:** catalogue a checkpoint image in any driver's layout ([5ee492f](https://github.com/arcboxlabs/arcbox/commit/5ee492f11cce3c4943106a87cd2b5bf785ac936e))
+* **splicetcp:** split large-frame retransmits into bounded frames ([a388464](https://github.com/arcboxlabs/arcbox/commit/a388464f5c5700cabb326a96c677939e55f02086))
+* **vmm:** HV balloon target raises config interrupt ([c7ace6f](https://github.com/arcboxlabs/arcbox/commit/c7ace6f93c67d1218208dc7db17fe2e90f7cbdd8))
+* **vsock:** restored device continues host ports past held connections ([4520dbf](https://github.com/arcboxlabs/arcbox/commit/4520dbfe4141da4a584eb1c790a4edf9941d021a))
+
+
+### Performance Improvements
+
+* **vmm:** HV checkpoint writes only pages the guest dirtied ([bc0e916](https://github.com/arcboxlabs/arcbox/commit/bc0e916b74ddbbd3d8531745e16ce388390c4be6))
+
+
+### Code Refactoring
+
+* **computer:** move the Sandbox API service out of the guest agent ([29a1e97](https://github.com/arcboxlabs/arcbox/commit/29a1e97cc20495c109867d611e62aafbea0a2ebb))
+* **oci:** move arcbox-oci next to the workload contract ([0f994d1](https://github.com/arcboxlabs/arcbox/commit/0f994d1ad1380a6860b632cac181b3382af83d4e))
+* **vmm:** serve the HV driver port over Vmm instead of HvMachine ([8d7591c](https://github.com/arcboxlabs/arcbox/commit/8d7591cf2bafda16e14686517dd1229ce6f5c1b8))
+
+
+### Tests
+
+* **computer:** follow the rootfs build that injects while converting ([30f4456](https://github.com/arcboxlabs/arcbox/commit/30f4456e97ab2273fdba40370811e5f9e52a2bbb))
+* **e2e:** create, exec, pause, resume and remove a host sandbox ([b9f510d](https://github.com/arcboxlabs/arcbox/commit/b9f510d008da9231d3475eccd90389ac521d467e))
+* **e2e:** keep the nested targets nested and run the SDKs on the host ([d8a7fba](https://github.com/arcboxlabs/arcbox/commit/d8a7fba41bb216ecbf4c3db2687c9470869acdc2))
+* **host-net:** cover placement, replay gating and DNS publication ([227f65d](https://github.com/arcboxlabs/arcbox/commit/227f65d8df3f85502e8849b707fea9957dc9cadc))
+* **host-net:** prove two VMs' datapaths cannot reach each other ([0ecaa5e](https://github.com/arcboxlabs/arcbox/commit/0ecaa5e57f9e6e4fe3097f05280e02cb9563a2d4))
+* **hv-driver:** check side-by-side VMs and resume in a new process ([1533630](https://github.com/arcboxlabs/arcbox/commit/15336304aedafe8a7b074d0d92a17632929e691a))
+* **hv-driver:** run the driver contract against real VMM processes ([9ecbaf3](https://github.com/arcboxlabs/arcbox/commit/9ecbaf3fb955b54a56b8f2623aa4e1c09110bb11))
+* **net:** active open aborted at checkpoint ([b776856](https://github.com/arcboxlabs/arcbox/commit/b7768564457ef18c26b92143fd414b2f6c66c53e))
+* **sandbox:** drive the manager over host-shaped drivers ([59a537b](https://github.com/arcboxlabs/arcbox/commit/59a537b65bcf323cc1c903e666ee1e768fb86a83))
+* **snapshot:** cover the clonefile CoW lifecycle on macOS ([e27909d](https://github.com/arcboxlabs/arcbox/commit/e27909db7e5dd2b6f5fd27bd0ad8bac3a6588002))
+* **vmm:** probe covers balloon, console, saved MAC, second generation ([2c714a1](https://github.com/arcboxlabs/arcbox/commit/2c714a172aea3fef39fbe7aa34982fa7cc3049c6))
+* **vmm:** probe covers DHCP renewal and pending connects ([44c9794](https://github.com/arcboxlabs/arcbox/commit/44c979434d64cc2df5ad2debe7c3d01847f1efde))
+* **vmm:** probe holds a vsock connection across the checkpoint ([02c9a02](https://github.com/arcboxlabs/arcbox/commit/02c9a023933a359f7f3e3867bf19880af344ad74))
+* **vz-driver:** add the VZ checkpoint probe ([3e63b35](https://github.com/arcboxlabs/arcbox/commit/3e63b35f0ac4f727acd896077ccc12d2520a8d0f))
+* **vz-driver:** run the checkpoint contract checks against VZ ([7d55b69](https://github.com/arcboxlabs/arcbox/commit/7d55b692f3a986d8eb82bdcb313a1b064595aa85))
+
+
+### Documentation
+
+* **adr:** renumber the host sandbox ADR to 0011 ([2fe1097](https://github.com/arcboxlabs/arcbox/commit/2fe1097d8b2468608b438841bd273706d28c7609))
+* **computer:** list arcbox-oci and the workload contract ([15c3dbe](https://github.com/arcboxlabs/arcbox/commit/15c3dbe2228a65bc304bf463ce5cf717d4bb5977))
+* **experiments:** record the locked VZ checkpoint runs ([31419cc](https://github.com/arcboxlabs/arcbox/commit/31419ccf96e624f9e40724c936c86147e1ca92bc))
+* **experiments:** record the unlocked VZ checkpoint runs ([dc8b77a](https://github.com/arcboxlabs/arcbox/commit/dc8b77a5db11c63780f018fa59797a41a34104ca))
+* HV checkpoint gaps experiment ([4d20588](https://github.com/arcboxlabs/arcbox/commit/4d20588a6cdada88e5b7da91dc0cd3a43dbaa21a))
+* **logs:** record the host sandbox composition and its first runs ([0c3ff63](https://github.com/arcboxlabs/arcbox/commit/0c3ff6373e3c8e88c9d4d979dd6228000b96a74b))
+* **sandbox-api:** document run locations, per-location capabilities and pause refusals ([b286ce7](https://github.com/arcboxlabs/arcbox/commit/b286ce71c515706ec3da1039e16887a78ca50e74))
+* **sandbox-api:** point at the connect handlers ([d788207](https://github.com/arcboxlabs/arcbox/commit/d78820728a7aca965dc378a01407ca162e9f190d))
+* **sandbox:** design host sandboxes and record ADR 0010 ([d0f4dd9](https://github.com/arcboxlabs/arcbox/commit/d0f4dd9b331a2c1594aefa2f9f4c0344a78c52ed))
+* **sandbox:** host sandboxes v1 execution plan ([0254687](https://github.com/arcboxlabs/arcbox/commit/0254687e28d90ed8fb411c4d91c386b146451d77))
+* **sandbox:** mark the checkpoint gaps wave 1 closed ([31e3596](https://github.com/arcboxlabs/arcbox/commit/31e35968b51b391721b13f4a9e39a7a59a162986))
+* **snapshot:** describe the device-mapper and clonefile CoW backends ([5b24162](https://github.com/arcboxlabs/arcbox/commit/5b2416269c16f44dd4ee7414661bfeff48fa00c5))
+
+
+### Build System
+
+* **host-sandbox:** ship and sign arcbox-hv-vmm next to the daemon ([cfcac4a](https://github.com/arcboxlabs/arcbox/commit/cfcac4a122aa10f85dbc76cdc6bea13af9c3a900))
+
+
+### Miscellaneous Chores
+
+* **xtask:** keep orchestrators off arcbox-host-net ([03e78de](https://github.com/arcboxlabs/arcbox/commit/03e78de9331c5c3f3f4767cd37fce460de145fc7))
+
 ## [0.11.3](https://github.com/arcboxlabs/arcbox/compare/v0.11.2...v0.11.3) (2026-11-03)
 
 
