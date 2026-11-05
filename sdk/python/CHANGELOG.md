@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/arcboxlabs/arcbox/compare/sdk-python-v0.1.4...sdk-python-v0.1.5) (2026-11-05)
+
+
+### Features
+
+* **sdk:** add run locations and per-location capabilities to the Python SDK ([0aac438](https://github.com/arcboxlabs/arcbox/commit/0aac43852252f1e6f715714db7649cd88c94297e))
+
 ## [0.1.4](https://github.com/arcboxlabs/arcbox/compare/sdk-python-v0.1.3...sdk-python-v0.1.4) (2026-10-07)
 
 
