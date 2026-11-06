@@ -70,6 +70,6 @@ arch.x86_64.sha256 = "eb3cc921de1aed02348821f4a653705a33b012b6a1da7466e577673c5c
 [[tools]]
 name = "kubectl"
 group = "kubernetes"
-version = "1.37.1"
-arch.arm64.sha256 = "fd65982c97ddad3106754b69ffa196d0e543aa591930ae52aed1adfb92f8c77f"
-arch.x86_64.sha256 = "6851381c486ff6edd691623e3d65c87cb9a5b02887ff8fbbb38d8a031b748387"
+version = "1.37.2"
+arch.arm64.sha256 = "55701af0d51815ee335f240e48acf0959c3c23017ed3fa816e880c4a92bae581"
+arch.x86_64.sha256 = "88379aff5c8111de6be0a394adffba2819e44cde269f3ab23cef76de1a48eaa8"
